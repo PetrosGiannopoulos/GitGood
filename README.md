@@ -111,3 +111,6 @@ GitGood/
 ⚜ Deus vult ⚜
 
 ![GitGood Preview](src/assets/screenshot1.png)
+![GitGood Preview](src/assets/screenshot2.png)
+![GitGood Preview](src/assets/screenshot3.png)
+![GitGood Preview](src/assets/screenshot4.png)
