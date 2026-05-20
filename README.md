@@ -109,3 +109,5 @@ GitGood/
 - **Cinzel + MedievalSharp + EB Garamond + JetBrains Mono** — typography
 
 ⚜ Deus vult ⚜
+
+![GitGood Preview](src/assets/screenshot1.png)
