@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>GitGood</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700;900&family=MedievalSharp&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <style id="error-banner-style">
+    #error-banner {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
+      background: #7a1414; color: #fff; padding: 10px 16px;
+      font-family: monospace; font-size: 12px; border-bottom: 2px solid #d4302f;
+      max-height: 200px; overflow-y: auto; display: none;
+    }
+    #error-banner.show { display: block; }
+    #error-banner button { float: right; background: #fff; color: #7a1414; border: 0; padding: 2px 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="error-banner">
+    <button onclick="document.getElementById('error-banner').classList.remove('show')">close</button>
+    <strong>Error:</strong> <span id="error-text"></span>
+  </div>
+  <script>
+    // Catch ALL errors and show them visibly so user can see what's happening
+    window.addEventListener('error', (e) => {
+      const banner = document.getElementById('error-banner');
+      const text = document.getElementById('error-text');
+      if (banner && text) {
+        text.textContent = (e.message || 'Unknown error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?');
+        banner.classList.add('show');
+      }
+      console.error('[GitGood Error]', e);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      const banner = document.getElementById('error-banner');
+      const text = document.getElementById('error-text');
+      const msg = (e.reason && (e.reason.message || e.reason)) || 'Unhandled rejection';
+      if (banner && text) {
+        text.textContent = String(msg);
+        banner.classList.add('show');
+      }
+      console.error('[GitGood Rejection]', e.reason);
+    });
+  </script>
+
+  <!-- ============== WELCOME SCREEN ============== -->
+  <div id="welcome-screen" class="screen">
+    <div class="welcome-bg">
+      <div class="welcome-cross"></div>
+    </div>
+    <div class="welcome-content">
+      <div class="welcome-emblem">
+        <svg viewBox="0 0 100 100" class="emblem-shield">
+          <path d="M50 5 L90 20 L90 55 Q90 80 50 95 Q10 80 10 55 L10 20 Z"
+                fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M50 25 L50 75 M30 50 L70 50" stroke="currentColor" stroke-width="3"/>
+        </svg>
+      </div>
+      <h1 class="welcome-title">GitGood</h1>
+      <p class="welcome-tagline">⚜ Forged for the Faithful Coder ⚜</p>
+
+      <div class="welcome-actions">
+        <button class="btn-medieval primary" id="welcome-open">
+          <span class="btn-icon">📜</span> Open Repository
+        </button>
+        <button class="btn-medieval" id="welcome-clone">
+          <span class="btn-icon">⚔</span> Clone from Remote
+        </button>
+        <button class="btn-medieval" id="welcome-init">
+          <span class="btn-icon">✠</span> Initialize New Repository
+        </button>
+        <button class="btn-medieval" id="welcome-sshkey">
+          <span class="btn-icon">⚷</span> Forge SSH Key
+        </button>
+        <button class="btn-medieval" id="welcome-settings">
+          <span class="btn-icon">⚙</span> Settings
+        </button>
+      </div>
+
+      <div class="welcome-recent" id="welcome-recent">
+        <h3 class="recent-title">— Recent Chronicles —</h3>
+        <div class="recent-list" id="recent-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== MAIN APP SCREEN ============== -->
+  <div id="app-screen" class="screen hidden">
+
+    <!-- Top toolbar -->
+    <header class="toolbar">
+      <div class="toolbar-left">
+        <div class="brand">
+          <svg viewBox="0 0 100 100" class="brand-shield">
+            <path d="M50 5 L90 20 L90 55 Q90 80 50 95 Q10 80 10 55 L10 20 Z"
+                  fill="none" stroke="currentColor" stroke-width="3"/>
+            <path d="M50 25 L50 75 M30 50 L70 50" stroke="currentColor" stroke-width="3.5"/>
+          </svg>
+          <span class="brand-name">GitGood</span>
+        </div>
+        <div class="repo-info" id="repo-info">
+          <span class="repo-label">No realm</span>
+        </div>
+      </div>
+
+      <div class="toolbar-center">
+        <button class="tool-btn" id="btn-fetch" title="Fetch from remote">
+          <span class="tool-icon">⤓</span><span>Fetch</span>
+        </button>
+        <button class="tool-btn" id="btn-pull" title="Pull from remote">
+          <span class="tool-icon">↓</span><span>Pull</span>
+          <span class="badge" id="pull-badge" style="display:none">0</span>
+        </button>
+        <button class="tool-btn" id="btn-push" title="Push to remote">
+          <span class="tool-icon">↑</span><span>Push</span>
+          <span class="badge" id="push-badge" style="display:none">0</span>
+        </button>
+        <div class="tool-sep"></div>
+        <button class="tool-btn" id="btn-branch" title="Branches">
+          <span class="tool-icon">⑂</span><span>Branch</span>
+        </button>
+        <button class="tool-btn" id="btn-stash" title="Stash">
+          <span class="tool-icon">⚿</span><span>Stash</span>
+        </button>
+        <div class="tool-sep"></div>
+        <button class="tool-btn" id="btn-refresh" title="Refresh">
+          <span class="tool-icon">⟳</span><span>Refresh</span>
+        </button>
+      </div>
+
+      <div class="toolbar-right">
+        <button class="tool-btn ghost" id="btn-settings" title="Settings">
+          <span class="tool-icon">⚙</span>
+        </button>
+        <button class="tool-btn ghost" id="btn-open-folder" title="Open in file explorer">
+          <span class="tool-icon">⛬</span>
+        </button>
+        <button class="tool-btn ghost" id="btn-close-repo" title="Close repository">
+          <span class="tool-icon">✕</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Conflict / ongoing-operation banner -->
+    <div id="conflict-banner" class="conflict-banner hidden">
+      <div class="conflict-banner-icon">⚔</div>
+      <div class="conflict-banner-body">
+        <div class="conflict-banner-title" id="conflict-banner-title">Merge Conflict</div>
+        <div class="conflict-banner-subtitle" id="conflict-banner-subtitle">— files need resolution —</div>
+      </div>
+      <div class="conflict-banner-actions">
+        <button class="btn-medieval" id="conflict-banner-view">⚜ Resolve</button>
+        <button class="btn-medieval primary" id="conflict-banner-continue" disabled>✓ Continue</button>
+        <button class="btn-medieval danger" id="conflict-banner-abort">✕ Abort</button>
+      </div>
+    </div>
+
+    <!-- Main body: 3-pane layout -->
+    <main class="workspace">
+
+      <!-- Left sidebar: branches, remotes, stashes -->
+      <aside class="sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-header">
+            <span>⚜ Current Banner</span>
+          </div>
+          <div class="current-branch" id="current-branch">—</div>
+        </div>
+
+        <div class="sidebar-section collapsible" id="section-local">
+          <div class="sidebar-header clickable" data-target="local-branches">
+            <span class="caret">▾</span>
+            <span>Local Branches</span>
+            <span class="count" id="local-count">0</span>
+          </div>
+          <ul class="sidebar-list" id="local-branches"></ul>
+        </div>
+
+        <div class="sidebar-section collapsible" id="section-remote">
+          <div class="sidebar-header clickable" data-target="remote-branches">
+            <span class="caret">▾</span>
+            <span>Remote Branches</span>
+            <span class="count" id="remote-count">0</span>
+          </div>
+          <ul class="sidebar-list" id="remote-branches"></ul>
+        </div>
+
+        <div class="sidebar-section collapsible collapsed" id="section-disk">
+          <div class="sidebar-header clickable" data-target="disk-body">
+            <span class="caret">▾</span>
+            <span>⌬ Disk Management</span>
+            <span class="count" id="disk-total-pill">—</span>
+          </div>
+          <div id="disk-body" class="disk-body">
+            <div class="disk-loading" id="disk-loading">Click to load…</div>
+            <div class="disk-progress hidden" id="disk-progress">
+              <div class="disk-progress-bar"><div class="disk-progress-bar-fill"></div></div>
+              <div class="disk-progress-label">Scanning…</div>
+              <div class="disk-progress-detail"></div>
+              <button class="mini-btn" id="disk-progress-cancel" type="button">✕ Cancel</button>
+            </div>
+
+            <div class="disk-summary" id="disk-summary" style="display:none">
+              <div class="disk-row total">
+                <span class="disk-label">⚜ Repo Total</span>
+                <span class="disk-value" id="disk-grand-total">—</span>
+              </div>
+              <div class="disk-bar"><div class="disk-bar-fill" id="disk-bar-fill"></div></div>
+              <div class="disk-legend" id="disk-legend"></div>
+
+              <div class="disk-row">
+                <span class="disk-label">Working tree</span>
+                <span class="disk-value" id="disk-working"></span>
+              </div>
+              <div class="disk-row">
+                <span class="disk-label">.git directory</span>
+                <span class="disk-value" id="disk-gitdir"></span>
+              </div>
+              <div class="disk-subrow">
+                <span class="disk-label">↳ Packed objects</span>
+                <span class="disk-value" id="disk-packed"></span>
+              </div>
+              <div class="disk-subrow">
+                <span class="disk-label">↳ Loose objects</span>
+                <span class="disk-value" id="disk-loose"></span>
+              </div>
+              <div class="disk-subrow">
+                <span class="disk-label">↳ Reflog / logs</span>
+                <span class="disk-value" id="disk-logs"></span>
+              </div>
+              <div class="disk-subrow" id="disk-lfs-row" style="display:none">
+                <span class="disk-label">↳ LFS cache</span>
+                <span class="disk-value" id="disk-lfs"></span>
+              </div>
+
+              <div class="disk-counts">
+                <span><strong id="disk-c-local">0</strong> local</span>
+                <span><strong id="disk-c-remote">0</strong> remote</span>
+                <span><strong id="disk-c-tags">0</strong> tags</span>
+                <span><strong id="disk-c-stash">0</strong> stash</span>
+                <span><strong id="disk-c-reflog">0</strong> reflog</span>
+              </div>
+
+              <div class="disk-actions">
+                <button class="mini-btn" id="disk-refresh" title="Recalculate sizes">⟳ Refresh</button>
+                <button class="mini-btn" id="disk-gc" title="Pack loose objects (git gc)">⚒ GC</button>
+                <button class="mini-btn" id="disk-gc-aggressive" title="Aggressive GC — slower, max compression">⚔ GC Aggressive</button>
+                <button class="mini-btn" id="disk-prune" title="Drop unreachable loose objects">✕ Prune</button>
+                <button class="mini-btn" id="disk-repack" title="Repack all objects">⌬ Repack</button>
+                <button class="mini-btn" id="disk-reflog" title="Expire reflog entries">↶ Expire Reflog</button>
+                <button class="mini-btn" id="disk-merged" title="Show merged branches that can be safely deleted">⑂ Cleanup Branches…</button>
+                <button class="mini-btn" id="disk-largest" title="Show the largest objects in the repo">⌗ Largest Objects…</button>
+                <button class="mini-btn" id="disk-lfs-prune" title="Prune unused Git LFS objects" style="display:none">⌖ LFS Prune</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-section collapsible" id="section-stashes">
+          <div class="sidebar-header clickable" data-target="stash-list">
+            <span class="caret">▾</span>
+            <span>Stashes</span>
+            <span class="count" id="stash-count">0</span>
+          </div>
+          <ul class="sidebar-list" id="stash-list"></ul>
+        </div>
+
+        <div class="sidebar-section collapsible" id="section-remotes">
+          <div class="sidebar-header clickable" data-target="remote-list">
+            <span class="caret">▾</span>
+            <span>Remotes</span>
+            <span class="count" id="remote-list-count">0</span>
+          </div>
+          <ul class="sidebar-list" id="remote-list"></ul>
+        </div>
+      </aside>
+
+      <!-- Center: graph / branches / history / changes -->
+      <section class="center-panel">
+        <div class="tabs">
+          <button class="tab active" data-tab="graph">⚔ Graph</button>
+          <button class="tab" data-tab="branches">⑂ Branches</button>
+          <button class="tab" data-tab="history">⌛ History</button>
+          <button class="tab" data-tab="changes">
+            ⚒ Changes
+            <span class="tab-badge" id="changes-tab-badge" style="display:none">0</span>
+          </button>
+        </div>
+
+        <!-- Graph tab -->
+        <div class="tab-panel active" data-panel="graph">
+          <div class="graph-layout">
+            <div class="graph-toolbar">
+              <span class="graph-title">⚜ Chronicle of Banners ⚜</span>
+              <span class="graph-spacer"></span>
+              <label class="mini-btn-label" title="Number of commits to load">
+                <input type="number" id="graph-limit" value="300" min="50" max="5000" step="50" class="mini-input" />
+                <span>commits</span>
+              </label>
+              <button class="mini-btn" id="graph-refresh" title="Reload graph">⟳ Refresh</button>
+            </div>
+            <div class="graph-body">
+              <div class="graph-container" id="graph-container">
+                <div class="empty-state">
+                  <div class="empty-icon">⚔</div>
+                  <p>The chronicle is empty.</p>
+                </div>
+              </div>
+              <div class="pane-resizer" data-resizer="graph" data-target="graph-body" data-cols="1fr 380px" title="Drag to resize"></div>
+              <div class="graph-detail" id="graph-detail">
+                <div class="empty-state">
+                  <div class="empty-icon">⚜</div>
+                  <p>Select a commit to inspect its deeds.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Branches tab -->
+        <div class="tab-panel" data-panel="branches">
+          <div class="branches-layout">
+            <div class="branches-pane">
+              <div class="branches-header">⚜ Current Banner ⚜</div>
+              <div class="branches-current-card" id="branches-current-card">—</div>
+
+              <div class="branches-section">
+                <label class="branches-label">⚔ Switch Banner (Checkout)</label>
+                <div class="custom-select" id="checkout-select">
+                  <button class="custom-select-trigger" id="checkout-trigger" type="button">
+                    <span class="cs-text">Select a branch…</span>
+                    <span class="cs-caret">▾</span>
+                  </button>
+                  <div class="custom-select-dropdown" id="checkout-dropdown"></div>
+                </div>
+                <button class="btn-medieval primary branches-action-btn" id="checkout-btn">
+                  <span class="btn-icon">⑂</span> Checkout
+                </button>
+              </div>
+
+              <div class="branches-section">
+                <label class="branches-label">⚒ Merge Banner Into Current</label>
+                <div class="custom-select" id="merge-select">
+                  <button class="custom-select-trigger" id="merge-trigger" type="button">
+                    <span class="cs-text">Select a branch to merge…</span>
+                    <span class="cs-caret">▾</span>
+                  </button>
+                  <div class="custom-select-dropdown" id="merge-dropdown"></div>
+                </div>
+                <button class="btn-medieval primary branches-action-btn" id="merge-btn">
+                  <span class="btn-icon">⚒</span> Merge (Smart)
+                </button>
+              </div>
+
+              <div class="branches-section">
+                <label class="branches-label">✠ Create New Banner</label>
+                <input type="text" class="branches-input" id="new-branch-input" placeholder="feature/holy-grail" />
+                <label class="branches-checkbox">
+                  <input type="checkbox" id="new-branch-checkout" checked />
+                  Checkout after creation
+                </label>
+                <button class="btn-medieval branches-action-btn" id="new-branch-btn">
+                  <span class="btn-icon">+</span> Create
+                </button>
+              </div>
+            </div>
+
+            <div class="pane-resizer" data-resizer="branches" data-target="data-panel:branches" data-cols="360px 1fr" title="Drag to resize"></div>
+            <div class="branches-list-pane">
+              <div class="branches-list-header">
+                <span>⚔ All Banners</span>
+                <input type="text" class="branches-filter" id="branches-filter" placeholder="Filter…" />
+              </div>
+              <ul class="branches-list" id="branches-full-list"></ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- History tab -->
+        <div class="tab-panel" data-panel="history">
+          <div class="history-list" id="history-list">
+            <div class="empty-state">
+              <div class="empty-icon">📜</div>
+              <p>No chronicles to display.</p>
+            </div>
+          </div>
+          <div class="pane-resizer" data-resizer="history" data-target="data-panel:history" data-cols="1fr 1fr" title="Drag to resize"></div>
+          <div class="history-detail" id="history-detail">
+            <div class="empty-state">
+              <div class="empty-icon">⚜</div>
+              <p>Select a commit to inspect its deeds.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Changes tab -->
+        <div class="tab-panel" data-panel="changes">
+          <div class="changes-layout">
+            <div class="changes-files">
+              <div class="changes-search-wrap">
+                <input type="text" id="changes-search" class="changes-search" placeholder="Filter files..." />
+                <button class="search-clear" id="changes-search-clear" title="Clear">✕</button>
+              </div>
+              <div class="selection-bar" id="selection-bar">
+                <span><span class="sel-count" id="sel-count">0</span> selected</span>
+                <div class="sel-actions">
+                  <button class="mini-btn" id="sel-stage">⇡ Stage</button>
+                  <button class="mini-btn" id="sel-unstage">⇣ Unstage</button>
+                  <button class="mini-btn" id="sel-stash">⚿ Stash</button>
+                  <button class="mini-btn" id="sel-discard">✕ Discard</button>
+                  <button class="mini-btn" id="sel-clear">Clear</button>
+                </div>
+              </div>
+              <div class="changes-section">
+                <div class="changes-header">
+                  <span>⌃ Staged Changes</span>
+                  <button class="mini-btn" id="unstage-all-btn" title="Unstage all">⇣ Unstage All</button>
+                </div>
+                <ul class="file-list" id="staged-files"></ul>
+              </div>
+              <div class="changes-section">
+                <div class="changes-header">
+                  <span>⌄ Unstaged Changes</span>
+                  <div style="display:flex;gap:6px">
+                    <button class="mini-btn" id="stash-unstaged-btn" title="Stash all unstaged changes">⚿ Stash All</button>
+                    <button class="mini-btn" id="stage-all-btn" title="Stage all">⇡ Stage All</button>
+                  </div>
+                </div>
+                <ul class="file-list" id="unstaged-files"></ul>
+              </div>
+              <div id="hidden-info" class="hidden-info"></div>
+            </div>
+
+            <div class="pane-resizer" data-resizer="changes-left" data-target="data-panel:changes" data-cols="280px 1fr 320px" data-edge="0" title="Drag to resize"></div>
+            <div class="changes-diff">
+              <div class="diff-header" id="diff-header">No file selected</div>
+              <div class="diff-content" id="diff-content">
+                <div class="empty-state">
+                  <div class="empty-icon">⚔</div>
+                  <p>Select a file to behold its changes.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="pane-resizer" data-resizer="changes-right" data-target="data-panel:changes" data-cols="280px 1fr 320px" data-edge="2" title="Drag to resize"></div>
+            <div class="commit-panel">
+              <div class="commit-header">⚜ Inscribe Thy Deed ⚜</div>
+              <input type="text" id="commit-summary" class="commit-input" placeholder="Summary (required)" maxlength="80" />
+              <textarea id="commit-description" class="commit-textarea" placeholder="Description (optional)"></textarea>
+              <button class="btn-medieval primary commit-btn" id="commit-btn">
+                <span class="btn-icon">✠</span> Commit
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Status bar -->
+    <footer class="statusbar">
+      <span class="status-item" id="status-branch">—</span>
+      <span class="status-sep">⚔</span>
+      <span class="status-item" id="status-changes">0 changes</span>
+      <span class="status-sep">⚔</span>
+      <span class="status-item" id="status-ahead-behind">↑0 ↓0</span>
+      <span class="status-spacer"></span>
+      <span class="status-item" id="status-message">Ready</span>
+    </footer>
+  </div>
+
+  <!-- ============== MODAL CONTAINER ============== -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <span id="modal-title">Title</span>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-footer" id="modal-footer"></div>
+    </div>
+  </div>
+
+  <!-- ============== TOAST CONTAINER ============== -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- ============== CONTEXT MENU ============== -->
+  <div id="context-menu" class="context-menu hidden"></div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

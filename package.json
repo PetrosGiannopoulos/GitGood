@@ -1,0 +1,56 @@
+{
+  "name": "gitgood",
+  "version": "1.0.0",
+  "description": "GitGood - A medieval-themed Git GUI client forged in the fires of the crusade",
+  "main": "src/main/main.js",
+  "author": "GitGood",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build:win": "electron-builder --win nsis",
+    "build:linux": "electron-builder --linux",
+    "build:mac": "electron-builder --mac"
+  },
+  "dependencies": {
+    "simple-git": "^3.25.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.gitgood.app",
+    "productName": "GitGood",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "src/assets/icon.ico"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "src/assets/icon.png"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "src/assets/icon.png"
+    },
+	"nsis": {
+		"artifactName": "GitGood Setup ${version} ${arch}.${ext}",
+		"oneClick": false,
+		"allowToChangeInstallationDirectory": true
+	}
+  }
+}
