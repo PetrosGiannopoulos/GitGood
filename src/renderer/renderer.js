@@ -76,6 +76,87 @@ function showToast(message, type = 'info', timeout = 3500) {
   }, timeout);
 }
 
+// ============================================
+// STATUS-BAR PROGRESS WIDGET
+// ============================================
+// A small controller for the bottom-right progress bar (left of the status message).
+// It shows during ANY action via withLoading() with an indeterminate animation, and
+// is upgraded to a real percentage when git emits transfer progress (op:progress).
+const opProgress = {
+  _box: null, _label: null, _fill: null, _pct: null, _hideTimer: null,
+  // How many overlapping operations are active (so nested withLoading calls don't
+  // hide the bar prematurely).
+  _active: 0,
+  // True once a real percentage has arrived for the current operation, so the
+  // indeterminate animation doesn't fight the real value.
+  _hasReal: false,
+
+  _els() {
+    this._box = document.getElementById('op-progress');
+    this._label = document.getElementById('op-progress-label');
+    this._fill = document.getElementById('op-progress-fill');
+    this._pct = document.getElementById('op-progress-pct');
+  },
+
+  // Begin an indeterminate operation with a label.
+  begin(label) {
+    this._els();
+    if (!this._box) return;
+    this._active++;
+    this._hasReal = false;
+    clearTimeout(this._hideTimer);
+    this._box.classList.remove('hidden');
+    if (this._label) this._label.textContent = (label || 'Working').replace(/\.\.\.$/, '');
+    if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
+    if (this._pct) this._pct.textContent = '…';
+  },
+
+  // Show an indeterminate bar + label WITHOUT changing the active-operation count.
+  // Used by streamed progress events (op:progress) that arrive during a withLoading
+  // operation, so they don't unbalance begin()/end().
+  indeterminate(label) {
+    this._els();
+    if (!this._box) return;
+    if (this._hasReal) return; // a real % already showing; don't downgrade
+    clearTimeout(this._hideTimer);
+    this._box.classList.remove('hidden');
+    if (label && this._label) this._label.textContent = label;
+    if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
+    if (this._pct) this._pct.textContent = '…';
+  },
+
+  // Update with a real percentage (0-100) and optional label.
+  setPercent(v, label) {
+    this._els();
+    if (!this._box) return;
+    this._hasReal = true;
+    this._box.classList.remove('hidden');
+    clearTimeout(this._hideTimer);
+    const pct = Math.max(0, Math.min(100, Math.round(v)));
+    if (this._fill) { this._fill.classList.remove('indeterminate'); this._fill.style.width = pct + '%'; }
+    if (this._pct) this._pct.textContent = pct + '%';
+    if (label && this._label) this._label.textContent = label;
+  },
+
+  // Finish one operation. When the last active operation ends, show 100% briefly,
+  // then hide.
+  end(failed) {
+    this._els();
+    if (!this._box) return;
+    this._active = Math.max(0, this._active - 1);
+    if (this._active > 0) return; // other operations still running
+    if (this._fill) {
+      this._fill.classList.remove('indeterminate');
+      this._fill.style.width = '100%';
+    }
+    if (this._pct) this._pct.textContent = failed ? '—' : '100%';
+    clearTimeout(this._hideTimer);
+    this._hideTimer = setTimeout(() => {
+      if (this._active === 0 && this._box) this._box.classList.add('hidden');
+    }, 500);
+  }
+};
+
 function setStatus(message) {
   const el = document.getElementById('status-message');
   if (el) el.textContent = message;
@@ -83,12 +164,15 @@ function setStatus(message) {
 
 async function withLoading(message, fn) {
   setStatus(message + '...');
+  opProgress.begin(message);
   try {
     const result = await fn();
     setStatus('Ready');
+    opProgress.end(false);
     return result;
   } catch (err) {
     setStatus('Failed');
+    opProgress.end(true);
     throw err;
   }
 }
@@ -256,6 +340,10 @@ async function openRepoByPath(p) {
     return;
   }
   state.repo = result.data;
+  clearCommitCache();
+  _diskState.loaded = false;
+  _diskState.lastData = null;
+  clearDiskStale();
   $('#welcome-screen').classList.add('hidden');
   $('#app-screen').classList.remove('hidden');
   updateRepoInfo();
@@ -700,15 +788,14 @@ async function refreshAll() {
     refreshStashes(),
     refreshRemotes()
   ]);
-  // If the Disk Management section is open, refresh it too (cheaply — cached otherwise)
+  // NOTE: Disk Management is intentionally NOT recalculated here. Disk scans can be
+  // expensive on large repos, so they only run when the user explicitly asks for them
+  // (expanding the section the first time, or clicking Refresh). We mark any existing
+  // results as potentially stale so the UI can show a subtle "out of date" hint, but
+  // we never trigger a scan automatically.
   if (typeof _diskState !== 'undefined' && _diskState.loaded) {
-    const section = document.getElementById('section-disk');
-    if (section && !section.classList.contains('collapsed')) {
-      refreshDiskUsage().catch(() => {});
-    } else {
-      // Cache is now stale — clear it so next expansion shows fresh data
-      _diskState.loaded = false;
-    }
+    _diskState.stale = true;
+    markDiskStale();
   }
 }
 
@@ -972,17 +1059,61 @@ function renderHistory() {
   });
 
   if (state.selectedCommit) {
-    // Render summary immediately, then asynchronously re-fetch the full diff
+    // Render summary immediately, then fill in the diff (from cache when possible)
     // so the loading spinner gets replaced (refresh would otherwise leave it spinning).
     const sel = state.selectedCommit;
     renderHistoryDetail(sel);
-    gs.showCommit(sel.hash).then(result => {
+    getCommitDetails(sel.hash).then(data => {
       // Only update if the selection hasn't changed during the fetch
-      if (result && result.ok && state.selectedCommit && state.selectedCommit.hash === sel.hash) {
-        renderHistoryDetail(sel, result.data);
+      if (state.selectedCommit && state.selectedCommit.hash === sel.hash) {
+        renderHistoryDetail(sel, data);
       }
     }).catch(err => console.error('History refresh: showCommit failed', err));
   }
+}
+
+// ============================================
+// COMMIT DETAILS CACHE (in-memory LRU)
+// ============================================
+// Commit diffs are immutable (a commit's content never changes), so we can cache
+// them aggressively. This makes re-selecting a commit — or coming back to it after
+// an app refresh — instant instead of re-running `git show` each time.
+const COMMIT_CACHE_MAX = 100;
+const _commitCache = new Map(); // hash -> details ; Map preserves insertion order for LRU
+
+function _commitCacheGet(hash) {
+  if (!_commitCache.has(hash)) return null;
+  // Touch: move to most-recently-used position
+  const v = _commitCache.get(hash);
+  _commitCache.delete(hash);
+  _commitCache.set(hash, v);
+  return v;
+}
+function _commitCacheSet(hash, details) {
+  if (_commitCache.has(hash)) _commitCache.delete(hash);
+  _commitCache.set(hash, details);
+  // Evict oldest entries beyond the cap
+  while (_commitCache.size > COMMIT_CACHE_MAX) {
+    const oldest = _commitCache.keys().next().value;
+    _commitCache.delete(oldest);
+  }
+}
+// The cache is keyed by commit hash only, but a commit can be shown with different
+// byte caps. We always request the same default cap, so this is safe. The cache is
+// cleared when switching repositories.
+function clearCommitCache() { _commitCache.clear(); }
+
+// Fetch commit details, using the in-memory cache when possible. Returns the same
+// shape as gs.showCommit's .data (or throws on error).
+async function getCommitDetails(hash) {
+  const cached = _commitCacheGet(hash);
+  if (cached) return cached;
+  const result = await gs.showCommit(hash);
+  if (result && result.ok) {
+    _commitCacheSet(hash, result.data);
+    return result.data;
+  }
+  throw new Error(result && result.error ? result.error : 'Failed to load commit');
 }
 
 async function selectCommit(commit, evt) {
@@ -990,12 +1121,12 @@ async function selectCommit(commit, evt) {
   $$('.commit-row').forEach(r => r.classList.remove('selected'));
   if (evt && evt.currentTarget) evt.currentTarget.classList.add('selected');
   renderHistoryDetail(commit);
-  // Load full commit details. Skip if user has switched to a different commit by the time we return.
+  // Load full commit details (cached). Skip if user switched commits meanwhile.
   const requestedHash = commit.hash;
   try {
-    const result = await gs.showCommit(requestedHash);
-    if (result && result.ok && state.selectedCommit && state.selectedCommit.hash === requestedHash) {
-      renderHistoryDetail(commit, result.data);
+    const data = await getCommitDetails(requestedHash);
+    if (state.selectedCommit && state.selectedCommit.hash === requestedHash) {
+      renderHistoryDetail(commit, data);
     }
   } catch (err) {
     console.error('selectCommit: showCommit failed', err);
@@ -2604,6 +2735,9 @@ $('#btn-close-repo').onclick = async () => {
   state.status = null;
   state.selectedCommit = null;
   state.selectedFile = null;
+  clearCommitCache();
+  _diskState.loaded = false;
+  _diskState.lastData = null;
   showWelcome();
 };
 
@@ -3333,9 +3467,9 @@ async function renderGraphDetail(commit) {
     </div>
   `;
 
-  let result;
+  let details;
   try {
-    result = await gs.showCommit({ hash: requestedHash });
+    details = await getCommitDetails(requestedHash);
   } catch (err) {
     const diffEl = panel.querySelector('#graph-diff-content');
     if (diffEl && state.selectedGraphHash === requestedHash) {
@@ -3345,11 +3479,6 @@ async function renderGraphDetail(commit) {
   }
   // Skip if user has selected a different commit while we were loading
   if (state.selectedGraphHash !== requestedHash) return;
-  if (!result || !result.ok) {
-    const diffEl = panel.querySelector('#graph-diff-content');
-    if (diffEl) diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to load commit: ${escapeHtml(result && result.error ? result.error : 'unknown error')}</p></div>`;
-    return;
-  }
 
   // Defer the (potentially huge) diff render to a separate paint frame
   requestAnimationFrame(() => {
@@ -3358,9 +3487,9 @@ async function renderGraphDetail(commit) {
     const diffEl = panel.querySelector('#graph-diff-content');
     if (!diffEl) return;
     try {
-      diffEl.innerHTML = renderDiff(result.data.diff, {
-        diffTruncated: result.data.diffTruncated,
-        diffBytes: result.data.diffBytes
+      diffEl.innerHTML = renderDiff(details.diff, {
+        diffTruncated: details.diffTruncated,
+        diffBytes: details.diffBytes
       });
     } catch (err) {
       diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
@@ -4048,14 +4177,10 @@ wireBranchesTab();
 wireGraphTab();
 
 // ============================================
-// OPERATION PROGRESS (clone/pull/push/fetch/lfs)
+// OPERATION PROGRESS (clone/pull/push/fetch/lfs) — feeds real % into opProgress
 // ============================================
 (() => {
   if (!gs.onOpProgress) return;
-  const wrap = () => document.getElementById('op-progress');
-  const labelEl = () => document.getElementById('op-progress-label');
-  const fillEl = () => document.getElementById('op-progress-fill');
-  const pctEl = () => document.getElementById('op-progress-pct');
 
   // Human-friendly labels for simple-git's stage names
   const STAGE_LABELS = {
@@ -4067,52 +4192,28 @@ wireGraphTab();
     'remote:': 'Remote'
   };
 
-  let hideTimer = null;
-
   gs.onOpProgress((p) => {
-    const box = wrap();
-    if (!box) return;
-
     if (p.done || p.active === false) {
-      // Briefly show 100% then hide
-      const fill = fillEl(); const pct = pctEl();
-      if (fill) { fill.classList.remove('indeterminate'); fill.style.width = '100%'; }
-      if (pct) pct.textContent = '100%';
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => { box.classList.add('hidden'); }, 600);
+      // The withLoading wrapper around the operation will call end(); but if a
+      // transfer finished without that wrapper, make sure we settle the bar.
+      // We only force-complete the bar's fill here; hiding is handled by end().
+      opProgress.setPercent(100);
       return;
     }
-
-    clearTimeout(hideTimer);
-    box.classList.remove('hidden');
 
     // Build label: "Method · Stage"
     const method = (p.method || '').toString();
     const stageRaw = (p.stage || '').toString().toLowerCase();
     const stage = STAGE_LABELS[stageRaw] || (p.stage || '');
-    const lbl = labelEl();
-    if (lbl) {
-      const text = [method, stage].filter(Boolean).join(' · ') || 'Working';
-      lbl.textContent = text;
-    }
+    const label = [method, stage].filter(Boolean).join(' · ') || 'Working';
 
-    const fill = fillEl(); const pct = pctEl();
     const hasPct = typeof p.progress === 'number' && !isNaN(p.progress) && p.progress > 0;
     if (hasPct) {
-      const v = Math.max(0, Math.min(100, Math.round(p.progress)));
-      if (fill) { fill.classList.remove('indeterminate'); fill.style.width = v + '%'; }
-      if (pct) {
-        // Show processed/total when available, else just %
-        if (p.processed && p.total) {
-          pct.textContent = v + '%';
-        } else {
-          pct.textContent = v + '%';
-        }
-      }
+      opProgress.setPercent(p.progress, label);
     } else {
-      // No percentage — indeterminate sweep
-      if (fill) fill.classList.add('indeterminate');
-      if (pct) pct.textContent = '…';
+      // No percentage yet — keep an indeterminate bar with the label (without
+      // touching the active-operation counter that begin()/end() manage).
+      opProgress.indeterminate(label);
     }
   });
 })();
@@ -4144,7 +4245,25 @@ gs.onMenu('menu-about', () => {
 // ============================================
 // DISK MANAGEMENT
 // ============================================
-const _diskState = { loaded: false, lastData: null };
+const _diskState = { loaded: false, lastData: null, stale: false };
+
+// Show a subtle hint that the disk figures may be out of date (repo changed since
+// the last scan). We don't rescan automatically — the user clicks Refresh to update.
+function markDiskStale() {
+  const refreshBtn = document.getElementById('disk-refresh');
+  if (refreshBtn && _diskState.loaded) {
+    refreshBtn.classList.add('stale');
+    refreshBtn.title = 'Figures may be out of date — click to recalculate';
+  }
+}
+function clearDiskStale() {
+  _diskState.stale = false;
+  const refreshBtn = document.getElementById('disk-refresh');
+  if (refreshBtn) {
+    refreshBtn.classList.remove('stale');
+    refreshBtn.title = 'Recalculate disk usage';
+  }
+}
 
 function fmtBytes(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
@@ -4209,6 +4328,7 @@ async function refreshDiskUsage() {
   }
   _diskState.lastData = r.data;
   _diskState.loaded = true;
+  clearDiskStale();
   if (loading) loading.style.display = 'none';
   if (summary) summary.style.display = 'flex';
 

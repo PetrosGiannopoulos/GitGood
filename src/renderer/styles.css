@@ -3785,9 +3785,9 @@ html.theme-sandstone {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-left: 14px;
-  padding-left: 14px;
-  border-left: 1px solid var(--border);
+  margin-right: 14px;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
 }
 .op-progress.hidden { display: none; }
 
@@ -3936,3 +3936,11 @@ html.theme-sandstone {
   font-style: italic;
   font-size: 12px;
 }
+
+/* Disk refresh button hint when figures may be stale */
+#disk-refresh.stale {
+  border-color: var(--gold-accent);
+  color: var(--gold-accent);
+  box-shadow: 0 0 6px rgba(200, 160, 74, 0.4);
+}
+#disk-refresh.stale::after { content: ' •'; }
