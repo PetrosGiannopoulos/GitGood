@@ -107,6 +107,16 @@ const api = {
   reflogExpire: (opts) => ipcRenderer.invoke('repo:reflogExpire', opts),
   lfsPrune: () => ipcRenderer.invoke('repo:lfsPrune'),
   lfsStatus: () => ipcRenderer.invoke('repo:lfsStatus'),
+  lfsInfo: () => ipcRenderer.invoke('repo:lfsInfo'),
+  lfsInstall: () => ipcRenderer.invoke('repo:lfsInstall'),
+  lfsTrack: (pattern) => ipcRenderer.invoke('repo:lfsTrack', pattern),
+  lfsUntrack: (pattern) => ipcRenderer.invoke('repo:lfsUntrack', pattern),
+  lfsFiles: () => ipcRenderer.invoke('repo:lfsFiles'),
+  lfsPull: (remote) => ipcRenderer.invoke('repo:lfsPull', remote),
+  lfsFetch: (opts) => ipcRenderer.invoke('repo:lfsFetch', opts),
+  lfsPush: (opts) => ipcRenderer.invoke('repo:lfsPush', opts),
+  lfsCheckout: () => ipcRenderer.invoke('repo:lfsCheckout'),
+  lfsMigrateImport: (opts) => ipcRenderer.invoke('repo:lfsMigrateImport', opts),
   deleteBranches: (opts) => ipcRenderer.invoke('repo:deleteBranches', opts),
 
   // Settings
@@ -135,6 +145,13 @@ const api = {
   // Window focus event — used to auto-refresh repo state
   onWindowFocus: (cb) => {
     ipcRenderer.on('window-focused', () => cb());
+  },
+
+  // Git operation progress (clone/pull/push/fetch/lfs) — { method, stage, progress, active, done }
+  onOpProgress: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('op:progress', handler);
+    return () => ipcRenderer.removeListener('op:progress', handler);
   }
 };
 

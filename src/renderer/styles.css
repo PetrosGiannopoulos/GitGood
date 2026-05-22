@@ -139,6 +139,11 @@ body::before {
   padding: 40px;
   max-width: 720px;
   width: 100%;
+  max-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .welcome-emblem {
@@ -182,22 +187,28 @@ body::before {
   flex-direction: column;
   gap: 12px;
   max-width: 360px;
-  margin: 0 auto 32px;
+  margin: 0 auto 12px;
+  flex-shrink: 0;
 }
 
 .welcome-recent {
-  margin-top: 32px;
-  padding-top: 24px;
+  margin-top: 12px;
+  padding-top: 14px;
   border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex-shrink: 1;
 }
 
 .recent-title {
+  flex-shrink: 0;
   font-family: var(--font-ornament);
   color: var(--parchment-dim);
   font-weight: 400;
   font-size: 14px;
   letter-spacing: 0.2em;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .recent-list {
@@ -205,8 +216,25 @@ body::before {
   flex-direction: column;
   gap: 4px;
   max-width: 480px;
-  margin: 0 auto;
+  width: 100%;
+  margin: 0 auto 8px;
+  /* Cap by viewport height so a long list scrolls instead of overflowing the screen.
+     ~690px is reserved for padding, emblem, title, tagline, the 5 action buttons,
+     and the section header so the list never extends past the visible area. */
+  max-height: calc(100vh - 690px);
+  min-height: 56px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
+
+/* Slim themed scrollbar for the recent list */
+.recent-list::-webkit-scrollbar { width: 8px; }
+.recent-list::-webkit-scrollbar-track { background: var(--bg); }
+.recent-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 0;
+}
+.recent-list::-webkit-scrollbar-thumb:hover { background: var(--crusader-red); }
 
 .recent-item {
   padding: 8px 14px;
@@ -458,6 +486,50 @@ body::before {
   display: grid;
   grid-template-columns: 260px 1fr;
   overflow: hidden;
+  transition: grid-template-columns 0.18s ease;
+}
+
+/* Collapsed: sidebar slides away entirely, main content takes the full width */
+.workspace.sidebar-collapsed {
+  grid-template-columns: 0 1fr;
+}
+.workspace.sidebar-collapsed .sidebar {
+  border-right: none;
+  overflow: hidden;
+  /* keep it out of the layout/tab order while collapsed */
+  visibility: hidden;
+}
+
+/* Sidebar toggle button in the toolbar */
+.sidebar-toggle {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  color: var(--crusader-red-bright);
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 3px;
+  margin-right: 10px;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  box-shadow: inset 0 0 4px rgba(0,0,0,0.4);
+}
+.sidebar-toggle:hover {
+  background: var(--crusader-red);
+  color: var(--bone-white);
+  border-color: var(--crusader-red-bright);
+}
+.sidebar-toggle-icon {
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 0.18s;
+}
+/* Flip the chevron when the sidebar is collapsed */
+body.sidebar-is-collapsed .sidebar-toggle-icon {
+  transform: rotate(180deg);
 }
 
 /* ============================================
@@ -502,7 +574,8 @@ body::before {
 
 .sidebar-section.collapsed .caret { transform: rotate(-90deg); }
 .sidebar-section.collapsed .sidebar-list,
-.sidebar-section.collapsed .disk-body { display: none; }
+.sidebar-section.collapsed .disk-body,
+.sidebar-section.collapsed .current-branch { display: none; }
 
 .sidebar-header .count {
   margin-left: auto;
@@ -3703,4 +3776,163 @@ html.theme-sandstone {
   align-self: flex-start;
   font-size: 9.5px;
   padding: 4px 8px;
+}
+
+/* ============================================
+   OPERATION PROGRESS (status bar, bottom-right)
+   ============================================ */
+.op-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 14px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+.op-progress.hidden { display: none; }
+
+.op-progress-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--crusader-red-bright);
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.op-progress-bar {
+  width: 90px;
+  height: 7px;
+  background: var(--shadow-black);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+
+.op-progress-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--crusader-red-deep), var(--crusader-red-bright));
+  box-shadow: 0 0 6px rgba(212, 48, 47, 0.6);
+  transition: width 0.2s ease-out;
+}
+
+/* Indeterminate state (no percentage available) */
+.op-progress-bar-fill.indeterminate {
+  width: 35% !important;
+  animation: op-progress-indet 1.2s ease-in-out infinite;
+}
+@keyframes op-progress-indet {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+
+.op-progress-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--bone-white);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* ============================================
+   GIT LFS MANAGER
+   ============================================ */
+.lfs-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 560px;
+  max-width: 680px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.lfs-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.lfs-status-banner.ok { border-left: 4px solid #6b8e23; }
+.lfs-status-banner.warn { border-left: 4px solid var(--gold-accent); }
+.lfs-status-banner.not-available { border-left: 4px solid var(--crusader-red); }
+
+.lfs-status-icon { font-size: 22px; color: var(--crusader-red-bright); }
+.lfs-status-banner.ok .lfs-status-icon { color: #8fb44a; }
+.lfs-status-banner.warn .lfs-status-icon { color: var(--gold-accent); }
+
+.lfs-status-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--bone-white);
+}
+.lfs-status-text {
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--parchment-dim);
+  margin-top: 2px;
+}
+.lfs-status-banner .btn-medieval { margin-left: auto; flex-shrink: 0; }
+
+.lfs-section { display: flex; flex-direction: column; gap: 8px; }
+
+.lfs-section-title {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--crusader-red-bright);
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 4px;
+}
+
+.lfs-btn-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.lfs-track-add { display: flex; gap: 8px; }
+.lfs-track-add .modal-input { flex: 1; }
+
+.lfs-pattern-list, .lfs-files-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); }
+
+.lfs-pattern-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.4);
+}
+.lfs-pattern-item:last-child { border-bottom: none; }
+.lfs-pattern-name { font-size: 13px; color: var(--bone-white); }
+
+.lfs-files-list { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+.lfs-file-item {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 12px;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.3);
+  font-size: 12px;
+}
+.lfs-file-item:last-child { border-bottom: none; }
+.lfs-file-dl { color: var(--crusader-red-bright); text-align: center; }
+.lfs-file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.lfs-file-size { color: var(--gold-accent); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.lfs-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--muted-text);
+  font-style: italic;
+  font-size: 12px;
 }

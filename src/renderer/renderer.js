@@ -2142,6 +2142,9 @@ async function commitChanges() {
 // Marker used in stash messages so we can find auto-stashes bound to a branch.
 // Format: "[GitGood auto] on <branch-name>"
 const AUTO_STASH_MARKER = '[GitGood auto] on ';
+// Legacy marker from when the app was named GitSouls — still matched on restore so
+// existing auto-stashes aren't orphaned after the rename.
+const AUTO_STASH_MARKER_LEGACY = '[GitSouls auto] on ';
 function autoStashMarkerFor(branch) { return AUTO_STASH_MARKER + branch; }
 
 // Safe checkout for a local branch. If the working tree has uncommitted changes,
@@ -2282,10 +2285,14 @@ async function promptCheckoutWithDirty(targetBranch, remoteSetup) {
 // After arriving at a branch, look for auto-stashes bound to it and offer restore.
 async function maybeOfferAutoStashRestore(branch) {
   if (!branch) return;
-  const r = await gs.stashFindByPrefix(autoStashMarkerFor(branch));
-  if (!r.ok || !r.data || !r.data.length) return;
-
-  const stashes = r.data;
+  // Search the current marker, then fall back to the legacy GitSouls marker.
+  let r = await gs.stashFindByPrefix(autoStashMarkerFor(branch));
+  let stashes = (r.ok && r.data) ? r.data : [];
+  if (!stashes.length) {
+    const legacy = await gs.stashFindByPrefix(AUTO_STASH_MARKER_LEGACY + branch);
+    if (legacy.ok && legacy.data && legacy.data.length) stashes = legacy.data;
+  }
+  if (!stashes.length) return;
   // Show the most recent (lowest index) and offer restore-all
   const body = document.createElement('div');
   const rowsHtml = stashes.map(s => `
@@ -2865,7 +2872,7 @@ $$('.tab').forEach(tab => {
 });
 
 // ============================================
-// SIDEBAR COLLAPSIBLES
+// SIDEBAR COLLAPSIBLES (per-section, vertical)
 // ============================================
 $$('.sidebar-header.clickable').forEach(h => {
   h.onclick = () => {
@@ -2874,140 +2881,198 @@ $$('.sidebar-header.clickable').forEach(h => {
 });
 
 // ============================================
+// SIDEBAR TOGGLE (whole panel, horizontal) — frees width for the main content
+// ============================================
+const SIDEBAR_COLLAPSE_KEY = 'gitgood:sidebar-collapsed';
+function setSidebarCollapsed(collapsed) {
+  const workspace = document.querySelector('.workspace');
+  if (!workspace) return;
+  workspace.classList.toggle('sidebar-collapsed', collapsed);
+  document.body.classList.toggle('sidebar-is-collapsed', collapsed);
+  const btn = document.getElementById('sidebar-toggle');
+  if (btn) btn.title = collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)';
+  try { localStorage.setItem(SIDEBAR_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (e) {}
+}
+function toggleSidebar() {
+  const workspace = document.querySelector('.workspace');
+  if (!workspace) return;
+  setSidebarCollapsed(!workspace.classList.contains('sidebar-collapsed'));
+}
+(() => {
+  const btn = document.getElementById('sidebar-toggle');
+  if (btn) btn.onclick = toggleSidebar;
+  // Restore persisted state
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === '1'; } catch (e) {}
+  if (collapsed) setSidebarCollapsed(true);
+  // Keyboard shortcut: Ctrl/Cmd + B
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
+      e.preventDefault();
+      toggleSidebar();
+    }
+  });
+})();
+
+// ============================================
 // GRAPH LAYOUT ALGORITHM
 // ============================================
-// Walks commits top-to-bottom (newest first) and assigns each a lane (column).
-// Returns: { positions: Map<hash, {row, lane}>, edges: [{fromHash, toHash, fromLane, toLane, fromRow, toRow, type}], laneCount }
+// Standard "lane" commit-graph layout. Processes commits top-to-bottom (newest
+// first). At every row we know which lanes are active and which commit each lane
+// is currently "routing toward" (its next expected commit = the parent it follows).
 //
-// Algorithm: maintain `activeLanes[]` where each slot is { expectedHash } or null.
-// For each commit C with parents [P1, P2, ...]:
-//   1. Find C in activeLanes (some lane was "waiting" for C). If not found, take first null lane.
-//   2. That lane now expects P1 (first parent), continuing the line.
-//   3. Additional parents (P2+, merge parents) go into new/recycled lanes — preferring to merge
-//      INTO existing lanes already expecting that parent.
-//   4. Old expected-hash slots that won't be visited again get released.
+// CRITICAL: edges only ever connect ONE row to the NEXT row. A vertical line that
+// spans many rows is emitted as many short row→row+1 segments. A lane only bends
+// (curves) at the single row boundary where it actually shifts columns. This is
+// what keeps lines tracking their dots instead of swooping across the whole graph.
+//
+// Returns: { positions: Map<hash,{row,lane}>, edges: [{fromLane,toLane,fromRow,toRow,colorLane,type}], laneCount }
 function layoutGraph(commits) {
   const positions = new Map();
   const edges = [];
-  // Active lanes: each slot is { expectedHash } | null
-  let activeLanes = [];
+
+  // lanes[i] = hash that lane i is currently routing toward (the next commit it
+  // expects to land on), or null if the lane is free.
+  let lanes = [];
   let maxLaneCount = 0;
 
-  const findLaneForHash = (hash) => {
-    for (let i = 0; i < activeLanes.length; i++) {
-      if (activeLanes[i] && activeLanes[i].expectedHash === hash) return i;
-    }
+  // Stable color assignment: once a lane gets a color index it keeps it until freed.
+  // We color by the lane index directly (laneColor handles wrap-around), which is
+  // simple and stable enough for our purposes.
+
+  const findLane = (hash) => {
+    for (let i = 0; i < lanes.length; i++) if (lanes[i] === hash) return i;
     return -1;
   };
-  const firstEmptyLane = () => {
-    for (let i = 0; i < activeLanes.length; i++) if (!activeLanes[i]) return i;
-    activeLanes.push(null);
-    return activeLanes.length - 1;
+  const allocLane = () => {
+    for (let i = 0; i < lanes.length; i++) if (lanes[i] === null) return i;
+    lanes.push(null);
+    return lanes.length - 1;
   };
 
   for (let row = 0; row < commits.length; row++) {
     const c = commits[row];
-    let myLane = findLaneForHash(c.hash);
-    if (myLane === -1) {
-      myLane = firstEmptyLane();
-    }
-
-    // Carry-through edges: all OTHER active lanes continue downward from previous row to this row.
-    // We don't emit edges for them here — they're implicit vertical lines drawn separately.
-
-    positions.set(c.hash, { row, lane: myLane });
-
     const parents = c.parents || [];
 
-    // First parent: stays in the same lane (the line continues straight down)
-    if (parents.length > 0) {
-      // Free any OTHER lanes that were also waiting for this commit (lane merges INTO this lane)
-      for (let i = 0; i < activeLanes.length; i++) {
-        if (i !== myLane && activeLanes[i] && activeLanes[i].expectedHash === c.hash) {
-          // Emit a merge-from edge: parent (current commit) at row, from lane i to lane myLane
-          edges.push({
-            fromHash: c.hash,
-            toHash: c.hash,         // visual merge: lane i joins lane myLane at this commit's row
-            fromLane: i,
-            toLane: myLane,
-            fromRow: row - 0.5,     // come from the row above
-            toRow: row,
-            type: 'lane-join'
-          });
-          activeLanes[i] = null;
-        }
-      }
-      // First parent continues this lane downward
-      activeLanes[myLane] = { expectedHash: parents[0] };
-    } else {
-      // No parents — root commit; lane terminates here
-      activeLanes[myLane] = null;
+    // 1. Which lane is this commit on? The lane that was routing toward it.
+    let myLane = findLane(c.hash);
+    if (myLane === -1) myLane = allocLane();
+    positions.set(c.hash, { row, lane: myLane });
+
+    // 2. Collect every lane currently routing toward THIS commit (besides myLane).
+    //    Those lanes converge into myLane at this row (merge of branch lines).
+    const convergingLanes = [];
+    for (let i = 0; i < lanes.length; i++) {
+      if (i !== myLane && lanes[i] === c.hash) convergingLanes.push(i);
     }
 
-    // Additional parents (merge commits) — each goes into a lane, preferring an existing one
+    // 3. Snapshot the lane state BEFORE this commit reassigns anything. We need it
+    //    to draw the segments from THIS row down to the NEXT row.
+    //    First, update lane assignments for the row below:
+    //    - myLane now routes toward the first parent (continues the line straight).
+    //    - converging lanes are freed (they joined myLane here).
+    //    - extra parents (merge) claim lanes routing toward them.
+
+    // Free converging lanes (they merged into myLane at this row)
+    for (const i of convergingLanes) lanes[i] = null;
+
+    // Assign myLane to follow the first parent
+    if (parents.length > 0) {
+      lanes[myLane] = parents[0];
+    } else {
+      lanes[myLane] = null; // root commit; lane ends
+    }
+
+    // Extra parents (merge commits): route each toward its parent in some lane.
+    const mergeParentLanes = [];
     for (let p = 1; p < parents.length; p++) {
-      const parent = parents[p];
-      let pLane = findLaneForHash(parent);
-      if (pLane === -1) {
-        pLane = firstEmptyLane();
-        activeLanes[pLane] = { expectedHash: parent };
+      const par = parents[p];
+      let pl = findLane(par);
+      if (pl === -1) {
+        pl = allocLane();
+        lanes[pl] = par;
       }
-      // Draw an edge from THIS commit (myLane, row) to the parent location (pLane, future row).
-      // We mark it as a "merge-parent" edge — the actual end row is determined when we lay out
-      // the parent. For now we record from-side and a tag.
+      mergeParentLanes.push({ parent: par, lane: pl });
+    }
+
+    // 4. Emit edges from THIS row (row) to the NEXT row (row+1) for every lane that
+    //    is active after the reassignment. Each active lane draws a segment from its
+    //    position at `row` to its position at `row+1`.
+    //
+    //    But a lane's column at `row` may differ from its column at `row+1` only when:
+    //      (a) it's myLane and it just took over (came from myLane, continues at myLane) — vertical
+    //      (b) it's a converging lane — handled below as a join segment into myLane
+    //      (c) it's a merge-parent lane that was newly allocated at a different column
+    //
+    //    The simplest correct model: for each lane active in the NEXT row, draw a
+    //    segment from where that lane's line was at THIS row to where it is at row+1.
+    //    A lane that existed before at column X and still exists at column X → vertical.
+
+    // Converging lanes are freed here; their visual descent into myLane is already
+    // drawn by the first-parent carry segments emitted in pass 2 (the final segment
+    // of each converging branch bends into myLane's column). No separate join edge
+    // is needed, which avoids double-drawing.
+
+    // For myLane continuing to first parent: the parent may be in a different column
+    // than myLane (it usually isn't until the parent is actually placed). We DON'T know
+    // the parent's final column yet, so we emit a per-row vertical "carry" below in pass 2.
+
+    // For merge parents: emit a segment from this commit's dot (myLane, row) outward
+    // to the merge-parent lane, descending one row. The rest of that lane's descent is
+    // carried vertically in pass 2.
+    for (const mp of mergeParentLanes) {
       edges.push({
-        fromHash: c.hash,
-        toHash: parent,
         fromLane: myLane,
-        toLane: pLane,
+        toLane: mp.lane,
         fromRow: row,
-        toRow: null,    // filled in later if parent is in our visible range
-        type: 'merge-parent'
+        toRow: row + 1,
+        colorLane: mp.lane,
+        type: 'merge-out'
       });
     }
 
-    // Track max lane count for SVG width
-    if (activeLanes.length > maxLaneCount) maxLaneCount = activeLanes.length;
+    if (lanes.length > maxLaneCount) maxLaneCount = lanes.length;
   }
 
-  // Pass 2: resolve toRow for merge-parent edges and emit lane-continuation edges from each
-  // commit to its first parent (for drawing).
-  // Build commit row map already in positions.
-  const continuationEdges = [];
-  for (const c of commits) {
+  // ----- Pass 2: carry segments -----
+  // For every commit, its first-parent line descends from this commit's row to the
+  // parent's row, occupying myLane's column the whole way (until the parent, which
+  // may shift columns at the very last segment). We emit one segment PER ROW so long
+  // vertical runs are straight and only the final segment bends toward the parent's
+  // column if it differs.
+  for (let row = 0; row < commits.length; row++) {
+    const c = commits[row];
     const pos = positions.get(c.hash);
     if (!pos) continue;
     const parents = c.parents || [];
-    if (parents.length > 0) {
-      const firstParentPos = positions.get(parents[0]);
-      if (firstParentPos) {
-        continuationEdges.push({
-          fromLane: pos.lane,
-          toLane: firstParentPos.lane,
-          fromRow: pos.row,
-          toRow: firstParentPos.row,
-          type: 'first-parent'
-        });
+    if (!parents.length) continue;
+
+    const firstParent = parents[0];
+    const fpPos = positions.get(firstParent);
+    if (!fpPos) {
+      // Parent is outside the loaded window — draw a short stub downward and stop.
+      if (row + 1 < commits.length) {
+        edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: row + 1, colorLane: pos.lane, type: 'carry' });
       }
-      // For merge-parent edges, fill toRow
-      for (let p = 1; p < parents.length; p++) {
-        const parentPos = positions.get(parents[p]);
-        if (parentPos) {
-          // Find the corresponding edge and set toRow
-          const e = edges.find(ed => ed.fromHash === c.hash && ed.toHash === parents[p] && ed.toRow === null);
-          if (e) e.toRow = parentPos.row;
-        }
-      }
+      continue;
+    }
+
+    // Emit one straight vertical segment per row from row → fpPos.row-1 in pos.lane,
+    // then a final segment from (pos.lane, fpPos.row-1) → (fpPos.lane, fpPos.row).
+    for (let r = row; r < fpPos.row; r++) {
+      const isLast = (r === fpPos.row - 1);
+      edges.push({
+        fromLane: pos.lane,
+        toLane: isLast ? fpPos.lane : pos.lane,
+        fromRow: r,
+        toRow: r + 1,
+        colorLane: pos.lane,
+        type: 'carry'
+      });
     }
   }
 
-  // Combine: use only continuation edges + merge-parent edges (which have proper row spans)
-  const finalEdges = [
-    ...continuationEdges,
-    ...edges.filter(e => e.type === 'merge-parent' && e.toRow !== null)
-  ];
-
-  return { positions, edges: finalEdges, laneCount: Math.max(1, maxLaneCount) };
+  return { positions, edges, laneCount: Math.max(1, maxLaneCount) };
 }
 
 // ============================================
@@ -3051,15 +3116,19 @@ function renderGraph() {
   const totalHeight = commits.length * GRAPH_ROW_H;
   const svgWidth = GRAPH_LANE_X0 + laneCount * GRAPH_LANE_W + 8;
 
-  // Build SVG paths for edges (string array, joined at the end)
+  // Build SVG paths for edges (string array, joined at the end).
+  // All edges span at most one row, so curves are small and local — a lane
+  // only bends at the single boundary where it changes column.
   const edgeSvgParts = new Array(edges.length);
   for (let i = 0; i < edges.length; i++) {
     const e = edges[i];
     const x1 = GRAPH_LANE_X0 + e.fromLane * GRAPH_LANE_W;
     const x2 = GRAPH_LANE_X0 + e.toLane * GRAPH_LANE_W;
+    const color = laneColor(e.colorLane != null ? e.colorLane : e.fromLane);
+
+    // 'carry' and 'merge-out' both span fromRow → toRow (one row apart)
     const y1 = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
     const y2 = e.toRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
-    const color = laneColor(e.type === 'merge-parent' ? e.toLane : e.fromLane);
     if (x1 === x2) {
       edgeSvgParts[i] = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`;
     } else {
@@ -3978,6 +4047,76 @@ function wireGraphTab() {
 wireBranchesTab();
 wireGraphTab();
 
+// ============================================
+// OPERATION PROGRESS (clone/pull/push/fetch/lfs)
+// ============================================
+(() => {
+  if (!gs.onOpProgress) return;
+  const wrap = () => document.getElementById('op-progress');
+  const labelEl = () => document.getElementById('op-progress-label');
+  const fillEl = () => document.getElementById('op-progress-fill');
+  const pctEl = () => document.getElementById('op-progress-pct');
+
+  // Human-friendly labels for simple-git's stage names
+  const STAGE_LABELS = {
+    'receiving': 'Receiving',
+    'counting': 'Counting',
+    'compressing': 'Compressing',
+    'writing': 'Writing',
+    'resolving': 'Resolving',
+    'remote:': 'Remote'
+  };
+
+  let hideTimer = null;
+
+  gs.onOpProgress((p) => {
+    const box = wrap();
+    if (!box) return;
+
+    if (p.done || p.active === false) {
+      // Briefly show 100% then hide
+      const fill = fillEl(); const pct = pctEl();
+      if (fill) { fill.classList.remove('indeterminate'); fill.style.width = '100%'; }
+      if (pct) pct.textContent = '100%';
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => { box.classList.add('hidden'); }, 600);
+      return;
+    }
+
+    clearTimeout(hideTimer);
+    box.classList.remove('hidden');
+
+    // Build label: "Method · Stage"
+    const method = (p.method || '').toString();
+    const stageRaw = (p.stage || '').toString().toLowerCase();
+    const stage = STAGE_LABELS[stageRaw] || (p.stage || '');
+    const lbl = labelEl();
+    if (lbl) {
+      const text = [method, stage].filter(Boolean).join(' · ') || 'Working';
+      lbl.textContent = text;
+    }
+
+    const fill = fillEl(); const pct = pctEl();
+    const hasPct = typeof p.progress === 'number' && !isNaN(p.progress) && p.progress > 0;
+    if (hasPct) {
+      const v = Math.max(0, Math.min(100, Math.round(p.progress)));
+      if (fill) { fill.classList.remove('indeterminate'); fill.style.width = v + '%'; }
+      if (pct) {
+        // Show processed/total when available, else just %
+        if (p.processed && p.total) {
+          pct.textContent = v + '%';
+        } else {
+          pct.textContent = v + '%';
+        }
+      }
+    } else {
+      // No percentage — indeterminate sweep
+      if (fill) fill.classList.add('indeterminate');
+      if (pct) pct.textContent = '…';
+    }
+  });
+})();
+
 
 gs.onMenu('menu-open-repo', () => openRepoDialog());
 gs.onMenu('menu-clone-repo', () => showCloneDialog());
@@ -4286,7 +4425,205 @@ function segColor(cls) {
     const r = await withLoading('Pruning LFS', () => gs.lfsPrune());
     if (handleResult(r, 'LFS pruned')) await refreshDiskUsage();
   });
+
+  wire('disk-lfs-manage', () => showLfsManager());
 })();
+
+// ============================================
+// GIT LFS MANAGER
+// ============================================
+async function showLfsManager() {
+  const infoR = await withLoading('Checking LFS', () => gs.lfsInfo());
+  const info = (infoR && infoR.ok) ? infoR.data : { available: false };
+
+  const body = document.createElement('div');
+  body.className = 'lfs-manager';
+
+  // Case 1: git-lfs not installed on the machine
+  if (!info.available) {
+    body.innerHTML = `
+      <div class="lfs-status-banner not-available">
+        <div class="lfs-status-icon">⚠</div>
+        <div>
+          <div class="lfs-status-title">Git LFS not found</div>
+          <div class="lfs-status-text">The <code>git-lfs</code> command isn't installed or isn't on your PATH. Install it from <span class="text-mono">git-lfs.com</span>, then reopen this dialog.</div>
+        </div>
+      </div>
+    `;
+    const close = document.createElement('button');
+    close.className = 'btn-medieval primary'; close.textContent = 'Close';
+    close.onclick = () => modal.hide();
+    modal.show({ title: '⛂ Git LFS', body, footer: [close] });
+    return;
+  }
+
+  // Render the full manager
+  function render() {
+    const patterns = info.patterns || [];
+    body.innerHTML = `
+      <div class="lfs-status-banner ${info.initialized ? 'ok' : 'warn'}">
+        <div class="lfs-status-icon">${info.initialized ? '✓' : '⚠'}</div>
+        <div>
+          <div class="lfs-status-title">${info.initialized ? 'Git LFS is active in this repository' : 'Git LFS not initialized here'}</div>
+          <div class="lfs-status-text">
+            ${escapeHtml(info.version || '')}
+            ${info.initialized ? ` · ${info.trackedFiles} tracked file${info.trackedFiles === 1 ? '' : 's'}` : ' · click Initialize to set up hooks & filters'}
+          </div>
+        </div>
+        ${info.initialized ? '' : '<button class="btn-medieval primary" id="lfs-init" type="button">⚜ Initialize</button>'}
+      </div>
+
+      <div class="lfs-section">
+        <div class="lfs-section-title">⚒ Transfer</div>
+        <div class="lfs-btn-row">
+          <button class="mini-btn" id="lfs-pull" type="button" title="Download LFS objects for the current checkout">⇣ Pull</button>
+          <button class="mini-btn" id="lfs-fetch" type="button" title="Download LFS objects without checking out">⇣ Fetch</button>
+          <button class="mini-btn" id="lfs-fetch-all" type="button" title="Fetch ALL LFS objects (every ref)">⇣ Fetch All</button>
+          <button class="mini-btn" id="lfs-push" type="button" title="Upload LFS objects for the current branch">⇡ Push</button>
+          <button class="mini-btn" id="lfs-push-all" type="button" title="Upload ALL LFS objects">⇡ Push All</button>
+          <button class="mini-btn" id="lfs-checkout" type="button" title="Populate working copy from local LFS cache">⌬ Checkout</button>
+          <button class="mini-btn" id="lfs-prune2" type="button" title="Prune unreferenced LFS objects">✕ Prune</button>
+        </div>
+      </div>
+
+      <div class="lfs-section">
+        <div class="lfs-section-title">⚜ Tracked Patterns (${patterns.length})</div>
+        <div class="lfs-track-add">
+          <input type="text" class="modal-input" id="lfs-pattern" placeholder="e.g. *.psd  or  assets/**/*.bin" />
+          <button class="mini-btn primary" id="lfs-track-btn" type="button">+ Track</button>
+        </div>
+        ${patterns.length ? `
+          <ul class="lfs-pattern-list">
+            ${patterns.map(p => `
+              <li class="lfs-pattern-item">
+                <span class="lfs-pattern-name text-mono">${escapeHtml(p)}</span>
+                <button class="mini-btn" data-untrack="${escapeHtml(p)}" type="button">✕ Untrack</button>
+              </li>
+            `).join('')}
+          </ul>
+        ` : '<div class="lfs-empty">No patterns tracked yet. Add one above (e.g. <code>*.psd</code>).</div>'}
+      </div>
+
+      <div class="lfs-section">
+        <div class="lfs-section-title">⌗ Managed Files</div>
+        <button class="mini-btn" id="lfs-list-files" type="button">List LFS files…</button>
+        <div id="lfs-files-result"></div>
+      </div>
+
+      <div class="lfs-section">
+        <div class="lfs-section-title">⚔ Migrate</div>
+        <div class="lfs-status-text" style="margin-bottom:8px">Convert existing files already in history into LFS pointers. <strong class="text-red">Rewrites history</strong> — coordinate with collaborators first.</div>
+        <div class="lfs-track-add">
+          <input type="text" class="modal-input" id="lfs-migrate-pattern" placeholder="e.g. *.zip,*.bin (comma-separated)" />
+          <button class="mini-btn" id="lfs-migrate-btn" type="button">⚔ Migrate Import</button>
+        </div>
+      </div>
+    `;
+
+    // Re-fetch info and re-render
+    async function reload() {
+      const r = await gs.lfsInfo();
+      if (r && r.ok) { info.initialized = r.data.initialized; info.patterns = r.data.patterns; info.trackedFiles = r.data.trackedFiles; info.version = r.data.version; }
+      render();
+    }
+
+    const byId = (id) => body.querySelector('#' + id);
+
+    if (byId('lfs-init')) byId('lfs-init').onclick = async () => {
+      const r = await withLoading('Initializing LFS', () => gs.lfsInstall());
+      if (handleResult(r, 'Git LFS initialized')) await reload();
+    };
+
+    byId('lfs-pull').onclick = async () => {
+      const r = await withLoading('LFS pull', () => gs.lfsPull());
+      handleResult(r, 'LFS objects pulled');
+    };
+    byId('lfs-fetch').onclick = async () => {
+      const r = await withLoading('LFS fetch', () => gs.lfsFetch({}));
+      handleResult(r, 'LFS objects fetched');
+    };
+    byId('lfs-fetch-all').onclick = async () => {
+      const r = await withLoading('LFS fetch --all', () => gs.lfsFetch({ all: true }));
+      handleResult(r, 'All LFS objects fetched');
+    };
+    byId('lfs-push').onclick = async () => {
+      const r = await withLoading('LFS push', () => gs.lfsPush({ remote: 'origin' }));
+      handleResult(r, 'LFS objects pushed');
+    };
+    byId('lfs-push-all').onclick = async () => {
+      const r = await withLoading('LFS push --all', () => gs.lfsPush({ remote: 'origin', all: true }));
+      handleResult(r, 'All LFS objects pushed');
+    };
+    byId('lfs-checkout').onclick = async () => {
+      const r = await withLoading('LFS checkout', () => gs.lfsCheckout());
+      handleResult(r, 'LFS checkout complete');
+    };
+    byId('lfs-prune2').onclick = async () => {
+      const ok = await modal.confirm({ title: 'Prune LFS', message: 'Remove unreferenced LFS objects from local cache?', confirmText: 'Prune' });
+      if (!ok) return;
+      const r = await withLoading('Pruning LFS', () => gs.lfsPrune());
+      handleResult(r, 'LFS pruned');
+    };
+
+    byId('lfs-track-btn').onclick = async () => {
+      const pat = byId('lfs-pattern').value.trim();
+      if (!pat) { showToast('Enter a pattern', 'error'); return; }
+      const r = await withLoading('Tracking ' + pat, () => gs.lfsTrack(pat));
+      if (handleResult(r, 'Now tracking ' + pat)) await reload();
+    };
+    byId('lfs-pattern').onkeydown = (e) => { if (e.key === 'Enter') byId('lfs-track-btn').click(); };
+
+    body.querySelectorAll('[data-untrack]').forEach(btn => {
+      btn.onclick = async () => {
+        const pat = btn.dataset.untrack;
+        const r = await withLoading('Untracking ' + pat, () => gs.lfsUntrack(pat));
+        if (handleResult(r, 'Stopped tracking ' + pat)) await reload();
+      };
+    });
+
+    byId('lfs-list-files').onclick = async () => {
+      const out = byId('lfs-files-result');
+      out.innerHTML = '<div class="lfs-empty">Loading…</div>';
+      const r = await gs.lfsFiles();
+      if (!r.ok) { out.innerHTML = `<div class="lfs-empty">Failed: ${escapeHtml(r.error)}</div>`; return; }
+      const files = r.data.files || [];
+      if (!files.length) { out.innerHTML = '<div class="lfs-empty">No LFS-managed files.</div>'; return; }
+      out.innerHTML = `
+        <ul class="lfs-files-list">
+          ${files.slice(0, 200).map(f => `
+            <li class="lfs-file-item">
+              <span class="lfs-file-dl" title="${f.downloaded ? 'Downloaded' : 'Not downloaded'}">${f.downloaded ? '●' : '○'}</span>
+              <span class="lfs-file-path text-mono" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
+              <span class="lfs-file-size">${escapeHtml(f.size || '')}</span>
+            </li>
+          `).join('')}
+          ${files.length > 200 ? `<li class="lfs-empty">…and ${files.length - 200} more</li>` : ''}
+        </ul>
+      `;
+    };
+
+    byId('lfs-migrate-btn').onclick = async () => {
+      const raw = byId('lfs-migrate-pattern').value.trim();
+      if (!raw) { showToast('Enter at least one pattern', 'error'); return; }
+      const patterns = raw.split(',').map(s => s.trim()).filter(Boolean);
+      const ok = await modal.confirm({
+        title: 'Migrate to LFS',
+        message: `Rewrite history to convert files matching [${patterns.join(', ')}] into LFS pointers? This changes commit hashes and requires a force-push. Make sure you have a backup and coordinate with collaborators.`,
+        danger: true, confirmText: 'Migrate'
+      });
+      if (!ok) return;
+      const r = await withLoading('Migrating to LFS', () => gs.lfsMigrateImport({ patterns }));
+      if (handleResult(r, 'Migration complete')) await reload();
+    };
+  }
+
+  render();
+
+  const close = document.createElement('button');
+  close.className = 'btn-medieval'; close.textContent = 'Close';
+  close.onclick = () => { modal.hide(); refreshDiskUsage().catch(() => {}); };
+  modal.show({ title: '⛂ Git LFS Manager', body, footer: [close] });
+}
 
 function showBranchCleanupDialog(data) {
   const merged = data.merged || [];
@@ -4436,10 +4773,48 @@ function applyTheme(themeId) {
   if (themeId && themeId !== 'crusader') html.classList.add('theme-' + themeId);
 }
 
-// Apply font scale: set --font-scale on root or directly via html zoom
+// Apply font scale by genuinely resizing fonts (not zooming layout). The UI uses
+// many hardcoded px font sizes, so we walk every CSS rule once, record each rule's
+// base font-size in px, and on scale change rewrite them to base*scale. This affects
+// ONLY text size — paddings, widths, and layout stay put.
+let _fontScaleBases = null; // [{ rule, basePx }]
+
+function collectFontScaleBases() {
+  const bases = [];
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try { rules = sheet.cssRules; } catch (e) { continue; } // skip cross-origin
+    if (!rules) continue;
+    for (const rule of rules) {
+      // Only style rules with an explicit px font-size
+      if (rule.style && rule.style.fontSize && rule.style.fontSize.endsWith('px')) {
+        const basePx = parseFloat(rule.style.fontSize);
+        if (!isNaN(basePx)) bases.push({ rule, basePx });
+      }
+    }
+  }
+  // Only cache once we actually found rules (avoids caching an empty list if the
+  // stylesheet hasn't finished parsing yet).
+  if (bases.length) _fontScaleBases = bases;
+  return bases;
+}
+
 function applyFontScale(scale) {
   const v = Math.max(0.75, Math.min(1.5, parseFloat(scale) || 1.0));
-  document.documentElement.style.fontSize = (v * 14) + 'px'; // 14px is base
+  // Clear any leftover zoom from a previous build
+  const welcome = document.getElementById('welcome-screen');
+  const app = document.getElementById('app-screen');
+  if (welcome) welcome.style.zoom = '';
+  if (app) app.style.zoom = '';
+
+  const bases = _fontScaleBases || collectFontScaleBases();
+  if (!bases || !bases.length) return;
+
+  for (const { rule, basePx } of bases) {
+    try {
+      rule.style.setProperty('font-size', (basePx * v).toFixed(2) + 'px', rule.style.getPropertyPriority('font-size'));
+    } catch (e) { /* some rules are read-only; skip */ }
+  }
 }
 
 async function showSettingsDialog() {
@@ -4840,7 +5215,7 @@ async function applySavedAppSettings() {
 // ============================================
 // PANE RESIZERS — drag handles between tab columns
 // ============================================
-const RESIZER_STORAGE_KEY = 'gitgood:pane-widths';
+const RESIZER_STORAGE_KEY = 'gitgood:pane-widths:v2';
 
 // Resolve the grid container that a resizer controls.
 // data-target can be:
@@ -4890,6 +5265,16 @@ function readGridColumns(target) {
 function setupResizer(resizerEl) {
   const target = resolveResizerTarget(resizerEl.dataset.target);
   if (!target) return;
+
+  // Determine which grid track should stay flexible (1fr). We read data-cols
+  // (the original template authored in HTML, e.g. "280px 1fr 320px") and find the
+  // index of the "1fr" entry among the CONTENT columns. In the live grid, resizer
+  // columns are interleaved (content, resizer, content, resizer, content), so the
+  // live index of the Nth content column is N*2.
+  let flexLiveIndex = -1;
+  const dataCols = (resizerEl.dataset.cols || '').trim().split(/\s+/).filter(Boolean);
+  const flexContentIdx = dataCols.findIndex(c => c === '1fr' || c.endsWith('fr'));
+  if (flexContentIdx >= 0) flexLiveIndex = flexContentIdx * 2; // account for interleaved resizers
 
   // Find this resizer's column index in the parent grid.
   // The resizer's previous and next siblings are the columns being resized.
@@ -4953,11 +5338,17 @@ function setupResizer(resizerEl) {
       if (prevIdx < 0 || nextIdx < 0) return;
 
       const newCols = currentTracks.slice();
-      newCols[prevIdx] = newPrev;
-      newCols[nextIdx] = newNext;
+      // Only assign fixed widths to the NON-flex column(s) of the dragged pair.
+      // The flex column (diff) always stays 1fr and absorbs slack, so resizing one
+      // side simply takes space from the flexible middle — the right panel stays
+      // anchored to the edge with no empty gap.
+      if (prevIdx !== flexLiveIndex) newCols[prevIdx] = newPrev;
+      if (nextIdx !== flexLiveIndex) newCols[nextIdx] = newNext;
       target.style.gridTemplateColumns = newCols.map((w, i) => {
         // Keep resizer columns at 5px exact
         if (tracks[i] && tracks[i].classList && tracks[i].classList.contains('pane-resizer')) return '5px';
+        // Keep the designated flex column flexible
+        if (i === flexLiveIndex) return '1fr';
         return w + 'px';
       }).join(' ');
     };

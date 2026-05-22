@@ -164,6 +164,27 @@ function makeGit(dir) {
   return simpleGit({ baseDir: dir, ...SG_OPTS });
 }
 
+// Emit a git operation progress event to the renderer. simple-git's progress
+// callback fires with { method, stage, progress, processed, total } where progress
+// is 0-100. We forward a normalized payload the renderer can render as a bar.
+function emitOpProgress(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('op:progress', payload); } catch (e) {}
+  }
+}
+
+// Build a git instance that reports transfer progress for the current repo.
+// Used for clone/pull/push/fetch where git emits "Receiving objects: NN%" etc.
+function makeProgressGit(dir) {
+  return simpleGit({
+    baseDir: dir,
+    ...SG_OPTS,
+    progress({ method, stage, progress, processed, total }) {
+      emitOpProgress({ method, stage, progress, processed, total, active: true });
+    }
+  });
+}
+
 function ensureGit() {
   if (!git || !currentRepoPath) {
     throw new Error('No repository opened. Open or clone a repository first.');
@@ -299,9 +320,19 @@ ipcMain.handle('repo:clone', wrap(async (_, { url, destination, sshKeyPath }) =>
   // For non-interactive operation (no password prompts hanging the UI)
   if (!cloneEnv.GIT_TERMINAL_PROMPT) cloneEnv.GIT_TERMINAL_PROMPT = '0';
 
-  // Create a simple-git instance bound to the destination directory, with our env
-  const g = makeGit(destination).env(cloneEnv);
-  await g.clone(url, targetPath);
+  // Create a progress-aware simple-git instance bound to the destination, with our env
+  const g = simpleGit({
+    baseDir: destination,
+    ...SG_OPTS,
+    progress({ method, stage, progress, processed, total }) {
+      emitOpProgress({ method, stage, progress, processed, total, active: true });
+    }
+  }).env(cloneEnv);
+  try {
+    await g.clone(url, targetPath, ['--progress']);
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
 
   // Now open the cloned repo with default env
   git = makeGit(targetPath);
@@ -499,27 +530,42 @@ ipcMain.handle('repo:commit', wrap(async (_, { message, description }) => {
 }));
 
 ipcMain.handle('repo:push', wrap(async (_, opts) => {
-  const g = ensureGit();
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
   const args = [];
   if (opts && opts.setUpstream) args.push('-u');
   if (opts && opts.remote) args.push(opts.remote);
   if (opts && opts.branch) args.push(opts.branch);
-  const result = await g.push(args.length ? args : undefined);
-  return result;
+  try {
+    const result = await pg.push(args.length ? args : undefined);
+    return result;
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
 }));
 
 ipcMain.handle('repo:pull', wrap(async () => {
-  const g = ensureGit();
-  const result = await g.pull();
-  return result;
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
+  try {
+    const result = await pg.pull();
+    return result;
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
 }));
 
 ipcMain.handle('repo:fetch', wrap(async () => {
-  const g = ensureGit();
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
   // --prune removes remote-tracking branches that no longer exist on the remote
   // --all fetches from all configured remotes (not just origin)
-  const result = await g.raw(['fetch', '--all', '--prune', '--tags']);
-  return result;
+  try {
+    const result = await pg.raw(['fetch', '--all', '--prune', '--tags', '--progress']);
+    return result;
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
 }));
 
 ipcMain.handle('repo:checkout', wrap(async (_, branch) => {
@@ -1928,6 +1974,140 @@ ipcMain.handle('repo:lfsStatus', wrap(async () => {
   const g = ensureGit();
   try { return await g.raw(['lfs', 'status']); }
   catch (e) { return 'Git LFS is not installed or not initialized in this repository.'; }
+}));
+
+// Is git-lfs available on this machine, and is it initialized in this repo?
+ipcMain.handle('repo:lfsInfo', wrap(async () => {
+  const g = ensureGit();
+  const info = { available: false, version: '', initialized: false, patterns: [], trackedFiles: 0 };
+  // Check git-lfs availability via version
+  try {
+    const v = await g.raw(['lfs', 'version']);
+    info.available = true;
+    info.version = (v || '').trim();
+  } catch (e) {
+    return info; // git-lfs not installed
+  }
+  // Initialized? Check for the pre-push hook or lfs filter in config
+  try {
+    const cfg = await g.raw(['config', '--get', 'filter.lfs.clean']);
+    info.initialized = !!(cfg && cfg.trim());
+  } catch (e) { info.initialized = false; }
+  // Tracked patterns (parse `git lfs track`)
+  try {
+    const out = await g.raw(['lfs', 'track']);
+    // Output looks like: "Listing tracked patterns\n    *.psd (.gitattributes)\n ..."
+    info.patterns = out.split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !l.toLowerCase().startsWith('listing') && !l.toLowerCase().startsWith('git lfs'))
+      .map(l => {
+        // strip the "(.gitattributes)" suffix
+        const m = l.match(/^(.+?)\s*\(/);
+        return m ? m[1].trim() : l;
+      })
+      .filter(Boolean);
+  } catch (e) {}
+  // Count tracked files
+  try {
+    const files = await g.raw(['lfs', 'ls-files']);
+    info.trackedFiles = files.split('\n').filter(Boolean).length;
+  } catch (e) {}
+  return info;
+}));
+
+// Initialize git-lfs in the current repo (installs hooks + filters)
+ipcMain.handle('repo:lfsInstall', wrap(async () => {
+  const g = ensureGit();
+  // --local installs into this repo only; safer than touching global config
+  return await g.raw(['lfs', 'install', '--local']);
+}));
+
+// Track a pattern (e.g. "*.psd", "assets/**"). Writes to .gitattributes.
+ipcMain.handle('repo:lfsTrack', wrap(async (_, pattern) => {
+  const g = ensureGit();
+  if (!pattern || !pattern.trim()) throw new Error('Pattern required');
+  return await g.raw(['lfs', 'track', pattern.trim()]);
+}));
+
+// Stop tracking a pattern
+ipcMain.handle('repo:lfsUntrack', wrap(async (_, pattern) => {
+  const g = ensureGit();
+  if (!pattern || !pattern.trim()) throw new Error('Pattern required');
+  return await g.raw(['lfs', 'untrack', pattern.trim()]);
+}));
+
+// List LFS-managed files: [{ oid, size, path }]
+ipcMain.handle('repo:lfsFiles', wrap(async () => {
+  const g = ensureGit();
+  let out = '';
+  try { out = await g.raw(['lfs', 'ls-files', '--long', '--size']); }
+  catch (e) {
+    // Fall back to basic ls-files
+    try { out = await g.raw(['lfs', 'ls-files']); } catch (e2) { return { files: [] }; }
+  }
+  // Basic format: "<oid short> <*|-> <path>"
+  // With --size:  "<oid> <*|-> <path> (<size>)"
+  const files = out.split('\n').filter(Boolean).map(line => {
+    const m = line.match(/^(\S+)\s+([*-])\s+(.+?)(?:\s+\(([^)]+)\))?$/);
+    if (!m) return { oid: '', path: line, size: '', downloaded: false };
+    return { oid: m[1], downloaded: m[2] === '*', path: m[3], size: m[4] || '' };
+  });
+  return { files };
+}));
+
+// LFS pull (download all LFS objects for current checkout)
+ipcMain.handle('repo:lfsPull', wrap(async (_, remote) => {
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
+  const args = ['lfs', 'pull'];
+  if (remote) args.push(remote);
+  try { return await pg.raw(args); }
+  finally { emitOpProgress({ active: false, done: true }); }
+}));
+
+// LFS fetch (download objects without checking out)
+ipcMain.handle('repo:lfsFetch', wrap(async (_, opts) => {
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
+  const args = ['lfs', 'fetch'];
+  if (opts && opts.all) args.push('--all');
+  if (opts && opts.remote) args.push(opts.remote);
+  try { return await pg.raw(args); }
+  finally { emitOpProgress({ active: false, done: true }); }
+}));
+
+// LFS push (upload objects to remote)
+ipcMain.handle('repo:lfsPush', wrap(async (_, opts) => {
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
+  const remote = (opts && opts.remote) || 'origin';
+  const args = ['lfs', 'push', remote];
+  if (opts && opts.all) args.push('--all');
+  else if (opts && opts.branch) args.push(opts.branch);
+  try { return await pg.raw(args); }
+  finally { emitOpProgress({ active: false, done: true }); }
+}));
+
+// LFS checkout (populate working copy from local LFS cache)
+ipcMain.handle('repo:lfsCheckout', wrap(async () => {
+  const g = ensureGit();
+  return await g.raw(['lfs', 'checkout']);
+}));
+
+// LFS migrate: import existing files matching patterns into LFS (rewrites history).
+// opts: { patterns: ['*.bin'], everything: bool, includeRefAll: bool }
+ipcMain.handle('repo:lfsMigrateImport', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const args = ['lfs', 'migrate', 'import'];
+  if (opts && opts.everything) {
+    args.push('--everything');
+  }
+  if (opts && Array.isArray(opts.patterns)) {
+    for (const p of opts.patterns) {
+      if (p && p.trim()) args.push('--include=' + p.trim());
+    }
+  }
+  return await g.raw(args);
 }));
 
 ipcMain.handle('repo:deleteBranches', wrap(async (_, opts) => {

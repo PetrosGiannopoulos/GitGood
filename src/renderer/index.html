@@ -93,6 +93,9 @@
     <!-- Top toolbar -->
     <header class="toolbar">
       <div class="toolbar-left">
+        <button class="sidebar-toggle" id="sidebar-toggle" title="Collapse/expand sidebar (Ctrl+B)">
+          <span class="sidebar-toggle-icon">⮜</span>
+        </button>
         <div class="brand">
           <svg viewBox="0 0 100 100" class="brand-shield">
             <path d="M50 5 L90 20 L90 55 Q90 80 50 95 Q10 80 10 55 L10 20 Z"
@@ -163,8 +166,9 @@
 
       <!-- Left sidebar: branches, remotes, stashes -->
       <aside class="sidebar">
-        <div class="sidebar-section">
-          <div class="sidebar-header">
+        <div class="sidebar-section collapsible" id="section-banner">
+          <div class="sidebar-header clickable" data-target="current-branch">
+            <span class="caret">▾</span>
             <span>⚜ Current Banner</span>
           </div>
           <div class="current-branch" id="current-branch">—</div>
@@ -253,6 +257,7 @@
                 <button class="mini-btn" id="disk-reflog" title="Expire reflog entries">↶ Expire Reflog</button>
                 <button class="mini-btn" id="disk-merged" title="Show merged branches that can be safely deleted">⑂ Cleanup Branches…</button>
                 <button class="mini-btn" id="disk-largest" title="Show the largest objects in the repo">⌗ Largest Objects…</button>
+                <button class="mini-btn" id="disk-lfs-manage" title="Manage Git LFS (Large File Storage)">⛂ Manage LFS…</button>
                 <button class="mini-btn" id="disk-lfs-prune" title="Prune unused Git LFS objects" style="display:none">⌖ LFS Prune</button>
               </div>
             </div>
@@ -468,6 +473,11 @@
       <span class="status-item" id="status-ahead-behind">↑0 ↓0</span>
       <span class="status-spacer"></span>
       <span class="status-item" id="status-message">Ready</span>
+      <span class="op-progress hidden" id="op-progress">
+        <span class="op-progress-label" id="op-progress-label"></span>
+        <span class="op-progress-bar"><span class="op-progress-bar-fill" id="op-progress-fill"></span></span>
+        <span class="op-progress-pct" id="op-progress-pct">0%</span>
+      </span>
     </footer>
   </div>
 
