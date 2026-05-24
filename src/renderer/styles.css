@@ -1293,6 +1293,41 @@ body.sidebar-is-collapsed .sidebar-toggle-icon {
   flex: 1;
   margin-right: 8px;
 }
+
+/* Inline fold toggle at the start of foldable rows */
+.graph-fold-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--crusader-red-bright);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.graph-fold-btn:hover {
+  background: var(--crusader-red);
+  color: var(--bone-white);
+  border-color: var(--crusader-red-bright);
+}
+.graph-fold-btn.collapsed {
+  background: var(--gold-accent);
+  color: var(--ink-black);
+  border-color: var(--gold-accent);
+}
+.graph-fold-spacer {
+  flex-shrink: 0;
+  width: 18px;
+  margin-right: 6px;
+}
 .graph-row-author {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2422,6 +2457,16 @@ body.sidebar-is-collapsed .sidebar-toggle-icon {
 .graph-row:hover .commit-dot { r: 6; }
 .graph-row.selected .commit-dot {
   filter: drop-shadow(0 0 6px var(--crusader-red-bright));
+}
+
+/* Foldable commit dots: subtle cue that they can be right-clicked to fold */
+.graph-svg circle.commit-dot[data-foldable="1"] {
+  cursor: pointer;
+}
+.graph-svg circle.commit-dot.collapsed {
+  stroke: var(--gold-accent);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 4px var(--gold-accent));
 }
 
 /* Drop target highlight when dragging branches */
@@ -3944,3 +3989,44 @@ html.theme-sandstone {
   box-shadow: 0 0 6px rgba(200, 160, 74, 0.4);
 }
 #disk-refresh.stale::after { content: ' •'; }
+
+/* ============================================
+   GRAPH: collapsed-history summary row
+   ============================================ */
+.graph-hidden-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 8px;
+  margin-left: 6px;
+  cursor: pointer;
+  color: var(--parchment-dim);
+  border-top: 1px dashed var(--border-strong);
+  border-bottom: 1px dashed var(--border-strong);
+  background: linear-gradient(180deg, rgba(212,48,47,0.05), transparent);
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
+}
+.graph-hidden-row:hover {
+  background: rgba(212, 48, 47, 0.12);
+  color: var(--bone-white);
+}
+.graph-hidden-dots {
+  font-size: 18px;
+  line-height: 1;
+  color: var(--crusader-red-bright);
+  letter-spacing: 2px;
+}
+.graph-hidden-label {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Collapse toggle active state */
+#graph-collapse-toggle.active {
+  background: var(--crusader-red);
+  color: var(--bone-white);
+  border-color: var(--crusader-red-bright);
+}
