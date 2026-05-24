@@ -1,0 +1,63 @@
+# ---- Dependencies ----
+node_modules/
+.npm/
+.pnp/
+.pnp.js
+
+# ---- Build / packaging output ----
+dist/
+build/
+out/
+release/
+*.app
+*.exe
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.snap
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Lockfiles (uncomment if you intentionally don't commit them) ----
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# ---- Local app data / settings ----
+gitgood-settings.json
+*.local
+
+# ---- Environment ----
+.env
+.env.*
+!.env.example
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS cruft ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ---- Misc ----
+*.tmp
+*.temp
+coverage/
+.cache/
