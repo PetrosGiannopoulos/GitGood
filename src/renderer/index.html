@@ -161,6 +161,18 @@
       </div>
     </div>
 
+    <div id="detached-banner" class="detached-banner hidden">
+      <div class="detached-banner-icon">⚓</div>
+      <div class="detached-banner-body">
+        <div class="detached-banner-title">Detached HEAD</div>
+        <div class="detached-banner-subtitle" id="detached-banner-subtitle">Viewing a commit — not on any branch</div>
+      </div>
+      <div class="detached-banner-actions">
+        <button class="btn-medieval" id="detached-banner-newbranch">+ Branch here</button>
+        <button class="btn-medieval primary" id="detached-banner-return">↩ Return to branch</button>
+      </div>
+    </div>
+
     <!-- Main body: 3-pane layout -->
     <main class="workspace">
 
@@ -300,6 +312,7 @@
           <div class="graph-layout">
             <div class="graph-toolbar">
               <span class="graph-title">⚜ Chronicle of Banners ⚜</span>
+              <input type="search" id="graph-search" class="commit-search" placeholder="Filter commits…" title="Filter by message, author, or hash" />
               <span class="graph-spacer"></span>
               <button class="mini-btn" id="graph-collapse-toggle" title="Collapse the middle of long history, showing only the newest commits">⊟ Collapse</button>
               <label class="mini-btn-label" title="Number of commits to load">
@@ -387,6 +400,11 @@
 
         <!-- History tab -->
         <div class="tab-panel" data-panel="history">
+          <div class="history-toolbar">
+            <span class="graph-title">📜 Chronicle of Deeds</span>
+            <input type="search" id="history-search" class="commit-search" placeholder="Filter commits…" title="Filter by message, author, or hash" />
+            <span class="graph-spacer"></span>
+          </div>
           <div class="history-list" id="history-list">
             <div class="empty-state">
               <div class="empty-icon">📜</div>
@@ -442,7 +460,13 @@
 
             <div class="pane-resizer" data-resizer="changes-left" data-target="data-panel:changes" data-cols="280px 1fr 320px" data-edge="0" title="Drag to resize"></div>
             <div class="changes-diff">
-              <div class="diff-header" id="diff-header">No file selected</div>
+              <div class="diff-header" id="diff-header">
+                <span id="diff-header-label">No file selected</span>
+                <span class="diff-view-toggle" id="diff-view-toggle">
+                  <button class="diff-view-btn active" data-diffmode="unified" title="Unified view">☰ Unified</button>
+                  <button class="diff-view-btn" data-diffmode="split" title="Side-by-side view">◫ Split</button>
+                </span>
+              </div>
               <div class="diff-content" id="diff-content">
                 <div class="empty-state">
                   <div class="empty-icon">⚔</div>
@@ -499,6 +523,20 @@
 
   <!-- ============== CONTEXT MENU ============== -->
   <div id="context-menu" class="context-menu hidden"></div>
+
+  <!-- ============== REPO LOADING OVERLAY ============== -->
+  <div id="loading-overlay" class="loading-overlay hidden" aria-hidden="true">
+    <div class="loading-overlay-inner">
+      <svg viewBox="0 0 100 100" class="loading-shield">
+        <path d="M50 5 L90 20 L90 55 Q90 80 50 95 Q10 80 10 55 L10 20 Z"
+              fill="none" stroke="currentColor" stroke-width="3"/>
+        <path d="M50 25 L50 75 M30 50 L70 50" stroke="currentColor" stroke-width="3.5"/>
+      </svg>
+      <div class="loading-overlay-title" id="loading-overlay-title">Summoning the chronicle…</div>
+      <div class="loading-overlay-sub" id="loading-overlay-sub">Preparing thy realm</div>
+      <div class="loading-overlay-bar"><div class="loading-overlay-bar-fill" id="loading-overlay-fill"></div></div>
+    </div>
+  </div>
 
   <script src="renderer.js"></script>
 </body>

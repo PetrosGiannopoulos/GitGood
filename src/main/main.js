@@ -355,7 +355,22 @@ ipcMain.handle('repo:close', () => {
 ipcMain.handle('repo:status', wrap(async () => {
   const g = ensureGit();
   const status = await g.status();
-  return status;
+  // Detect detached HEAD. simple-git's status.detached is reliable; we also treat a
+  // current ref of "HEAD" as detached. As a final cross-check, symbolic-ref prints the
+  // branch ref when attached and nothing when detached.
+  let detached = !!status.detached || status.current === 'HEAD' || !status.current;
+  try {
+    const symRef = (await g.raw(['symbolic-ref', '--quiet', 'HEAD'])).trim();
+    if (symRef) detached = false;   // we ARE on a branch
+    else detached = true;            // empty output => detached
+  } catch (e) {
+    detached = true;                 // non-zero exit => detached
+  }
+  let headHash = null;
+  try {
+    headHash = (await g.revparse(['--short', 'HEAD'])).trim();
+  } catch (e) { /* empty repo */ }
+  return { ...status, detached, headHash };
 }));
 
 ipcMain.handle('repo:branches', wrap(async () => {

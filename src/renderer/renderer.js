@@ -44,6 +44,10 @@ const state = {
   graphLoading: false,
   graphCollapsed: false,   // when true, hide the middle of long history (show newest few)
   collapsedCommits: null,  // Set<hash>: commits whose same-lane descendant chain is folded
+  graphFilter: '',         // text filter for the graph tab
+  historyFilter: '',       // text filter for the history tab
+  detachedFrom: null,      // branch name we were on before checking out a commit (detached HEAD)
+  diffMode: 'unified',     // 'unified' | 'split' — diff display style
   // Branches tab state
   branchesFilter: '',
   checkoutTarget: null,
@@ -63,6 +67,22 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = String(text);
   return div.innerHTML;
+}
+
+// Does a commit match a free-text filter query? Matches against the commit message,
+// author name/email, and hash (full or short). Case-insensitive; supports multiple
+// space-separated terms (ALL must match somewhere — AND semantics).
+function commitMatchesFilter(commit, query) {
+  if (!query) return true;
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const haystack = [
+    commit.message,
+    commit.author_name,
+    commit.author_email,
+    commit.hash
+  ].filter(Boolean).join(' ').toLowerCase();
+  return terms.every(t => haystack.includes(t));
 }
 
 function showToast(message, type = 'info', timeout = 3500) {
@@ -176,6 +196,46 @@ async function withLoading(message, fn) {
     setStatus('Failed');
     opProgress.end(true);
     throw err;
+  }
+}
+
+// ============================================
+// FULL-SCREEN LOADING OVERLAY
+// Blocks all interaction while a repository is opening/loading so the user can't
+// click into a half-loaded graph or changes list.
+// ============================================
+const loadingOverlay = {
+  show(title, sub) {
+    const el = document.getElementById('loading-overlay');
+    if (!el) return;
+    el.classList.remove('closing', 'hidden');
+    el.setAttribute('aria-hidden', 'false');
+    const t = document.getElementById('loading-overlay-title');
+    const s = document.getElementById('loading-overlay-sub');
+    if (t && title) t.textContent = title;
+    if (s) s.textContent = sub || '';
+  },
+  setSub(sub) {
+    const s = document.getElementById('loading-overlay-sub');
+    if (s) s.textContent = sub || '';
+  },
+  hide() {
+    const el = document.getElementById('loading-overlay');
+    if (!el || el.classList.contains('hidden')) return;
+    el.classList.add('closing');
+    el.setAttribute('aria-hidden', 'true');
+    setTimeout(() => { el.classList.add('hidden'); el.classList.remove('closing'); }, 220);
+  }
+};
+
+// Run an async repo-open routine behind the blocking overlay. Guarantees the overlay
+// is removed even if loading throws.
+async function withRepoOpen(title, fn) {
+  loadingOverlay.show(title || 'Summoning the chronicle…', 'Preparing thy realm');
+  try {
+    return await fn();
+  } finally {
+    loadingOverlay.hide();
   }
 }
 
@@ -345,13 +405,20 @@ async function openRepoByPath(p) {
   clearCommitCache();
   state.collapsedCommits = null;
   state.graphCollapsed = false;
+  state.graphFilter = "";
+  state.historyFilter = "";
+  state.detachedFrom = null;
+  { const gs1 = document.getElementById('graph-search'); if (gs1) gs1.value = '';
+    const hs1 = document.getElementById('history-search'); if (hs1) hs1.value = ''; }
   _diskState.loaded = false;
   _diskState.lastData = null;
   clearDiskStale();
   $('#welcome-screen').classList.add('hidden');
   $('#app-screen').classList.remove('hidden');
   updateRepoInfo();
-  await refreshAll();
+  // Block interaction behind the overlay until the full initial load completes, so the
+  // user can't click into a half-rendered graph or changes list.
+  await withRepoOpen(`Opening “${result.data.name}”`, () => refreshAll());
   showToast(`Opened "${result.data.name}"`, 'success');
 }
 
@@ -373,7 +440,7 @@ async function showInitDialog() {
   $('#welcome-screen').classList.add('hidden');
   $('#app-screen').classList.remove('hidden');
   updateRepoInfo();
-  await refreshAll();
+  await withRepoOpen('Forging repository', () => refreshAll());
   showToast('Repository forged', 'success');
 }
 
@@ -732,7 +799,7 @@ function showCloneDialog() {
     $('#welcome-screen').classList.add('hidden');
     $('#app-screen').classList.remove('hidden');
     updateRepoInfo();
-    await refreshAll();
+    await withRepoOpen(`Opening “${result.data.name}”`, () => refreshAll());
     showToast(`Cloned "${result.data.name}"`, 'success');
   };
 
@@ -784,13 +851,21 @@ function updateRepoInfo() {
 }
 
 async function refreshAll() {
+  // When the loading overlay is up (initial repo open), surface progress as each part
+  // finishes. The .then() taps don't change behaviour when the overlay is hidden.
+  const overlayUp = () => {
+    const el = document.getElementById('loading-overlay');
+    return el && !el.classList.contains('hidden');
+  };
+  const tap = (p, msg) => p.then(r => { if (overlayUp()) loadingOverlay.setSub(msg); return r; });
+
   await Promise.all([
-    refreshStatus(),
-    refreshBranches(),
-    refreshLog(),
-    refreshGraph(),
-    refreshStashes(),
-    refreshRemotes()
+    tap(refreshStatus(), 'Reading working tree…'),
+    tap(refreshBranches(), 'Gathering banners…'),
+    tap(refreshLog(), 'Reading the chronicle…'),
+    tap(refreshGraph(), 'Drawing the lineage…'),
+    tap(refreshStashes(), 'Checking the reserves…'),
+    tap(refreshRemotes(), 'Contacting distant realms…')
   ]);
   // NOTE: Disk Management is intentionally NOT recalculated here. Disk scans can be
   // expensive on large repos, so they only run when the user explicitly asks for them
@@ -825,8 +900,62 @@ async function refreshStatus() {
   }
 
   renderConflictBanner();
+  renderDetachedBanner();
   renderChanges();
   updateStatusBar();
+}
+
+// Show/hide the detached-HEAD banner based on git status. When detached, offers a
+// one-click return to the branch we came from (or a generic message if unknown).
+function renderDetachedBanner() {
+  const banner = document.getElementById('detached-banner');
+  if (!banner) return;
+  const st = state.status;
+  const detached = !!(st && st.detached);
+  if (!detached) {
+    banner.classList.add('hidden');
+    // NOTE: we intentionally do NOT clear state.detachedFrom here. Status refreshes can
+    // briefly report a non-detached state mid-checkout, which would wipe the remembered
+    // origin before the detached banner ever shows. detachedFrom is only cleared when
+    // the user explicitly returns to a branch, or when the repo is switched/closed.
+    return;
+  }
+  banner.classList.remove('hidden');
+  const sub = document.getElementById('detached-banner-subtitle');
+  const head = (st.headHash) ? st.headHash : '';
+  if (sub) {
+    sub.textContent = state.detachedFrom
+      ? `Viewing commit ${head} — return to “${state.detachedFrom}” when done`
+      : `Viewing commit ${head} — not on any branch`;
+  }
+  const returnBtn = document.getElementById('detached-banner-return');
+  if (returnBtn) {
+    if (state.detachedFrom) {
+      returnBtn.style.display = '';
+      returnBtn.innerHTML = `↩ Return to ${escapeHtml(state.detachedFrom)}`;
+    } else {
+      // No remembered origin (e.g. repo opened already-detached). Fall back to a sensible
+      // default branch if one exists so the button is still useful.
+      const fallback = guessDefaultBranch();
+      if (fallback) {
+        returnBtn.style.display = '';
+        returnBtn.innerHTML = `↩ Go to ${escapeHtml(fallback)}`;
+        returnBtn.dataset.fallback = fallback;
+      } else {
+        returnBtn.style.display = 'none';
+      }
+    }
+  }
+}
+
+// Pick a reasonable default branch to return to when we have no remembered origin.
+function guessDefaultBranch() {
+  const local = state.branches && state.branches.local;
+  const names = (local && local.all) || [];
+  for (const pref of ['main', 'master', 'develop', 'devel']) {
+    if (names.includes(pref)) return pref;
+  }
+  return names[0] || null;
 }
 
 async function refreshBranches() {
@@ -837,6 +966,8 @@ async function refreshBranches() {
   }
   state.branches = result.data;
   renderBranches();
+  // The detached banner's fallback target depends on the branch list.
+  if (typeof renderDetachedBanner === 'function') renderDetachedBanner();
   // Update the branches tab as well, if it's been rendered
   if (typeof renderBranchesTab === 'function') renderBranchesTab();
 }
@@ -884,20 +1015,26 @@ function relayoutGraph() {
   let commits = all;
   let hiddenCount = 0;
 
-  // 1. Global collapse first
-  if (state.graphCollapsed && all.length > GRAPH_COLLAPSE_VISIBLE) {
-    commits = all.slice(0, GRAPH_COLLAPSE_VISIBLE);
-    hiddenCount = all.length - GRAPH_COLLAPSE_VISIBLE;
+  // 0. Text filter (search bar): keep only commits matching the query. This narrows
+  //    the graph to matches; structural lines to filtered-out parents simply fade off.
+  const query = (state.graphFilter || '').trim();
+  if (query) {
+    commits = commits.filter(c => commitMatchesFilter(c, query));
+  }
+
+  // 1. Global collapse (only when not filtering — filtering already narrows the view)
+  if (!query && state.graphCollapsed && commits.length > GRAPH_COLLAPSE_VISIBLE) {
+    hiddenCount = commits.length - GRAPH_COLLAPSE_VISIBLE;
+    commits = commits.slice(0, GRAPH_COLLAPSE_VISIBLE);
   }
 
   // 2. Per-commit collapse: lay out once to learn lanes, then hide same-lane
   //    descendant chains of any collapsed commit, and re-lay-out.
   let perCommitHidden = 0;
   const collapsedSet = state.collapsedCommits;
-  if (collapsedSet && collapsedSet.size) {
+  if (!query && collapsedSet && collapsedSet.size) {
     const probe = layoutGraph(commits);
     const hide = computeFoldedHashes(commits, probe.positions, collapsedSet);
-    console.log('[fold] relayout: collapsedSet=', [...collapsedSet], 'computed hidden=', [...hide]);
     if (hide.size) {
       commits = commits.filter(c => !hide.has(c.hash));
       perCommitHidden = hide.size;
@@ -908,11 +1045,16 @@ function relayoutGraph() {
   state.graph = {
     commits, head, hiddenCount,
     perCommitHidden,
+    filtered: !!query,
     // expose which collapsed commits are currently active so the renderer can mark them
     collapsedSet: collapsedSet || new Set(),
     ...layout
   };
   renderGraph();
+
+  // Reflect "no matches" on the graph search box
+  const searchBox = document.getElementById('graph-search');
+  if (searchBox) searchBox.classList.toggle('has-no-matches', !!query && commits.length === 0);
 }
 
 // Given the laid-out commits and a set of collapsed commit hashes, return the set of
@@ -1001,6 +1143,7 @@ function renderBranches() {
       };
       li.oncontextmenu = (e) => {
         e.preventDefault();
+        e.stopPropagation();
         showContextMenu([
           { label: 'Checkout', icon: '⑂', action: () => checkoutBranch(b) },
           { label: 'Merge into current', icon: '⚒', action: () => mergeBranch(b) },
@@ -1057,6 +1200,7 @@ function renderStashes() {
     li.onclick = () => showStashBrowser(i);
     li.oncontextmenu = (e) => {
       e.preventDefault();
+      e.stopPropagation();
       showContextMenu([
         { label: 'Browse files…', icon: '⚜', action: () => showStashBrowser(i) },
         'sep',
@@ -1086,6 +1230,7 @@ function renderRemotes() {
     li.textContent = r.name;
     li.oncontextmenu = (e) => {
       e.preventDefault();
+      e.stopPropagation();
       showContextMenu([
         { label: 'Copy URL', icon: '⎘', action: () => { navigator.clipboard.writeText(url); showToast('URL copied', 'success'); } },
         { label: 'Open in browser', icon: '↗', action: () => {
@@ -1105,9 +1250,15 @@ function renderRemotes() {
 // ============================================
 function renderHistory() {
   const list = $('#history-list');
-  const commits = state.log.all || [];
+  const allCommits = state.log.all || [];
+  const query = (state.historyFilter || '').trim();
+  const commits = query ? allCommits.filter(c => commitMatchesFilter(c, query)) : allCommits;
 
-  if (!commits.length) {
+  // Reflect "no matches" on the search box
+  const searchBox = $('#history-search');
+  if (searchBox) searchBox.classList.toggle('has-no-matches', !!query && commits.length === 0);
+
+  if (!allCommits.length) {
     list.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">📜</div>
@@ -1115,6 +1266,11 @@ function renderHistory() {
       </div>
     `;
     renderHistoryDetail(null);
+    return;
+  }
+
+  if (!commits.length) {
+    list.innerHTML = `<div class="filter-empty">No commits match “${escapeHtml(query)}”.</div>`;
     return;
   }
 
@@ -1137,11 +1293,12 @@ function renderHistory() {
     row.onclick = (e) => selectCommit(c, e);
     row.oncontextmenu = (e) => {
       e.preventDefault();
+      e.stopPropagation();
       showContextMenu([
         { label: 'Copy hash', icon: '⎘', action: () => { navigator.clipboard.writeText(c.hash); showToast('Hash copied', 'success'); } },
         { label: 'Copy short hash', icon: '⎘', action: () => { navigator.clipboard.writeText(c.hash.slice(0, 7)); showToast('Short hash copied', 'success'); } },
         'sep',
-        { label: 'Checkout this commit', icon: '⑂', action: () => checkoutBranch(c.hash) },
+        { label: 'Checkout this commit', icon: '⑂', action: () => checkoutCommit(c.hash) },
         { label: 'Create branch here...', icon: '+', action: () => showCreateBranchDialog(c.hash) }
       ], e.pageX, e.pageY);
     };
@@ -1224,6 +1381,9 @@ async function selectCommit(commit, evt) {
 }
 
 function renderHistoryDetail(commit, details) {
+  // Remember the diff data (keyed by hash) so the unified/split toggle can re-render
+  // without refetching.
+  if (details && commit) _historyDetailDiff = { hash: commit.hash, details };
   const panel = $('#history-detail');
   if (!commit) {
     panel.innerHTML = `
@@ -1251,7 +1411,10 @@ function renderHistoryDetail(commit, details) {
       <div class="detail-meta text-mono" style="word-break:break-all">${escapeHtml(commit.hash)}</div>
     </div>
     <div class="detail-section">
-      <div class="detail-header">⚒ Changes</div>
+      <div class="detail-header detail-header-row">
+        <span>⚒ Changes</span>
+        ${diffModeToggleHtml()}
+      </div>
       <div class="diff-content" id="hist-diff-content" style="border:1px solid var(--border);max-height:50vh"><div class="empty-state"><span class="loading"></span></div></div>
     </div>
   `;
@@ -1282,6 +1445,35 @@ function renderHistoryDetail(commit, details) {
 const DIFF_LINE_CAP = 20000;
 
 function renderDiff(diffText, opts) {
+  opts = opts || {};
+  if (!diffText || !diffText.trim()) {
+    return '<div class="empty-state"><p>No differences.</p></div>';
+  }
+  // Persist the last diff so the view-mode toggle can re-render without refetching.
+  _lastDiff = { text: diffText, opts };
+  return state.diffMode === 'split'
+    ? renderDiffSplit(diffText, opts)
+    : renderDiffUnified(diffText, opts);
+}
+
+// Remember the most recently rendered diff so toggling unified/split re-renders instantly.
+let _lastDiff = null;
+// Last commit-detail diff data for the History tab, so the toggle can re-render it.
+let _historyDetailDiff = null;
+
+// Returns HTML for a unified/split toggle reflecting the current mode. Used in the
+// Changes pane header and the Graph/History commit-detail "Changes" headers. Clicks
+// are handled by a single delegated listener (see below).
+function diffModeToggleHtml() {
+  const u = state.diffMode === 'split' ? '' : ' active';
+  const s = state.diffMode === 'split' ? ' active' : '';
+  return `<span class="diff-view-toggle">` +
+    `<button class="diff-view-btn${u}" data-diffmode="unified" title="Unified view">☰ Unified</button>` +
+    `<button class="diff-view-btn${s}" data-diffmode="split" title="Side-by-side view">◫ Split</button>` +
+  `</span>`;
+}
+
+function renderDiffUnified(diffText, opts) {
   opts = opts || {};
   if (!diffText || !diffText.trim()) {
     return '<div class="empty-state"><p>No differences.</p></div>';
@@ -1331,6 +1523,112 @@ function renderDiff(diffText, opts) {
       ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
       : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
     html += `<div class="diff-line hunk" style="background:rgba(212,48,47,0.12);border-top:2px solid var(--crusader-red);padding:10px;"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
+  }
+  return html;
+}
+
+// Side-by-side (split) diff. Parses the unified diff into hunks and pairs deleted lines
+// on the left with added lines on the right; context lines appear on both sides.
+function renderDiffSplit(diffText, opts) {
+  opts = opts || {};
+  const allLines = diffText.split('\n');
+  const totalLines = allLines.length;
+  const cap = opts.lineCap || DIFF_LINE_CAP;
+  const truncatedByCap = totalLines > cap;
+  const lines = truncatedByCap ? allLines.slice(0, cap) : allLines;
+
+  // A row is { type, leftNum, leftText, rightNum, rightText }
+  // type: 'meta' (file/hunk header, spans full width), 'context', 'change'
+  const rows = [];
+  let oldLine = 0, newLine = 0;
+
+  // Buffer consecutive removals/additions so we can align them side-by-side.
+  let pendingDel = [];   // {num, text}
+  let pendingAdd = [];   // {num, text}
+  const flushPending = () => {
+    const n = Math.max(pendingDel.length, pendingAdd.length);
+    for (let k = 0; k < n; k++) {
+      const d = pendingDel[k];
+      const a = pendingAdd[k];
+      rows.push({
+        type: 'change',
+        leftNum: d ? d.num : '',
+        leftText: d ? d.text : null,     // null => empty filler cell
+        rightNum: a ? a.num : '',
+        rightText: a ? a.text : null
+      });
+    }
+    pendingDel = [];
+    pendingAdd = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw.startsWith('diff --git') || raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ')) {
+      flushPending();
+      rows.push({ type: 'meta', text: raw });
+      continue;
+    }
+    if (raw.startsWith('@@')) {
+      flushPending();
+      const m = raw.match(/@@ -(\d+),?\d* \+(\d+),?\d* @@/);
+      if (m) { oldLine = parseInt(m[1]); newLine = parseInt(m[2]); }
+      rows.push({ type: 'meta', text: raw });
+      continue;
+    }
+    if (raw.startsWith('+') && !raw.startsWith('+++')) {
+      pendingAdd.push({ num: newLine, text: raw.slice(1) });
+      newLine++;
+      continue;
+    }
+    if (raw.startsWith('-') && !raw.startsWith('---')) {
+      pendingDel.push({ num: oldLine, text: raw.slice(1) });
+      oldLine++;
+      continue;
+    }
+    if (raw.startsWith('\\')) {
+      // "\ No newline at end of file" — attach as meta-ish, skip
+      continue;
+    }
+    // Context line — flush any pending change block first, then add to both sides.
+    flushPending();
+    const text = raw.startsWith(' ') ? raw.slice(1) : raw;
+    rows.push({
+      type: 'context',
+      leftNum: oldLine, leftText: text,
+      rightNum: newLine, rightText: text
+    });
+    oldLine++; newLine++;
+  }
+  flushPending();
+
+  const parts = new Array(rows.length);
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.type === 'meta') {
+      parts[i] = `<div class="dsplit-row meta"><div class="dsplit-meta">${escapeHtml(r.text)}</div></div>`;
+      continue;
+    }
+    const leftCls = r.type === 'change' && r.leftText !== null ? 'del' : (r.leftText === null ? 'empty' : '');
+    const rightCls = r.type === 'change' && r.rightText !== null ? 'add' : (r.rightText === null ? 'empty' : '');
+    const leftText = r.leftText === null ? '' : escapeHtml(r.leftText);
+    const rightText = r.rightText === null ? '' : escapeHtml(r.rightText);
+    const leftNum = r.leftText === null ? '' : r.leftNum;
+    const rightNum = r.rightText === null ? '' : r.rightNum;
+    parts[i] =
+      `<div class="dsplit-row">` +
+        `<div class="dsplit-side ${leftCls}"><span class="dsplit-num">${leftNum}</span><span class="dsplit-text">${leftText}</span></div>` +
+        `<div class="dsplit-side ${rightCls}"><span class="dsplit-num">${rightNum}</span><span class="dsplit-text">${rightText}</span></div>` +
+      `</div>`;
+  }
+
+  let html = `<div class="dsplit">${parts.join('')}</div>`;
+  const truncated = truncatedByCap || opts.diffTruncated;
+  if (truncated) {
+    const reason = truncatedByCap
+      ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
+      : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
+    html += `<div class="diff-line hunk" style="background:rgba(212,48,47,0.12);border-top:2px solid var(--crusader-red);padding:10px;"><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
   }
   return html;
 }
@@ -2009,7 +2307,7 @@ function renderChanges() {
           <p>Select a file to behold its changes.</p>
         </div>
       `;
-      $('#diff-header').textContent = 'No file selected';
+      $('#diff-header-label').textContent = 'No file selected';
     }
   }
 }
@@ -2225,7 +2523,7 @@ async function selectFile(path, staged) {
   });
   updateSelectionBar();
 
-  $('#diff-header').textContent = `${staged ? '⌃' : '⌄'} ${path}`;
+  $('#diff-header-label').textContent = `${staged ? '⌃' : '⌄'} ${path}`;
   $('#diff-content').innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
 
   const result = staged ? await gs.diffStaged(path) : await gs.diffUnstaged(path);
@@ -2374,6 +2672,9 @@ function autoStashMarkerFor(branch) { return AUTO_STASH_MARKER + branch; }
 // offers to restore them.
 async function checkoutBranch(name) {
   if (!name) return;
+  // Checking out a named branch is a deliberate move onto a branch — forget any
+  // remembered detached-HEAD origin so a stale "return to" target doesn't linger.
+  state.detachedFrom = null;
   // Don't bother prompting if there are no changes
   const hasChanges = state.status && (state.status.files || []).length > 0;
   if (!hasChanges) {
@@ -2388,6 +2689,82 @@ async function checkoutBranch(name) {
   }
   // Has changes — go through the safe flow
   await promptCheckoutWithDirty(name, /*isRemoteSetup*/ null);
+}
+
+// Checkout a specific commit (detached HEAD). Remembers the branch we left so the
+// user can return to it with one click via the detached-HEAD banner.
+async function checkoutCommit(hash) {
+  if (!hash) return;
+  const shortHash = hash.slice(0, 7);
+
+  // Remember where we came from. Read a FRESH status so we never rely on a stale
+  // state.status. Prefer the branch reported by status; if that's unavailable, fall
+  // back to the local branches' current. Only record when we're NOT already detached.
+  let originBranch = null;
+  let freshHasChanges = false;
+  try {
+    const freshStatus = await gs.status();
+    if (freshStatus.ok) {
+      const st = freshStatus.data;
+      freshHasChanges = (st.files || []).length > 0;
+      const onBranch = st && !st.detached && st.current && st.current !== 'HEAD';
+      if (onBranch) originBranch = st.current;
+    }
+  } catch (e) { /* ignore */ }
+  // Secondary source: the local branch list's current marker.
+  if (!originBranch) {
+    const lc = state.branches && state.branches.local && state.branches.local.current;
+    if (lc && lc !== 'HEAD') originBranch = lc;
+  }
+  if (originBranch) {
+    state.detachedFrom = originBranch;
+  }
+
+  const hasChanges = freshHasChanges || (state.status && (state.status.files || []).length > 0);
+  if (hasChanges) {
+    const choice = await modal.confirm({
+      title: 'Uncommitted Changes',
+      message: `You have uncommitted changes. Checking out ${shortHash} will move HEAD. Auto-stash your changes first?`,
+      confirmText: 'Stash & Checkout',
+      cancelText: 'Cancel'
+    });
+    if (!choice) return;
+    const r = await withLoading(`Checking out ${shortHash}`, () => gs.checkoutSafe({ branch: hash, autoStashAll: true }));
+    if (!r.ok) { showToast(r.error, 'error', 6000); return; }
+  } else {
+    const r = await withLoading(`Checking out ${shortHash}`, () => gs.checkoutSafe({ branch: hash }));
+    if (!r.ok) { showToast(r.error, 'error', 6000); return; }
+  }
+  showToast(`Checked out commit ${shortHash} (detached HEAD)`, 'success');
+  await refreshAll();
+}
+
+// Return from a detached HEAD back to the branch we started on (or a default branch).
+async function returnToBranch() {
+  const target = state.detachedFrom || guessDefaultBranch();
+  if (!target) {
+    showToast('No branch to return to', 'error');
+    return;
+  }
+  const hasChanges = state.status && (state.status.files || []).length > 0;
+  if (hasChanges) {
+    const choice = await modal.confirm({
+      title: 'Uncommitted Changes',
+      message: `You have uncommitted changes at this commit. Auto-stash them and return to “${target}”?`,
+      confirmText: 'Stash & Return',
+      cancelText: 'Cancel'
+    });
+    if (!choice) return;
+    const r = await withLoading(`Returning to ${target}`, () => gs.checkoutSafe({ branch: target, autoStashAll: true }));
+    if (!r.ok) { showToast(r.error, 'error', 6000); return; }
+  } else {
+    const r = await withLoading(`Returning to ${target}`, () => gs.checkoutSafe({ branch: target }));
+    if (!r.ok) { showToast(r.error, 'error', 6000); return; }
+  }
+  state.detachedFrom = null;
+  showToast(`Returned to ${target}`, 'success');
+  await refreshAll();
+  await maybeOfferAutoStashRestore(target);
 }
 
 // Same logic but for a remote branch: creates a local tracking branch.
@@ -2828,6 +3205,9 @@ $('#btn-close-repo').onclick = async () => {
   clearCommitCache();
   state.collapsedCommits = null;
   state.graphCollapsed = false;
+  state.graphFilter = "";
+  state.historyFilter = "";
+  state.detachedFrom = null;
   _diskState.loaded = false;
   _diskState.lastData = null;
   showWelcome();
@@ -3094,17 +3474,58 @@ $$('.tab').forEach(tab => {
     // Lazy-load tab data on first visit and on switch
     if (target === 'graph') refreshGraph();
     else if (target === 'branches') renderBranchesTab();
+    else if (target === 'history') renderHistory();
   };
 });
 
 // ============================================
-// SIDEBAR COLLAPSIBLES (per-section, vertical)
+// DIFF VIEW MODE TOGGLE (unified / split) — applies everywhere the diff is shown
 // ============================================
-$$('.sidebar-header.clickable').forEach(h => {
-  h.onclick = () => {
-    h.closest('.sidebar-section').classList.toggle('collapsed');
-  };
+// Restore saved mode before any diff renders.
+try {
+  const saved = localStorage.getItem('gitgood:diff-mode');
+  if (saved === 'split' || saved === 'unified') state.diffMode = saved;
+} catch (err) {}
+
+function setDiffMode(mode) {
+  if (mode !== 'unified' && mode !== 'split') return;
+  if (mode === state.diffMode) return;
+  state.diffMode = mode;
+  try { localStorage.setItem('gitgood:diff-mode', mode); } catch (err) {}
+  // Reflect on every toggle currently on screen.
+  document.querySelectorAll('.diff-view-toggle .diff-view-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.diffmode === mode));
+  // Re-render the Changes-tab diff (from memory) in the new mode.
+  if (_lastDiff) {
+    const el = document.getElementById('diff-content');
+    if (el) el.innerHTML = renderDiff(_lastDiff.text, _lastDiff.opts);
+  }
+  // Re-render the visible graph/history commit-detail diffs.
+  if (state.selectedGraphHash) {
+    const c = (state.graph.commits || []).find(x => x.hash === state.selectedGraphHash);
+    if (c) renderGraphDetail(c);
+  }
+  if (state.selectedCommit) {
+    const d = (_historyDetailDiff && _historyDetailDiff.hash === state.selectedCommit.hash)
+      ? _historyDetailDiff.details : null;
+    renderHistoryDetail(state.selectedCommit, d);
+  }
+}
+
+// One delegated listener handles every diff-view toggle (Changes pane + Graph/History
+// detail headers), since those headers are re-created dynamically.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.diff-view-btn');
+  if (!btn) return;
+  setDiffMode(btn.dataset.diffmode);
 });
+
+// Reflect the restored mode on any static toggle present at load (the Changes header).
+(() => {
+  document.querySelectorAll('.diff-view-toggle .diff-view-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.diffmode === state.diffMode));
+})();
+
 
 // ============================================
 // SIDEBAR TOGGLE (whole panel, horizontal) — frees width for the main content
@@ -3600,6 +4021,7 @@ function renderGraph() {
     const row = e.target.closest('.graph-row');
     if (!row) return;
     e.preventDefault();
+    e.stopPropagation();
     showCommitContextMenu(row.dataset.hash, e.pageX, e.pageY);
   };
 
@@ -3700,7 +4122,10 @@ async function renderGraphDetail(commit) {
       ? `<div class="detail-section"><div class="detail-header">⚒ Merge of ${commit.parents.length} parents</div><div class="detail-meta text-mono" style="word-break:break-all">${commit.parents.map(p => escapeHtml(p.slice(0,7))).join(' + ')}</div></div>`
       : ''}
     <div class="detail-section">
-      <div class="detail-header">⚒ Changes</div>
+      <div class="detail-header detail-header-row">
+        <span>⚒ Changes</span>
+        ${diffModeToggleHtml()}
+      </div>
       <div class="diff-content" id="graph-diff-content" style="border:1px solid var(--border);max-height:55vh"><div class="empty-state"><span class="loading"></span></div></div>
     </div>
   `;
@@ -3746,7 +4171,7 @@ function showCommitContextMenu(hash, x, y) {
     { label: 'Copy hash', icon: '⎘', action: () => { navigator.clipboard.writeText(hash); showToast('Hash copied', 'success'); } },
     { label: 'Copy short hash', icon: '⎘', action: () => { navigator.clipboard.writeText(shortHash); showToast('Short hash copied', 'success'); } },
     'sep',
-    { label: `Checkout ${shortHash}`, icon: '⑂', action: () => checkoutBranch(hash) },
+    { label: `Checkout ${shortHash}`, icon: '⑂', action: () => checkoutCommit(hash) },
     { label: 'Create branch here…', icon: '+', action: () => showCreateBranchDialog(hash) },
     { label: 'Create tag here…', icon: '✠', action: () => showCreateTagDialog(hash) },
     'sep',
@@ -3787,11 +4212,9 @@ function commitIsFoldable(hash) {
 
 // Toggle the per-commit fold for a given hash and re-render the graph.
 function toggleCommitFold(hash) {
-  console.log('[fold] toggleCommitFold called for', hash);
   if (!state.collapsedCommits) state.collapsedCommits = new Set();
   if (state.collapsedCommits.has(hash)) state.collapsedCommits.delete(hash);
   else state.collapsedCommits.add(hash);
-  console.log('[fold] collapsedCommits now:', [...state.collapsedCommits]);
   relayoutGraph();
 }
 
@@ -3819,7 +4242,7 @@ function showRefContextMenu(refType, refName, x, y) {
     ], x, y);
   } else if (refType === 'tag') {
     showContextMenu([
-      { label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutBranch(refName) },
+      { label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutCommit(refName) },
       { label: 'Copy tag name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } },
       'sep',
       { label: 'Delete tag', icon: '✗', danger: true, action: () => doDeleteTag(refName) }
@@ -4455,6 +4878,41 @@ function wireGraphTab() {
     relayoutGraph();
   };
   updateGraphCollapseButton();
+
+  // Graph search/filter (debounced so typing stays smooth on large graphs)
+  const graphSearch = $('#graph-search');
+  if (graphSearch) {
+    let t = null;
+    graphSearch.value = state.graphFilter || '';
+    graphSearch.oninput = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        state.graphFilter = graphSearch.value;
+        relayoutGraph();
+      }, 180);
+    };
+    // Escape clears the filter
+    graphSearch.onkeydown = (e) => {
+      if (e.key === 'Escape') { graphSearch.value = ''; state.graphFilter = ''; relayoutGraph(); }
+    };
+  }
+
+  // History search/filter
+  const historySearch = $('#history-search');
+  if (historySearch) {
+    let t2 = null;
+    historySearch.value = state.historyFilter || '';
+    historySearch.oninput = () => {
+      clearTimeout(t2);
+      t2 = setTimeout(() => {
+        state.historyFilter = historySearch.value;
+        renderHistory();
+      }, 180);
+    };
+    historySearch.onkeydown = (e) => {
+      if (e.key === 'Escape') { historySearch.value = ''; state.historyFilter = ''; renderHistory(); }
+    };
+  }
 }
 
 // Reflect the collapse state on the toolbar button.
@@ -4475,6 +4933,17 @@ function updateGraphCollapseButton() {
 // Call wiring on load (idempotent since onclick reassigns)
 wireBranchesTab();
 wireGraphTab();
+
+// Detached-HEAD banner buttons
+(() => {
+  const ret = document.getElementById('detached-banner-return');
+  if (ret) ret.onclick = () => returnToBranch();
+  const nb = document.getElementById('detached-banner-newbranch');
+  if (nb) nb.onclick = () => {
+    const head = (state.status && state.status.headHash) || 'HEAD';
+    showCreateBranchDialog(head);
+  };
+})();
 
 // ============================================
 // OPERATION PROGRESS (clone/pull/push/fetch/lfs) — feeds real % into opProgress
@@ -5635,7 +6104,7 @@ async function applySavedAppSettings() {
 // ============================================
 // PANE RESIZERS — drag handles between tab columns
 // ============================================
-const RESIZER_STORAGE_KEY = 'gitgood:pane-widths:v2';
+const RESIZER_STORAGE_KEY = 'gitgood:pane-widths:v4';
 
 // Resolve the grid container that a resizer controls.
 // data-target can be:
@@ -5662,14 +6131,38 @@ function saveResizerWidths(map) {
   try { localStorage.setItem(RESIZER_STORAGE_KEY, JSON.stringify(map)); } catch (e) {}
 }
 
-// Apply saved widths to a grid container if any are stored under its resizer key
+// Apply saved widths to a grid container if any are stored under its resizer key.
+// Validates the saved value so a corrupt/stale entry can never break the layout.
 function applyResizerWidths(resizerEl) {
   const key = resizerEl.dataset.resizer;
   const widths = loadResizerWidths();
-  if (!widths[key]) return;
+  const saved = widths[key];
+  if (!saved || typeof saved !== 'string') return;
+
   const target = resolveResizerTarget(resizerEl.dataset.target);
   if (!target) return;
-  target.style.gridTemplateColumns = widths[key];
+
+  // Validate: the saved template must have the same number of tracks as the authored
+  // template (content columns + interleaved resizer columns) and must keep one flexible
+  // (fr) track. Otherwise we ignore it and fall back to the CSS-defined layout.
+  const dataCols = (resizerEl.dataset.cols || '').trim().split(/\s+/).filter(Boolean);
+  const expectedContent = dataCols.length;              // e.g. 2 for "1fr 380px"
+  const expectedTracks = expectedContent > 0 ? expectedContent * 2 - 1 : 0; // interleaved resizers
+  const savedTracks = saved.trim().split(/\s+/).filter(Boolean);
+
+  const looksValid =
+    savedTracks.length === expectedTracks &&
+    /fr/.test(saved) &&                                  // still has a flexible track
+    savedTracks.every(t => /^(\d+(\.\d+)?(px|fr)|0)$/.test(t)) && // only px/fr/0 values
+    !savedTracks.some(t => /px$/.test(t) && parseFloat(t) < 0);   // no negative widths
+
+  if (!looksValid) {
+    // Discard the bad entry so it can't keep breaking the layout.
+    delete widths[key];
+    saveResizerWidths(widths);
+    return;
+  }
+  target.style.gridTemplateColumns = saved;
 }
 
 // Parse a grid-template-columns string into an array of values
@@ -5751,8 +6244,8 @@ function setupResizer(resizerEl) {
       // is the target itself (no `display: contents` wrapper). For `display: contents`
       // we need to scan the wrapper's children too.
 
-      // Use a flat walk of "rendered" grid children
-      const tracks = computeTrackList(target);
+      // Use a flat walk of "rendered" grid children in the resizer's row
+      const tracks = computeTrackList(target, resizerEl);
       const prevIdx = tracks.indexOf(prevEl);
       const nextIdx = tracks.indexOf(nextEl);
       if (prevIdx < 0 || nextIdx < 0) return;
@@ -5778,10 +6271,21 @@ function setupResizer(resizerEl) {
       document.body.classList.remove('resizing-panes');
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
-      // Persist
-      const widths = loadResizerWidths();
-      widths[resizerEl.dataset.resizer] = target.style.gridTemplateColumns;
-      saveResizerWidths(widths);
+      // Persist — but only if the produced template is well-formed (right track count,
+      // keeps a flexible column, no negatives). Never save a layout that could break.
+      const tmpl = target.style.gridTemplateColumns;
+      const dataColsArr = (resizerEl.dataset.cols || '').trim().split(/\s+/).filter(Boolean);
+      const expectedTracks = dataColsArr.length > 0 ? dataColsArr.length * 2 - 1 : 0;
+      const parts = (tmpl || '').trim().split(/\s+/).filter(Boolean);
+      const valid = parts.length === expectedTracks &&
+        /fr/.test(tmpl) &&
+        parts.every(t => /^(\d+(\.\d+)?(px|fr)|0)$/.test(t)) &&
+        !parts.some(t => /px$/.test(t) && parseFloat(t) < 0);
+      if (valid) {
+        const widths = loadResizerWidths();
+        widths[resizerEl.dataset.resizer] = tmpl;
+        saveResizerWidths(widths);
+      }
     };
 
     document.addEventListener('mousemove', onMove);
@@ -5789,25 +6293,46 @@ function setupResizer(resizerEl) {
   });
 }
 
-// Compute the flat list of grid items for a target, handling `display: contents` wrappers.
-function computeTrackList(target) {
-  const tracks = [];
+// Compute the flat list of grid items that share the resizer's ROW — i.e. the columns
+// the resizer actually sits between. Items that span the full width (e.g. a toolbar on
+// another grid row) must be excluded, or the column indices get misaligned and resizing
+// produces a corrupt grid-template-columns that collapses the layout.
+function computeTrackList(target, resizerEl) {
+  const all = [];
   function walk(el) {
     for (const child of el.children) {
       const cs = getComputedStyle(child);
-      if (cs.display === 'contents') {
-        walk(child);
-      } else {
-        tracks.push(child);
-      }
+      if (cs.display === 'contents') walk(child);
+      else if (cs.display !== 'none') all.push(child);
     }
   }
   walk(target);
-  return tracks;
+
+  if (!resizerEl) return all;
+
+  // Keep only items whose vertical extent overlaps the resizer's (same grid row),
+  // which naturally drops a full-width header/toolbar living on a different row.
+  const rRect = resizerEl.getBoundingClientRect();
+  const rMid = rRect.top + rRect.height / 2;
+  const sameRow = all.filter(el => {
+    if (el === resizerEl) return true;
+    const b = el.getBoundingClientRect();
+    return b.top <= rMid && b.bottom >= rMid;   // row overlaps the resizer's midline
+  });
+  return sameRow.length ? sameRow : all;
 }
 
 // Initialize all resizers on the page
 (() => {
+  // One-time cleanup: remove obsolete pane-width keys from older versions whose saved
+  // values can break the (now restructured) layouts — notably the History panel.
+  try {
+    ['gitgood:pane-widths', 'gitgood:pane-widths:v1', 'gitgood:pane-widths:v2', 'gitgood:pane-widths:v3',
+     'gitsouls:pane-widths', 'gitsouls:pane-widths:v1', 'gitsouls:pane-widths:v2'].forEach(k => {
+      localStorage.removeItem(k);
+    });
+  } catch (e) {}
+
   // Set up on next tick so all stylesheets are applied first
   setTimeout(() => {
     document.querySelectorAll('.pane-resizer').forEach(el => {
