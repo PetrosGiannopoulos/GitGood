@@ -4354,3 +4354,134 @@ html.theme-sandstone {
   0% { left: -40%; }
   100% { left: 100%; }
 }
+
+/* Clean file header (replaces raw "diff --git" plumbing) */
+.diff-file-header {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--crusader-red-bright);
+  background: var(--bg-raised);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diff-file-header:first-child { border-top: none; }
+.dsplit-file {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--crusader-red-bright);
+  background: var(--bg-raised);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ============================================
+   COMMIT FILE BROWSER (per-file diff in commit previews)
+   ============================================ */
+.cfile-browser {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.cfile-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-strong);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.cfile-selall {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--parchment-dim);
+  user-select: none;
+}
+.cfile-selall:hover { color: var(--bone-white); }
+.cfile-selcount { color: var(--accent-bright); flex: 1; }
+.cfile-restore-btn {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  background: var(--bg-raised);
+  color: var(--parchment-dim);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.cfile-restore-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bone-white);
+  border-color: var(--accent-bright);
+}
+.cfile-restore-btn:disabled { opacity: 0.4; cursor: default; }
+.cfile-check { cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
+
+.cfile-list {
+  flex-shrink: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  border-bottom: 2px solid var(--border-strong);
+  background: var(--bg);
+}
+.cfile-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+.cfile-item:hover { background: var(--bg-panel); }
+.cfile-item.active {
+  background: rgba(178, 34, 34, 0.14);
+  border-left-color: var(--crusader-red);
+}
+.cfile-status {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: bold;
+  color: var(--ink-black);
+}
+.cfile-status.added { background: var(--added); }
+.cfile-status.modified { background: var(--gold-accent); }
+.cfile-status.deleted { background: var(--crusader-red); color: var(--bone-white); }
+.cfile-status.renamed { background: #6a8ec8; }
+.cfile-path {
+  color: var(--parchment-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* keep the filename (end of path) visible when truncated */
+  text-align: left;
+}
+.cfile-item.active .cfile-path { color: var(--bone-white); }
+.cfile-diff {
+  flex: 1;
+  min-height: 120px;
+  max-height: 40vh;
+  overflow: auto;
+}

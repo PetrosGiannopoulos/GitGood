@@ -1426,14 +1426,11 @@ function renderHistoryDetail(commit, details) {
   requestAnimationFrame(() => {
     const diffEl = panel.querySelector('#hist-diff-content');
     if (!diffEl) return;
-    try {
-      diffEl.innerHTML = renderDiff(details.diff, {
-        diffTruncated: details.diffTruncated,
-        diffBytes: details.diffBytes
-      });
-    } catch (err) {
-      diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
-    }
+    renderCommitFileBrowser(diffEl, details.diff, {
+      hash: commit.hash,
+      diffTruncated: details.diffTruncated,
+      diffBytes: details.diffBytes
+    });
   });
 }
 
@@ -1484,35 +1481,49 @@ function renderDiffUnified(diffText, opts) {
   const truncatedByCap = totalLines > cap;
   const lines = truncatedByCap ? allLines.slice(0, cap) : allLines;
 
-  const out = new Array(lines.length);
+  const out = [];
   let oldLine = 0, newLine = 0;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
-    if (raw.startsWith('diff --git') || raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ')) {
-      out[i] = `<div class="diff-line hunk"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`;
+    // Turn the raw "diff --git a/path b/path" into a clean file header, and drop the
+    // other git plumbing lines (index, ---, +++, mode/rename/similarity) entirely.
+    if (raw.startsWith('diff --git')) {
+      const m = raw.match(/ b\/(.+)$/);
+      const path = m ? m[1] : raw.replace('diff --git ', '');
+      out.push(`<div class="diff-file-header">⚔ ${escapeHtml(path)}</div>`);
+      continue;
+    }
+    if (raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ') ||
+        raw.startsWith('old mode ') || raw.startsWith('new mode ') ||
+        raw.startsWith('deleted file mode ') || raw.startsWith('new file mode ') ||
+        raw.startsWith('similarity index ') || raw.startsWith('rename from ') ||
+        raw.startsWith('rename to ') || raw.startsWith('copy from ') || raw.startsWith('copy to ')) {
+      continue; // drop git plumbing
+    }
+    if (raw.startsWith('Binary files')) {
+      out.push(`<div class="diff-line hunk"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
       continue;
     }
     if (raw.startsWith('@@')) {
       const m = raw.match(/@@ -(\d+),?\d* \+(\d+),?\d* @@/);
       if (m) { oldLine = parseInt(m[1]); newLine = parseInt(m[2]); }
-      out[i] = `<div class="diff-line hunk"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`;
+      out.push(`<div class="diff-line hunk"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
       continue;
     }
     if (raw.startsWith('+') && !raw.startsWith('+++')) {
-      out[i] = `<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${newLine}</div><div class="diff-text">${escapeHtml(raw)}</div></div>`;
+      out.push(`<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${newLine}</div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
       newLine++;
       continue;
     }
     if (raw.startsWith('-') && !raw.startsWith('---')) {
-      out[i] = `<div class="diff-line del"><div class="diff-gutter">${oldLine}</div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`;
+      out.push(`<div class="diff-line del"><div class="diff-gutter">${oldLine}</div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
       oldLine++;
       continue;
     }
     if (raw.startsWith('\\')) {
-      out[i] = `<div class="diff-line"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`;
-      continue;
+      continue; // "\ No newline at end of file"
     }
-    out[i] = `<div class="diff-line"><div class="diff-gutter">${oldLine}</div><div class="diff-gutter">${newLine}</div><div class="diff-text">${escapeHtml(raw)}</div></div>`;
+    out.push(`<div class="diff-line"><div class="diff-gutter">${oldLine}</div><div class="diff-gutter">${newLine}</div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
     oldLine++; newLine++;
   }
 
@@ -1564,7 +1575,21 @@ function renderDiffSplit(diffText, opts) {
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
-    if (raw.startsWith('diff --git') || raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ')) {
+    if (raw.startsWith('diff --git')) {
+      flushPending();
+      const m = raw.match(/ b\/(.+)$/);
+      const path = m ? m[1] : raw.replace('diff --git ', '');
+      rows.push({ type: 'file', text: path });
+      continue;
+    }
+    if (raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ') ||
+        raw.startsWith('old mode ') || raw.startsWith('new mode ') ||
+        raw.startsWith('deleted file mode ') || raw.startsWith('new file mode ') ||
+        raw.startsWith('similarity index ') || raw.startsWith('rename from ') ||
+        raw.startsWith('rename to ') || raw.startsWith('copy from ') || raw.startsWith('copy to ')) {
+      continue; // drop git plumbing
+    }
+    if (raw.startsWith('Binary files')) {
       flushPending();
       rows.push({ type: 'meta', text: raw });
       continue;
@@ -1605,6 +1630,10 @@ function renderDiffSplit(diffText, opts) {
   const parts = new Array(rows.length);
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
+    if (r.type === 'file') {
+      parts[i] = `<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(r.text)}</div></div>`;
+      continue;
+    }
     if (r.type === 'meta') {
       parts[i] = `<div class="dsplit-row meta"><div class="dsplit-meta">${escapeHtml(r.text)}</div></div>`;
       continue;
@@ -1634,8 +1663,209 @@ function renderDiffSplit(diffText, opts) {
 }
 
 // ============================================
-// RENDER — CHANGES TAB
+// PER-FILE COMMIT DIFF BROWSER
+// Splits a full multi-file unified diff into per-file chunks and shows a file list;
+// clicking a file renders only that file's diff (so we don't paint everything at once).
 // ============================================
+
+// Split a unified diff into [{path, status, diff}] chunks, one per file.
+function splitDiffByFile(diffText) {
+  if (!diffText) return [];
+  const lines = diffText.split('\n');
+  const files = [];
+  let cur = null;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw.startsWith('diff --git')) {
+      if (cur) files.push(cur);
+      const m = raw.match(/ b\/(.+)$/);
+      const path = m ? m[1] : raw.replace('diff --git ', '');
+      cur = { path, status: 'modified', lines: [] };
+      continue;
+    }
+    if (!cur) {
+      // Lines before the first "diff --git" (rare) — start an unnamed chunk.
+      cur = { path: '(diff)', status: 'modified', lines: [] };
+    }
+    if (raw.startsWith('new file mode')) cur.status = 'added';
+    else if (raw.startsWith('deleted file mode')) cur.status = 'deleted';
+    else if (raw.startsWith('rename from') || raw.startsWith('rename to')) cur.status = 'renamed';
+    else if (raw.startsWith('Binary files')) cur.binary = true;
+    cur.lines.push(raw);
+  }
+  if (cur) files.push(cur);
+  return files.map(f => ({ path: f.path, status: f.status, binary: !!f.binary, diff: f.lines.join('\n') }));
+}
+
+const FILE_STATUS_LETTER = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' };
+
+// Render a commit's changes as a file list + a single-file diff pane into `panelEl`.
+// `opts` carries diffTruncated/diffBytes for the truncation notice, and `opts.hash`
+// (the commit) so files can be restored from it.
+function renderCommitFileBrowser(panelEl, diffText, opts) {
+  opts = opts || {};
+  if (!panelEl) return;
+  const files = splitDiffByFile(diffText);
+  if (!files.length) {
+    panelEl.innerHTML = '<div class="empty-state"><p>No differences.</p></div>';
+    return;
+  }
+
+  const listHtml = files.map((f, idx) =>
+    `<div class="cfile-item${idx === 0 ? ' active' : ''}" data-cfile="${idx}" title="${escapeHtml(f.path)}">` +
+      `<input type="checkbox" class="cfile-check" data-cfile-check="${idx}" title="Select file">` +
+      `<span class="cfile-status ${f.status}">${FILE_STATUS_LETTER[f.status] || 'M'}</span>` +
+      `<span class="cfile-path">${escapeHtml(f.path)}</span>` +
+    `</div>`
+  ).join('');
+
+  panelEl.innerHTML =
+    `<div class="cfile-browser">` +
+      `<div class="cfile-toolbar">` +
+        `<label class="cfile-selall"><input type="checkbox" class="cfile-selall-check"> Select all</label>` +
+        `<span class="cfile-selcount" aria-live="polite"></span>` +
+        `<button class="cfile-restore-btn" type="button" disabled>↩ Restore selected</button>` +
+      `</div>` +
+      `<div class="cfile-list">${listHtml}</div>` +
+      `<div class="cfile-diff diff-content" id="cfile-diff"></div>` +
+    `</div>`;
+
+  const diffEl = panelEl.querySelector('#cfile-diff');
+  // Stash state on the panel so the diff-mode toggle can re-render the *current* file
+  // in place, preserving the selected file and scroll positions.
+  panelEl._cfiles = files;
+  panelEl._cfileOpts = opts;
+  panelEl._cfileActive = 0;
+  panelEl._cfileHash = opts.hash || null;
+
+  const renderOne = (idx) => {
+    const f = files[idx];
+    if (!f || !diffEl) return;
+    panelEl._cfileActive = idx;
+    try {
+      diffEl.innerHTML = renderDiff(f.diff, opts);
+    } catch (err) {
+      diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
+    }
+    diffEl.scrollTop = 0; // new file → start at top
+  };
+
+  // --- checkbox / selection plumbing ---
+  const list = panelEl.querySelector('.cfile-list');
+  const selAll = panelEl.querySelector('.cfile-selall-check');
+  const count = panelEl.querySelector('.cfile-selcount');
+  const restoreBtn = panelEl.querySelector('.cfile-restore-btn');
+
+  const checkedPaths = () => Array.from(panelEl.querySelectorAll('.cfile-check:checked'))
+    .map(cb => files[parseInt(cb.dataset.cfileCheck, 10)]).filter(Boolean).map(f => f.path);
+
+  const syncSelectionUI = () => {
+    const checks = Array.from(panelEl.querySelectorAll('.cfile-check'));
+    const checkedCount = checks.filter(c => c.checked).length;
+    if (count) count.textContent = checkedCount ? `${checkedCount} selected` : '';
+    if (restoreBtn) restoreBtn.disabled = checkedCount === 0;
+    if (selAll) {
+      selAll.checked = checkedCount > 0 && checkedCount === checks.length;
+      selAll.indeterminate = checkedCount > 0 && checkedCount < checks.length;
+    }
+  };
+
+  list.addEventListener('click', (e) => {
+    // Clicking the checkbox toggles selection without changing the previewed file.
+    if (e.target.closest('.cfile-check')) { syncSelectionUI(); return; }
+    const item = e.target.closest('.cfile-item');
+    if (!item) return;
+    panelEl.querySelectorAll('.cfile-item').forEach(el => el.classList.toggle('active', el === item));
+    renderOne(parseInt(item.dataset.cfile, 10));
+  });
+
+  list.addEventListener('contextmenu', (e) => {
+    const item = e.target.closest('.cfile-item');
+    if (!item) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const idx = parseInt(item.dataset.cfile, 10);
+    const rightClickedPath = files[idx] && files[idx].path;
+    // Operate on the checked set if any; otherwise the right-clicked file.
+    let targets = checkedPaths();
+    if (!targets.length && rightClickedPath) targets = [rightClickedPath];
+    showCommitFileContextMenu(panelEl._cfileHash, targets, rightClickedPath, e.pageX, e.pageY);
+  });
+
+  if (selAll) selAll.addEventListener('change', () => {
+    panelEl.querySelectorAll('.cfile-check').forEach(c => { c.checked = selAll.checked; });
+    syncSelectionUI();
+  });
+
+  if (restoreBtn) restoreBtn.addEventListener('click', () => {
+    const paths = checkedPaths();
+    if (paths.length) restoreFilesFromCommit(panelEl._cfileHash, paths);
+  });
+
+  // Show the first file by default.
+  renderOne(0);
+  syncSelectionUI();
+}
+
+// Context menu for a file (or selected files) within a commit preview.
+function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y) {
+  const many = targetPaths.length > 1;
+  const label = many ? `Restore ${targetPaths.length} files to working tree`
+                      : `Restore “${shortenPath(rightClickedPath || targetPaths[0])}” to working tree`;
+  const items = [
+    { label, icon: '↩', action: () => restoreFilesFromCommit(hash, targetPaths) },
+    'sep',
+    { label: 'Copy path' + (many ? 's' : ''), icon: '⎘', action: () => {
+        navigator.clipboard.writeText(targetPaths.join('\n'));
+        showToast('Path' + (many ? 's' : '') + ' copied', 'success');
+      } }
+  ];
+  showContextMenu(items, x, y);
+}
+
+function shortenPath(p) {
+  if (!p) return '';
+  const parts = p.split('/');
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : p;
+}
+
+// Restore files from a commit into the current working tree (git checkout <hash> -- paths).
+async function restoreFilesFromCommit(hash, paths) {
+  if (!hash || !paths || !paths.length) return;
+  const many = paths.length > 1;
+  const confirmed = await modal.confirm({
+    title: many ? `Restore ${paths.length} Files` : 'Restore File',
+    message: many
+      ? `Overwrite ${paths.length} files in your working tree with their version from commit ${hash.slice(0,7)}? This changes your working files.`
+      : `Overwrite “${paths[0]}” in your working tree with its version from commit ${hash.slice(0,7)}? This changes your working file.`,
+    confirmText: 'Restore',
+    cancelText: 'Cancel'
+  });
+  if (!confirmed) return;
+  const r = await withLoading('Restoring', () => gs.restoreFromCommit(hash, paths));
+  if (!r.ok) { showToast(r.error || 'Restore failed', 'error', 6000); return; }
+  showToast(many ? `Restored ${paths.length} files` : 'File restored', 'success');
+  await refreshAll();
+}
+
+// Re-render only the currently-selected file's diff in the active browser(s) — used by
+// the unified/split toggle so it doesn't rebuild the whole pane (which would reset the
+// selected file and scroll position).
+function rerenderActiveCommitFile(panelEl) {
+  if (!panelEl || !panelEl._cfiles) return false;
+  const diffEl = panelEl.querySelector('#cfile-diff');
+  if (!diffEl) return false;
+  const f = panelEl._cfiles[panelEl._cfileActive || 0];
+  if (!f) return false;
+  const prevScroll = diffEl.scrollTop;
+  try {
+    diffEl.innerHTML = renderDiff(f.diff, panelEl._cfileOpts || {});
+  } catch (err) {
+    diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ ${escapeHtml(err.message || String(err))}</p></div>`;
+  }
+  diffEl.scrollTop = prevScroll; // keep the diff scroll position across mode switch
+  return true;
+}
 function classifyFile(file) {
   // Returns { status, letter, staged }
   const idx = (file.index || ' ').trim();
@@ -3495,17 +3725,27 @@ function setDiffMode(mode) {
   // Reflect on every toggle currently on screen.
   document.querySelectorAll('.diff-view-toggle .diff-view-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.diffmode === mode));
+
   // Re-render the Changes-tab diff (from memory) in the new mode.
   if (_lastDiff) {
     const el = document.getElementById('diff-content');
-    if (el) el.innerHTML = renderDiff(_lastDiff.text, _lastDiff.opts);
+    if (el) {
+      const prev = el.scrollTop;
+      el.innerHTML = renderDiff(_lastDiff.text, _lastDiff.opts);
+      el.scrollTop = prev;
+    }
   }
-  // Re-render the visible graph/history commit-detail diffs.
-  if (state.selectedGraphHash) {
+
+  // For the Graph/History commit previews, re-render ONLY the currently-selected file's
+  // diff in place — this preserves the selected file and the scroll positions instead of
+  // rebuilding the whole detail pane (which reset to the first file).
+  const graphDiff = document.getElementById('graph-diff-content');
+  if (graphDiff && !rerenderActiveCommitFile(graphDiff) && state.selectedGraphHash) {
     const c = (state.graph.commits || []).find(x => x.hash === state.selectedGraphHash);
     if (c) renderGraphDetail(c);
   }
-  if (state.selectedCommit) {
+  const histDiff = document.getElementById('hist-diff-content');
+  if (histDiff && !rerenderActiveCommitFile(histDiff) && state.selectedCommit) {
     const d = (_historyDetailDiff && _historyDetailDiff.hash === state.selectedCommit.hash)
       ? _historyDetailDiff.details : null;
     renderHistoryDetail(state.selectedCommit, d);
@@ -4143,20 +4383,17 @@ async function renderGraphDetail(commit) {
   // Skip if user has selected a different commit while we were loading
   if (state.selectedGraphHash !== requestedHash) return;
 
-  // Defer the (potentially huge) diff render to a separate paint frame
+  // Defer the diff render to a separate paint frame so metadata paints first.
   requestAnimationFrame(() => {
     // Re-check selection — user may have switched again during raf delay
     if (state.selectedGraphHash !== requestedHash) return;
     const diffEl = panel.querySelector('#graph-diff-content');
     if (!diffEl) return;
-    try {
-      diffEl.innerHTML = renderDiff(details.diff, {
-        diffTruncated: details.diffTruncated,
-        diffBytes: details.diffBytes
-      });
-    } catch (err) {
-      diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
-    }
+    renderCommitFileBrowser(diffEl, details.diff, {
+      hash: requestedHash,
+      diffTruncated: details.diffTruncated,
+      diffBytes: details.diffBytes
+    });
   });
 }
 

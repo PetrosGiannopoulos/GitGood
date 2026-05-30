@@ -33,6 +33,7 @@ const api = {
   unstage: (files) => ipcRenderer.invoke('repo:unstage', files),
   unstageAll: () => ipcRenderer.invoke('repo:unstageAll'),
   discard: (files) => ipcRenderer.invoke('repo:discard', files),
+  restoreFromCommit: (hash, files) => ipcRenderer.invoke('repo:restoreFromCommit', { hash, files }),
 
   // Commit / sync
   commit: (msg) => ipcRenderer.invoke('repo:commit', msg),

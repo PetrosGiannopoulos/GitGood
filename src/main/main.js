@@ -536,6 +536,17 @@ ipcMain.handle('repo:discard', wrap(async (_, files) => {
   return true;
 }));
 
+// Restore one or more files to the version they had in a specific commit, writing that
+// content into the current working tree (and staging it, as `git checkout <hash> -- path`
+// does). This is "bring this commit's version of the file into my current branch".
+ipcMain.handle('repo:restoreFromCommit', wrap(async (_, { hash, files }) => {
+  const g = ensureGit();
+  const fileList = (Array.isArray(files) ? files : [files]).filter(Boolean);
+  if (!hash || !fileList.length) throw new Error('Nothing to restore');
+  await g.checkout([hash, '--', ...fileList]);
+  return { restored: fileList.length };
+}));
+
 ipcMain.handle('repo:commit', wrap(async (_, { message, description }) => {
   const g = ensureGit();
   if (!message || !message.trim()) throw new Error('Commit message required');
