@@ -101,10 +101,30 @@ body::before {
   background:
     radial-gradient(ellipse at top, #1a0808 0%, var(--ink-black) 50%),
     var(--ink-black);
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-start;
   overflow: hidden;
+  flex-direction: row;
 }
+
+/* Recent Chronicles — its own panel pinned to the left */
+.welcome-recent-panel {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  width: 320px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 20px;
+  box-sizing: border-box;
+  background: rgba(10, 6, 6, 0.55);
+  border-right: 1px solid var(--border-strong);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.welcome-recent-panel:empty { display: none; }
+.welcome-recent-panel.is-empty { display: none; }
 
 .welcome-bg {
   position: absolute;
@@ -140,8 +160,10 @@ body::before {
   max-width: 720px;
   width: 100%;
   max-height: 100vh;
+  margin: auto;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   box-sizing: border-box;
   overflow: hidden;
 }
@@ -208,21 +230,17 @@ body::before {
   font-weight: 400;
   font-size: 14px;
   letter-spacing: 0.2em;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
+  text-align: center;
 }
 
 .recent-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-width: 480px;
   width: 100%;
-  margin: 0 auto 8px;
-  /* Cap by viewport height so a long list scrolls instead of overflowing the screen.
-     ~690px is reserved for padding, emblem, title, tagline, the 5 action buttons,
-     and the section header so the list never extends past the visible area. */
-  max-height: calc(100vh - 690px);
-  min-height: 56px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -237,6 +255,9 @@ body::before {
 .recent-list::-webkit-scrollbar-thumb:hover { background: var(--crusader-red); }
 
 .recent-item {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
   padding: 8px 14px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -246,7 +267,8 @@ body::before {
   color: var(--text-dim);
   cursor: pointer;
   text-align: left;
-  transition: all 0.15s;
+  overflow: hidden;
+  transition: background 0.15s, color 0.15s, border-left-width 0.15s;
 }
 
 .recent-item:hover {
@@ -266,6 +288,16 @@ body::before {
 .recent-path {
   font-size: 11px;
   color: var(--muted-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* keep the tail (the actual folder) visible when truncated */
+  text-align: left;
+}
+.recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ============================================
@@ -3015,9 +3047,20 @@ body.sidebar-is-collapsed .sidebar-toggle-icon {
   color: var(--muted-text);
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
+.hidden-info-header.clickable { cursor: pointer; user-select: none; }
+.hidden-info-header.clickable:hover { color: var(--text); background: var(--bg-panel); }
+.hidden-info-caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  transform: rotate(90deg);   /* expanded points down */
+  font-size: 9px;
+  color: var(--accent);
+}
+.hidden-info-section.collapsed .hidden-info-caret { transform: rotate(0deg); }
+.hidden-info-body { overflow: hidden; }
+.hidden-info-section.collapsed .hidden-info-body { display: none; }
 
 .hidden-info-note {
   padding: 8px 14px 12px;

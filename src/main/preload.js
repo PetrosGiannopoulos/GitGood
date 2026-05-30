@@ -6,6 +6,8 @@ const api = {
   selectFolder: (title) => ipcRenderer.invoke('dialog:selectFolder', title),
   selectFile: (title) => ipcRenderer.invoke('dialog:selectFile', title),
   getRecentRepos: () => ipcRenderer.invoke('app:getRecentRepos'),
+  removeRecentRepo: (p) => ipcRenderer.invoke('app:removeRecentRepo', p),
+  clearRecentRepos: () => ipcRenderer.invoke('app:clearRecentRepos'),
   getHome: () => ipcRenderer.invoke('app:getHome'),
 
   // Repo lifecycle

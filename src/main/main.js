@@ -259,6 +259,20 @@ ipcMain.handle('app:getRecentRepos', () => {
   return { ok: true, data: (settings.recentRepos || []).filter(p => fs.existsSync(p)) };
 });
 
+ipcMain.handle('app:removeRecentRepo', (_, repoPath) => {
+  const settings = loadSettings();
+  settings.recentRepos = (settings.recentRepos || []).filter(p => p !== repoPath);
+  saveSettings(settings);
+  return { ok: true, data: settings.recentRepos };
+});
+
+ipcMain.handle('app:clearRecentRepos', () => {
+  const settings = loadSettings();
+  settings.recentRepos = [];
+  saveSettings(settings);
+  return { ok: true };
+});
+
 ipcMain.handle('app:getHome', () => {
   return { ok: true, data: os.homedir() };
 });

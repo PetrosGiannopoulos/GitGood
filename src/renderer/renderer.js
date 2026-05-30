@@ -303,7 +303,8 @@ const modal = {
 };
 
 $('#modal-close').onclick = () => modal.hide();
-$('#modal-overlay').onclick = (e) => { if (e.target.id === 'modal-overlay') modal.hide(); };
+// Clicking outside the dialog (on the dimmed backdrop) intentionally does NOT close it,
+// to prevent accidental dismissal. Use the ✕ button, a Cancel action, or Esc instead.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     modal.hide();
@@ -363,12 +364,13 @@ async function showWelcome() {
 async function loadRecentRepos() {
   const result = await gs.getRecentRepos();
   const list = $('#recent-list');
+  const panel = $('#welcome-recent');
   list.innerHTML = '';
   if (!result.ok || !result.data || !result.data.length) {
-    $('#welcome-recent').style.display = 'none';
+    if (panel) panel.classList.add('is-empty');
     return;
   }
-  $('#welcome-recent').style.display = 'block';
+  if (panel) panel.classList.remove('is-empty');
   result.data.forEach(p => {
     const item = document.createElement('button');
     item.className = 'recent-item';
@@ -379,8 +381,46 @@ async function loadRecentRepos() {
       <div class="recent-path">${escapeHtml(p)}</div>
     `;
     item.onclick = () => openRepoByPath(p);
+    item.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showContextMenu([
+        { label: 'Open', icon: '📜', action: () => openRepoByPath(p) },
+        { label: 'Copy path', icon: '⎘', action: () => { navigator.clipboard.writeText(p); showToast('Path copied', 'success'); } },
+        'sep',
+        { label: 'Remove from list', icon: '✗', danger: true, action: () => removeRecentRepo(p) },
+        { label: 'Clear all recent', icon: '⌫', danger: true, action: () => clearRecentRepos() }
+      ], e.pageX, e.pageY);
+    };
     list.appendChild(item);
   });
+}
+
+// Remove a single repo from the recent list, then refresh the welcome list.
+async function removeRecentRepo(p) {
+  const r = await gs.removeRecentRepo(p);
+  if (r && r.ok) {
+    showToast('Removed from recent', 'success');
+    await loadRecentRepos();
+  } else {
+    showToast((r && r.error) || 'Could not remove', 'error');
+  }
+}
+
+// Clear the entire recent list (with confirmation).
+async function clearRecentRepos() {
+  const ok = await modal.confirm({
+    title: 'Clear Recent Chronicles',
+    message: 'Remove all repositories from the recent list? This does not delete anything on disk.',
+    confirmText: 'Clear All',
+    cancelText: 'Cancel'
+  });
+  if (!ok) return;
+  const r = await gs.clearRecentRepos();
+  if (r && r.ok) {
+    showToast('Recent list cleared', 'success');
+    await loadRecentRepos();
+  }
 }
 
 $('#welcome-open').onclick = () => openRepoDialog();
@@ -2376,6 +2416,9 @@ async function openConflictResolver(filePath) {
 // is intentionally hidden.
 let hiddenInfoCache = null;
 let hiddenInfoCacheTime = 0;
+// Per-section collapsed state for the Changes-tab hidden-info panels. Both start
+// collapsed; the user can expand by clicking a header. State persists for the session.
+const hiddenInfoCollapsed = { empty: true, ignored: true };
 
 async function renderHiddenInfo() {
   const el = $('#hidden-info');
@@ -2409,16 +2452,20 @@ async function renderHiddenInfo() {
         <button class="conflict-mini-btn" data-action="gitkeep">+ .gitkeep</button>
       </li>
     `).join('');
+    const collapsed = hiddenInfoCollapsed.empty;
     sections.push(`
-      <div class="hidden-info-section">
-        <div class="hidden-info-header">
+      <div class="hidden-info-section${collapsed ? ' collapsed' : ''}" data-section="empty">
+        <div class="hidden-info-header clickable" data-toggle="empty" role="button" tabindex="0" aria-expanded="${!collapsed}">
+          <span class="hidden-info-caret">▸</span>
           <span>⌬ Empty Folders (${emptyFolders.length})</span>
         </div>
-        <div class="hidden-info-note">
-          Git tracks files, not folders. Empty folders are invisible to git. Add a placeholder file (commonly <code>.gitkeep</code>) inside a folder to make git track it.
+        <div class="hidden-info-body">
+          <div class="hidden-info-note">
+            Git tracks files, not folders. Empty folders are invisible to git. Add a placeholder file (commonly <code>.gitkeep</code>) inside a folder to make git track it.
+          </div>
+          <ul class="hidden-info-list">${rows}</ul>
+          ${emptyFolders.length > 20 ? `<div class="hidden-info-note">…and ${emptyFolders.length - 20} more</div>` : ''}
         </div>
-        <ul class="hidden-info-list">${rows}</ul>
-        ${emptyFolders.length > 20 ? `<div class="hidden-info-note">…and ${emptyFolders.length - 20} more</div>` : ''}
       </div>
     `);
   }
@@ -2430,21 +2477,40 @@ async function renderHiddenInfo() {
         <span class="info-path" title="${escapeHtml(p)}">${escapeHtml(p)}</span>
       </li>
     `).join('');
+    const collapsed = hiddenInfoCollapsed.ignored;
     sections.push(`
-      <div class="hidden-info-section">
-        <div class="hidden-info-header">
+      <div class="hidden-info-section${collapsed ? ' collapsed' : ''}" data-section="ignored">
+        <div class="hidden-info-header clickable" data-toggle="ignored" role="button" tabindex="0" aria-expanded="${!collapsed}">
+          <span class="hidden-info-caret">▸</span>
           <span>⌽ Ignored by .gitignore (${ignored.length})</span>
         </div>
-        <div class="hidden-info-note">
-          These paths match rules in a <code>.gitignore</code> file and won't appear as changes. To track one anyway, edit the rules or use <code>git add -f &lt;path&gt;</code>.
+        <div class="hidden-info-body">
+          <div class="hidden-info-note">
+            These paths match rules in a <code>.gitignore</code> file and won't appear as changes. To track one anyway, edit the rules or use <code>git add -f &lt;path&gt;</code>.
+          </div>
+          <ul class="hidden-info-list">${rows}</ul>
+          ${ignored.length > 20 ? `<div class="hidden-info-note">…and ${ignored.length - 20} more</div>` : ''}
         </div>
-        <ul class="hidden-info-list">${rows}</ul>
-        ${ignored.length > 20 ? `<div class="hidden-info-note">…and ${ignored.length - 20} more</div>` : ''}
       </div>
     `);
   }
 
   el.innerHTML = sections.join('');
+
+  // Header click/keyboard toggles the section open/closed.
+  el.querySelectorAll('.hidden-info-header.clickable').forEach(header => {
+    const toggle = () => {
+      const key = header.dataset.toggle;
+      hiddenInfoCollapsed[key] = !hiddenInfoCollapsed[key];
+      const section = header.closest('.hidden-info-section');
+      if (section) section.classList.toggle('collapsed', hiddenInfoCollapsed[key]);
+      header.setAttribute('aria-expanded', String(!hiddenInfoCollapsed[key]));
+    };
+    header.onclick = toggle;
+    header.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    };
+  });
 
   // Wire up gitkeep buttons
   el.querySelectorAll('button[data-action="gitkeep"]').forEach(btn => {
