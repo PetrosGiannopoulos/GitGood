@@ -315,7 +315,12 @@
           <div class="graph-layout">
             <div class="graph-toolbar">
               <span class="graph-title">⚜ Chronicle of Banners ⚜</span>
-              <input type="search" id="graph-search" class="commit-search" placeholder="Filter commits…" title="Filter by message, author, or hash" />
+              <input type="search" id="graph-search" class="commit-search" placeholder="Filter commits…" title="Filter commits" />
+              <select id="graph-search-mode" class="commit-search-mode" title="What to filter by">
+                <option value="message">Message</option>
+                <option value="files">File in commit</option>
+                <option value="all">Message + File</option>
+              </select>
               <span class="graph-spacer"></span>
               <button class="mini-btn" id="graph-collapse-toggle" title="Collapse the middle of long history, showing only the newest commits">⊟ Collapse</button>
               <label class="mini-btn-label" title="Number of commits to load">
@@ -405,7 +410,12 @@
         <div class="tab-panel" data-panel="history">
           <div class="history-toolbar">
             <span class="graph-title">📜 Chronicle of Deeds</span>
-            <input type="search" id="history-search" class="commit-search" placeholder="Filter commits…" title="Filter by message, author, or hash" />
+            <input type="search" id="history-search" class="commit-search" placeholder="Filter commits…" title="Filter commits" />
+            <select id="history-search-mode" class="commit-search-mode" title="What to filter by">
+              <option value="message">Message</option>
+              <option value="files">File in commit</option>
+              <option value="all">Message + File</option>
+            </select>
             <span class="graph-spacer"></span>
           </div>
           <div class="history-list" id="history-list">

@@ -404,6 +404,29 @@ ipcMain.handle('repo:log', wrap(async (_, opts) => {
   return log;
 }));
 
+// Returns a map of { commitHash: [changed file paths] } for the most recent commits,
+// in a single `git log --name-only` pass. Used for "filter by file inside commit".
+ipcMain.handle('repo:commitFiles', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const limit = (opts && opts.limit) || 1000;
+  // Custom format: a sentinel line with the full hash, then the name-only file list.
+  const raw = await g.raw([
+    'log', '--all', `--max-count=${limit}`,
+    '--name-only', '--no-renames', '--pretty=format:\x01%H'
+  ]);
+  const map = {};
+  let current = null;
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('\x01')) {
+      current = line.slice(1).trim();
+      map[current] = [];
+    } else if (current && line.trim()) {
+      map[current].push(line.trim());
+    }
+  }
+  return map;
+}));
+
 // Returns commits with parents and ref decorations — the data the visual graph needs
 ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
   const g = ensureGit();

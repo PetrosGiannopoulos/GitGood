@@ -45,7 +45,9 @@ const state = {
   graphCollapsed: false,   // when true, hide the middle of long history (show newest few)
   collapsedCommits: null,  // Set<hash>: commits whose same-lane descendant chain is folded
   graphFilter: '',         // text filter for the graph tab
+  graphFilterMode: 'message', // 'message' | 'files' | 'all'
   historyFilter: '',       // text filter for the history tab
+  historyFilterMode: 'message',
   detachedFrom: null,      // branch name we were on before checking out a commit (detached HEAD)
   diffMode: 'unified',     // 'unified' | 'split' — diff display style
   // Branches tab state
@@ -72,17 +74,51 @@ function escapeHtml(text) {
 // Does a commit match a free-text filter query? Matches against the commit message,
 // author name/email, and hash (full or short). Case-insensitive; supports multiple
 // space-separated terms (ALL must match somewhere — AND semantics).
-function commitMatchesFilter(commit, query) {
+// Cache of commit-hash -> [files]. Lazily populated when a file-based filter is used.
+let _commitFilesMap = null;
+let _commitFilesLoading = null;
+
+async function ensureCommitFilesMap() {
+  if (_commitFilesMap) return _commitFilesMap;
+  if (_commitFilesLoading) return _commitFilesLoading;
+  _commitFilesLoading = (async () => {
+    try {
+      const r = await gs.commitFiles({ limit: 2000 });
+      _commitFilesMap = (r && r.ok) ? r.data : {};
+    } catch (e) {
+      _commitFilesMap = {};
+    }
+    _commitFilesLoading = null;
+    return _commitFilesMap;
+  })();
+  return _commitFilesLoading;
+}
+
+// mode: 'message' (default) matches message/author/email/hash; 'files' matches changed
+// file paths; 'all' matches either. The files map is consulted only for files/all.
+function commitMatchesFilter(commit, query, mode) {
   if (!query) return true;
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
-  const haystack = [
+  mode = mode || 'message';
+
+  const msgHay = [
     commit.message,
     commit.author_name,
     commit.author_email,
     commit.hash
   ].filter(Boolean).join(' ').toLowerCase();
-  return terms.every(t => haystack.includes(t));
+
+  let fileHay = '';
+  if (mode === 'files' || mode === 'all') {
+    const files = (_commitFilesMap && _commitFilesMap[commit.hash]) || [];
+    fileHay = files.join('\n').toLowerCase();
+  }
+
+  if (mode === 'message') return terms.every(t => msgHay.includes(t));
+  if (mode === 'files')   return terms.every(t => fileHay.includes(t));
+  // 'all' — each term may match either the message or the files
+  return terms.every(t => msgHay.includes(t) || fileHay.includes(t));
 }
 
 function showToast(message, type = 'info', timeout = 3500) {
@@ -284,18 +320,32 @@ const modal = {
   },
   hide() {
     $('#modal-overlay').classList.add('hidden');
+    // If a confirm() is awaiting, resolve it as "cancelled" so callers never hang when
+    // the modal is dismissed via Esc or the ✕ button.
+    if (this._pendingResolve) {
+      const r = this._pendingResolve;
+      this._pendingResolve = null;
+      r(false);
+    }
   },
-  confirm({ title, message, danger, confirmText = 'Confirm' }) {
+  _pendingResolve: null,
+  confirm({ title, message, danger, confirmText = 'Confirm', cancelText = 'Cancel' }) {
     return new Promise(resolve => {
+      // Track so hide() (Esc / ✕) can resolve the promise as cancelled.
+      this._pendingResolve = resolve;
+      const done = (val) => {
+        if (this._pendingResolve) { this._pendingResolve = null; modal.hide(); resolve(val); }
+      };
+
       const cancelBtn = document.createElement('button');
       cancelBtn.className = 'btn-medieval';
-      cancelBtn.textContent = 'Cancel';
-      cancelBtn.onclick = () => { modal.hide(); resolve(false); };
+      cancelBtn.textContent = cancelText;
+      cancelBtn.onclick = () => done(false);
 
       const okBtn = document.createElement('button');
       okBtn.className = 'btn-medieval ' + (danger ? 'danger' : 'primary');
       okBtn.textContent = confirmText;
-      okBtn.onclick = () => { modal.hide(); resolve(true); };
+      okBtn.onclick = () => done(true);
 
       modal.show({ title, body: `<p class="modal-text" style="white-space:pre-line">${escapeHtml(message)}</p>`, footer: [cancelBtn, okBtn] });
     });
@@ -891,6 +941,12 @@ function updateRepoInfo() {
 }
 
 async function refreshAll() {
+  // New commits may have appeared — drop the cached commit→files map so a file-based
+  // search rebuilds it on next use.
+  _commitFilesMap = null;
+  // The hidden-info (empty folders / ignored) cache is repo-specific and time-based;
+  // drop it on a full refresh so switching repos can't show the previous repo's data.
+  hiddenInfoCache = null;
   // When the loading overlay is up (initial repo open), surface progress as each part
   // finishes. The .then() taps don't change behaviour when the overlay is hidden.
   const overlayUp = () => {
@@ -1059,7 +1115,7 @@ function relayoutGraph() {
   //    the graph to matches; structural lines to filtered-out parents simply fade off.
   const query = (state.graphFilter || '').trim();
   if (query) {
-    commits = commits.filter(c => commitMatchesFilter(c, query));
+    commits = commits.filter(c => commitMatchesFilter(c, query, state.graphFilterMode));
   }
 
   // 1. Global collapse (only when not filtering — filtering already narrows the view)
@@ -1292,7 +1348,7 @@ function renderHistory() {
   const list = $('#history-list');
   const allCommits = state.log.all || [];
   const query = (state.historyFilter || '').trim();
-  const commits = query ? allCommits.filter(c => commitMatchesFilter(c, query)) : allCommits;
+  const commits = query ? allCommits.filter(c => commitMatchesFilter(c, query, state.historyFilterMode)) : allCommits;
 
   // Reflect "no matches" on the search box
   const searchBox = $('#history-search');
@@ -1718,19 +1774,30 @@ function splitDiffByFile(diffText) {
     const raw = lines[i];
     if (raw.startsWith('diff --git')) {
       if (cur) files.push(cur);
+      // Best-effort path from the "diff --git a/X b/Y" header. This can be ambiguous
+      // when paths contain " b/", so we refine it below from the +++ / --- lines, which
+      // carry a single unambiguous path.
       const m = raw.match(/ b\/(.+)$/);
       const path = m ? m[1] : raw.replace('diff --git ', '');
-      cur = { path, status: 'modified', lines: [] };
+      cur = { path, status: 'modified', lines: [], pathLocked: false };
       continue;
     }
     if (!cur) {
-      // Lines before the first "diff --git" (rare) — start an unnamed chunk.
-      cur = { path: '(diff)', status: 'modified', lines: [] };
+      cur = { path: '(diff)', status: 'modified', lines: [], pathLocked: false };
     }
     if (raw.startsWith('new file mode')) cur.status = 'added';
     else if (raw.startsWith('deleted file mode')) cur.status = 'deleted';
     else if (raw.startsWith('rename from') || raw.startsWith('rename to')) cur.status = 'renamed';
     else if (raw.startsWith('Binary files')) cur.binary = true;
+    // Refine the path unambiguously: prefer "+++ b/path"; fall back to "--- a/path"
+    // for deletions (where +++ is /dev/null).
+    else if (!cur.pathLocked && raw.startsWith('+++ ')) {
+      const p = raw.slice(4).replace(/^b\//, '').trim();
+      if (p && p !== '/dev/null') { cur.path = p; cur.pathLocked = true; }
+    } else if (!cur.pathLocked && raw.startsWith('--- ')) {
+      const p = raw.slice(4).replace(/^a\//, '').trim();
+      if (p && p !== '/dev/null') cur.path = p; // may be overridden by +++ next line
+    }
     cur.lines.push(raw);
   }
   if (cur) files.push(cur);
@@ -1765,6 +1832,9 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
         `<label class="cfile-selall"><input type="checkbox" class="cfile-selall-check"> Select all</label>` +
         `<span class="cfile-selcount" aria-live="polite"></span>` +
         `<button class="cfile-restore-btn" type="button" disabled>↩ Restore selected</button>` +
+      `</div>` +
+      `<div class="cfile-searchbar">` +
+        `<input type="search" class="cfile-search" placeholder="Filter files…" title="Filter files in this commit" />` +
       `</div>` +
       `<div class="cfile-list">${listHtml}</div>` +
       `<div class="cfile-diff diff-content" id="cfile-diff"></div>` +
@@ -1841,6 +1911,29 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
     const paths = checkedPaths();
     if (paths.length) restoreFilesFromCommit(panelEl._cfileHash, paths);
   });
+
+  // File filter — show only items whose path matches the query (all terms must match).
+  const fileSearch = panelEl.querySelector('.cfile-search');
+  if (fileSearch) {
+    let ft = null;
+    const applyFileFilter = () => {
+      const q = fileSearch.value.trim().toLowerCase();
+      const terms = q.split(/\s+/).filter(Boolean);
+      let visible = 0;
+      panelEl.querySelectorAll('.cfile-item').forEach(item => {
+        const idx = parseInt(item.dataset.cfile, 10);
+        const path = (files[idx] && files[idx].path || '').toLowerCase();
+        const show = !terms.length || terms.every(t => path.includes(t));
+        item.style.display = show ? '' : 'none';
+        if (show) visible++;
+      });
+      fileSearch.classList.toggle('has-no-matches', !!q && visible === 0);
+    };
+    fileSearch.oninput = () => { clearTimeout(ft); ft = setTimeout(applyFileFilter, 120); };
+    fileSearch.onkeydown = (e) => {
+      if (e.key === 'Escape') { fileSearch.value = ''; applyFileFilter(); }
+    };
+  }
 
   // Show the first file by default.
   renderOne(0);
@@ -3807,7 +3900,7 @@ function setDiffMode(mode) {
   // rebuilding the whole detail pane (which reset to the first file).
   const graphDiff = document.getElementById('graph-diff-content');
   if (graphDiff && !rerenderActiveCommitFile(graphDiff) && state.selectedGraphHash) {
-    const c = (state.graph.commits || []).find(x => x.hash === state.selectedGraphHash);
+    const c = ((state.graph && state.graph.commits) || []).find(x => x.hash === state.selectedGraphHash);
     if (c) renderGraphDetail(c);
   }
   const histDiff = document.getElementById('hist-diff-content');
@@ -3866,6 +3959,26 @@ function toggleSidebar() {
     }
   });
 })();
+
+// ============================================
+// SIDEBAR COLLAPSIBLES
+// ============================================
+function wireSidebarHeaders() {
+  $$('.sidebar-header.clickable').forEach(header => {
+    header.onclick = (e) => {
+      // Ignore clicks on buttons or count badges inside the header
+      if (e.target.closest('button') || e.target.closest('.count')) return;
+
+      const section = header.closest('.sidebar-section');
+      if (section) {
+        section.classList.toggle('collapsed');
+      }
+    };
+  });
+}
+
+// Run it after DOM is ready
+document.addEventListener('DOMContentLoaded', wireSidebarHeaders);
 
 // ============================================
 // GRAPH LAYOUT ALGORITHM
@@ -5184,36 +5297,50 @@ function wireGraphTab() {
 
   // Graph search/filter (debounced so typing stays smooth on large graphs)
   const graphSearch = $('#graph-search');
+  const graphMode = $('#graph-search-mode');
   if (graphSearch) {
     let t = null;
     graphSearch.value = state.graphFilter || '';
-    graphSearch.oninput = () => {
-      clearTimeout(t);
-      t = setTimeout(() => {
-        state.graphFilter = graphSearch.value;
-        relayoutGraph();
-      }, 180);
+    if (graphMode) graphMode.value = state.graphFilterMode || 'message';
+    const applyGraph = async () => {
+      state.graphFilter = graphSearch.value;
+      // If filtering by files, make sure the commit→files map is loaded first.
+      if ((state.graphFilterMode === 'files' || state.graphFilterMode === 'all') && state.graphFilter.trim()) {
+        await ensureCommitFilesMap();
+      }
+      relayoutGraph();
     };
-    // Escape clears the filter
+    graphSearch.oninput = () => { clearTimeout(t); t = setTimeout(applyGraph, 180); };
     graphSearch.onkeydown = (e) => {
       if (e.key === 'Escape') { graphSearch.value = ''; state.graphFilter = ''; relayoutGraph(); }
+    };
+    if (graphMode) graphMode.onchange = () => {
+      state.graphFilterMode = graphMode.value;
+      applyGraph();
     };
   }
 
   // History search/filter
   const historySearch = $('#history-search');
+  const historyMode = $('#history-search-mode');
   if (historySearch) {
     let t2 = null;
     historySearch.value = state.historyFilter || '';
-    historySearch.oninput = () => {
-      clearTimeout(t2);
-      t2 = setTimeout(() => {
-        state.historyFilter = historySearch.value;
-        renderHistory();
-      }, 180);
+    if (historyMode) historyMode.value = state.historyFilterMode || 'message';
+    const applyHistory = async () => {
+      state.historyFilter = historySearch.value;
+      if ((state.historyFilterMode === 'files' || state.historyFilterMode === 'all') && state.historyFilter.trim()) {
+        await ensureCommitFilesMap();
+      }
+      renderHistory();
     };
+    historySearch.oninput = () => { clearTimeout(t2); t2 = setTimeout(applyHistory, 180); };
     historySearch.onkeydown = (e) => {
       if (e.key === 'Escape') { historySearch.value = ''; state.historyFilter = ''; renderHistory(); }
+    };
+    if (historyMode) historyMode.onchange = () => {
+      state.historyFilterMode = historyMode.value;
+      applyHistory();
     };
   }
 }

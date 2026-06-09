@@ -21,6 +21,7 @@ const api = {
   status: () => ipcRenderer.invoke('repo:status'),
   branches: () => ipcRenderer.invoke('repo:branches'),
   log: (opts) => ipcRenderer.invoke('repo:log', opts),
+  commitFiles: (opts) => ipcRenderer.invoke('repo:commitFiles', opts),
   remotes: () => ipcRenderer.invoke('repo:remotes'),
   stashList: () => ipcRenderer.invoke('repo:stashList'),
 
