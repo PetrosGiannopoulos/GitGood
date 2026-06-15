@@ -28,7 +28,7 @@ GitGood is a fully functional **Electron** desktop Git client wrapped in a medie
 - **Restore files from any commit** — select files (checkboxes + select-all) and bring their version into your working tree.
 - **Detached-HEAD aware** — check out any commit, then return to your branch with one click.
 - **Five main themes** — Crusader (default) plus Tyrian, Verdant, Midnight, and Sandstone.
-- **+175 alacrity themes to elevate your experience with the day to day use of the app.
+- **+175 alacrity themes** to elevate your experience with the day to day use of the app.
 
 ## ✦ Features
 
