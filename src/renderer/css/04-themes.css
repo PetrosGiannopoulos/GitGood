@@ -21,6 +21,7 @@ html.theme-molecular {
   --crusader-red-deep: #0050b4;
   --blood: #003e85;
   --gold-accent: #00d4e8;
+  --head-pill-text: #ffffff;
   --bg: var(--ink-black);
   --bg-panel: var(--panel-black);
   --bg-raised: var(--raised-black);
@@ -83,6 +84,7 @@ html.theme-sweet {
   --crusader-red-deep: #e00078;
   --blood: #9c005a;
   --gold-accent: #ffe24d;
+  --head-pill-text: #1a0010;
   --bg: var(--ink-black);
   --bg-panel: var(--panel-black);
   --bg-raised: var(--raised-black);
@@ -111,6 +113,7 @@ html.theme-monastery {
   --crusader-red-deep: #8a0a0a;
   --blood: #a00e0e;
   --gold-accent: #c89400;
+  --head-pill-text: #ffffff;
   --bg: var(--ink-black);
   --bg-panel: var(--panel-black);
   --bg-raised: var(--raised-black);
@@ -253,7 +256,7 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
 }
 
 .settings-nav-item.active {
-  background: rgba(178, 34, 34, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--crusader-red-bright);
   border-left-color: var(--crusader-red-bright);
 }
@@ -508,7 +511,7 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   background: linear-gradient(90deg, var(--crusader-red-deep), var(--crusader-red-bright), var(--crusader-red-deep));
   background-size: 200% 100%;
   animation: disk-progress-sweep 1.4s linear infinite;
-  box-shadow: 0 0 8px rgba(212, 48, 47, 0.6);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-bright) 60%, transparent);
 }
 
 @keyframes disk-progress-sweep {
@@ -577,7 +580,7 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   height: 100%;
   width: 0%;
   background: linear-gradient(90deg, var(--crusader-red-deep), var(--crusader-red-bright));
-  box-shadow: 0 0 6px rgba(212, 48, 47, 0.6);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent-bright) 60%, transparent);
   transition: width 0.2s ease-out;
 }
 
@@ -718,12 +721,12 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   color: var(--parchment-dim);
   border-top: 1px dashed var(--border-strong);
   border-bottom: 1px dashed var(--border-strong);
-  background: linear-gradient(180deg, rgba(212,48,47,0.05), transparent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-bright) 5%, transparent), transparent);
   transition: background 0.12s, color 0.12s;
   user-select: none;
 }
 .graph-hidden-row:hover {
-  background: rgba(212, 48, 47, 0.12);
+  background: color-mix(in srgb, var(--accent-bright) 12%, transparent);
   color: var(--bone-white);
 }
 .graph-hidden-dots {
@@ -767,7 +770,7 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
 .commit-search::placeholder { color: var(--text-dim); }
 .commit-search:focus {
   border-color: var(--crusader-red-bright);
-  box-shadow: 0 0 0 2px rgba(212, 48, 47, 0.18);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-bright) 18%, transparent);
 }
 .commit-search.has-no-matches {
   border-color: var(--gold-accent);
@@ -907,12 +910,12 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   width: 72px;
   height: 72px;
   color: var(--crusader-red-bright);
-  filter: drop-shadow(0 0 12px rgba(212, 48, 47, 0.5));
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--accent-bright) 50%, transparent));
   animation: lo-pulse 1.6s ease-in-out infinite;
 }
 @keyframes lo-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.85; filter: drop-shadow(0 0 8px rgba(212,48,47,0.35)); }
-  50% { transform: scale(1.06); opacity: 1; filter: drop-shadow(0 0 18px rgba(212,48,47,0.7)); }
+  0%, 100% { transform: scale(1); opacity: 0.85; filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent-bright) 35%, transparent)); }
+  50% { transform: scale(1.06); opacity: 1; filter: drop-shadow(0 0 18px color-mix(in srgb, var(--accent-bright) 70%, transparent)); }
 }
 
 .loading-overlay-title {
@@ -1047,7 +1050,7 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
 }
 .cfile-item:hover { background: var(--bg-panel); }
 .cfile-item.active {
-  background: rgba(178, 34, 34, 0.14);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-left-color: var(--crusader-red);
 }
 .cfile-status {

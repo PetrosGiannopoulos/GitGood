@@ -94,7 +94,7 @@
 }
 
 .branches-current-card {
-  background: linear-gradient(180deg, rgba(178, 34, 34, 0.18) 0%, rgba(178, 34, 34, 0.06) 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 18%, transparent) 0%, color-mix(in srgb, var(--accent) 6%, transparent) 100%);
   border: 1px solid var(--crusader-red);
   padding: 12px 14px;
   font-family: var(--font-mono);
@@ -214,7 +214,7 @@
 }
 .branch-row:hover { background: var(--bg-panel); }
 .branch-row.is-current {
-  background: rgba(178, 34, 34, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   border-left: 3px solid var(--crusader-red);
   padding-left: 11px;
 }
@@ -225,7 +225,7 @@
   text-align: center;
 }
 .branch-row.is-remote .branch-icon { color: #6b8e23; }
-.branch-row.is-current .branch-icon { color: var(--crusader-red-bright); text-shadow: 0 0 6px rgba(212, 48, 47, 0.6); }
+.branch-row.is-current .branch-icon { color: var(--crusader-red-bright); text-shadow: 0 0 6px color-mix(in srgb, var(--accent-bright) 60%, transparent); }
 
 .branch-row .branch-name {
   overflow: hidden;
@@ -367,9 +367,9 @@
   border-bottom: 1px solid rgba(58, 48, 42, 0.3);
   transition: background 0.1s;
 }
-.cs-option:hover { background: rgba(178, 34, 34, 0.12); color: var(--bone-white); }
+.cs-option:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--bone-white); }
 .cs-option.selected {
-  background: rgba(178, 34, 34, 0.2);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--bone-white);
   border-left: 3px solid var(--crusader-red);
   padding-left: 9px;
@@ -478,7 +478,7 @@
 .merge-strategy:hover { border-color: var(--crusader-red); background: var(--bg-panel); }
 .merge-strategy.selected {
   border-color: var(--crusader-red);
-  background: rgba(178, 34, 34, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   box-shadow: inset 0 0 0 1px var(--crusader-red);
 }
 
@@ -547,7 +547,7 @@
   box-shadow: inset 0 0 0 2px var(--added);
 }
 .graph-row.drop-denied {
-  background: rgba(178, 34, 34, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   box-shadow: inset 0 0 0 2px var(--crusader-red-bright);
   cursor: not-allowed;
 }
@@ -560,7 +560,7 @@
   align-items: center;
   gap: 14px;
   padding: 12px 18px;
-  background: linear-gradient(180deg, rgba(212, 48, 47, 0.18) 0%, rgba(178, 34, 34, 0.10) 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-bright) 18%, transparent) 0%, color-mix(in srgb, var(--accent) 10%, transparent) 100%);
   border-bottom: 2px solid var(--crusader-red);
   flex-shrink: 0;
   position: relative;
@@ -568,8 +568,8 @@
 }
 
 @keyframes conflict-banner-pulse {
-  0%, 100% { box-shadow: inset 0 0 30px rgba(212, 48, 47, 0.15); }
-  50% { box-shadow: inset 0 0 50px rgba(212, 48, 47, 0.35); }
+  0%, 100% { box-shadow: inset 0 0 30px color-mix(in srgb, var(--accent-bright) 15%, transparent); }
+  50% { box-shadow: inset 0 0 50px color-mix(in srgb, var(--accent-bright) 35%, transparent); }
 }
 
 .conflict-banner.hidden { display: none; }
@@ -577,7 +577,7 @@
 .conflict-banner-icon {
   font-size: 26px;
   color: var(--crusader-red-bright);
-  filter: drop-shadow(0 0 6px rgba(212, 48, 47, 0.7));
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent-bright) 70%, transparent));
   flex-shrink: 0;
 }
 
@@ -618,13 +618,13 @@
    ============================================ */
 .conflicts-section {
   border-bottom: 2px solid var(--crusader-red);
-  background: rgba(178, 34, 34, 0.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
   flex-shrink: 0;
 }
 
 .conflicts-header {
   padding: 10px 12px;
-  background: linear-gradient(90deg, rgba(212, 48, 47, 0.2), rgba(212, 48, 47, 0.05));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent-bright) 20%, transparent), color-mix(in srgb, var(--accent-bright) 5%, transparent));
   border-bottom: 1px solid var(--crusader-red);
   font-family: var(--font-display);
   font-size: 11px;
@@ -643,11 +643,11 @@
   grid-template-columns: 22px 1fr auto;
   gap: 8px;
   align-items: center;
-  border-bottom: 1px solid rgba(178, 34, 34, 0.3);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   cursor: pointer;
   transition: background 0.1s;
 }
-.conflict-file-item:hover { background: rgba(178, 34, 34, 0.12); }
+.conflict-file-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .conflict-file-item.resolved {
   background: rgba(107, 142, 35, 0.08);
   border-bottom-color: rgba(107, 142, 35, 0.3);
@@ -657,7 +657,7 @@
   font-size: 14px;
   color: var(--crusader-red-bright);
   text-align: center;
-  filter: drop-shadow(0 0 4px rgba(212, 48, 47, 0.5));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent-bright) 50%, transparent));
 }
 .conflict-file-item.resolved .conflict-file-icon { color: var(--added); filter: none; }
 
@@ -699,7 +699,7 @@
 }
 .conflict-mini-btn:hover {
   border-color: var(--crusader-red);
-  background: rgba(178, 34, 34, 0.15);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 .conflict-mini-btn.primary {
   background: linear-gradient(180deg, var(--crusader-red) 0%, var(--crusader-red-deep) 100%);
@@ -771,7 +771,7 @@
 }
 
 .cr-hunk-conflict {
-  background: rgba(178, 34, 34, 0.05);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
   border-top: 2px solid var(--crusader-red);
   border-bottom: 2px solid var(--crusader-red);
   margin: 6px 0;
@@ -788,7 +788,7 @@
   display: flex;
   gap: 4px;
   padding: 8px 12px;
-  background: linear-gradient(90deg, rgba(212, 48, 47, 0.18), rgba(212, 48, 47, 0.04));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent-bright) 18%, transparent), color-mix(in srgb, var(--accent-bright) 4%, transparent));
   border-bottom: 1px solid var(--border);
   font-family: var(--font-display);
   font-size: 10px;
@@ -824,7 +824,7 @@
 }
 .cr-action:hover {
   border-color: var(--crusader-red);
-  background: rgba(178, 34, 34, 0.15);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
   color: var(--bone-white);
 }
 .cr-action.active {
@@ -857,7 +857,7 @@
 }
 
 .cr-side.ours { border-left: 3px solid var(--crusader-red); }
-.cr-side.ours .cr-side-header { color: var(--crusader-red-bright); background: rgba(178, 34, 34, 0.08); }
+.cr-side.ours .cr-side-header { color: var(--crusader-red-bright); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
 .cr-side.theirs { border-right: 3px solid #6b8e23; }
 .cr-side.theirs .cr-side-header { color: #c1d9a0; background: rgba(107, 142, 35, 0.08); }
@@ -1002,7 +1002,7 @@
   white-space: nowrap;
 }
 .file-action-btn[data-action="cf-resolve"] {
-  background: rgba(178, 34, 34, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .file-action-btn[data-action="cf-resolve"]:hover {
   background: linear-gradient(180deg, var(--crusader-red) 0%, var(--crusader-red-deep) 100%);
@@ -1010,17 +1010,17 @@
   border-color: var(--crusader-red-bright) !important;
 }
 .file-item.is-conflicted {
-  background: rgba(178, 34, 34, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   border-left: 3px solid var(--crusader-red);
   padding-left: 9px;
 }
 .file-item.is-conflicted:hover {
-  background: rgba(178, 34, 34, 0.16);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 .file-item.is-conflicted .file-status {
   color: var(--crusader-red-bright) !important;
   border-color: var(--crusader-red-bright) !important;
-  background: rgba(178, 34, 34, 0.2);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 /* The conflicts-section file-actions are similarly always visible */
@@ -1085,7 +1085,7 @@
 .skg-seg:last-child { border-right: none; }
 
 .skg-seg:hover {
-  background: rgba(178, 34, 34, 0.10);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
   color: var(--bone-white);
 }
 
@@ -1126,7 +1126,7 @@
   width: 0%;
   background: linear-gradient(90deg, var(--crusader-red-deep) 0%, var(--crusader-red) 50%, var(--gold-accent) 100%);
   transition: width 0.15s ease-out;
-  box-shadow: 0 0 8px rgba(212, 48, 47, 0.6);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-bright) 60%, transparent);
 }
 
 .skg-entropy-hint {
@@ -1206,7 +1206,7 @@
 
 .skg-textarea.private {
   min-height: 140px;
-  background: rgba(178, 34, 34, 0.04);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 
 .skg-textarea.masked {
@@ -1224,7 +1224,7 @@
 .skg-warn {
   margin-top: 8px;
   padding: 10px 12px;
-  background: rgba(212, 48, 47, 0.10);
+  background: color-mix(in srgb, var(--accent-bright) 10%, transparent);
   border: 1px solid var(--crusader-red);
   border-left: 4px solid var(--crusader-red);
   font-family: var(--font-body);
@@ -1424,7 +1424,7 @@
 .cleanup-branch-item:last-child { border-bottom: none; }
 .cleanup-branch-item:hover { background: var(--bg-panel); }
 .cleanup-branch-item.selected {
-  background: rgba(178, 34, 34, 0.16);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   border-left: 3px solid var(--crusader-red);
   padding-left: 9px;
 }
@@ -1506,7 +1506,7 @@
 .pane-resizer.resizing::before {
   background: var(--crusader-red-bright);
   width: 2px;
-  box-shadow: 0 0 6px rgba(212, 48, 47, 0.6);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent-bright) 60%, transparent);
 }
 
 .pane-resizer::after {

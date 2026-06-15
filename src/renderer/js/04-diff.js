@@ -96,7 +96,7 @@ function renderDiffUnified(diffText, opts) {
     const reason = truncatedByCap
       ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
       : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
-    html += `<div class="diff-line hunk" style="background:rgba(212,48,47,0.12);border-top:2px solid var(--crusader-red);padding:10px;"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
+    html += `<div class="diff-line hunk" style="background:color-mix(in srgb, var(--accent) 12%, transparent);border-top:2px solid var(--accent);padding:10px;"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
   }
   return html;
 }
@@ -220,7 +220,7 @@ function renderDiffSplit(diffText, opts) {
     const reason = truncatedByCap
       ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
       : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
-    html += `<div class="diff-line hunk" style="background:rgba(212,48,47,0.12);border-top:2px solid var(--crusader-red);padding:10px;"><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
+    html += `<div class="diff-line hunk" style="background:color-mix(in srgb, var(--accent) 12%, transparent);border-top:2px solid var(--accent);padding:10px;"><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
   }
   return html;
 }

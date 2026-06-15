@@ -45,7 +45,7 @@
 .commit-row:hover { background: var(--bg-panel); }
 
 .commit-row.selected {
-  background: rgba(178, 34, 34, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   border-left: 3px solid var(--crusader-red);
   padding-left: 13px;
 }
@@ -56,7 +56,7 @@
   border-radius: 50%;
   background: var(--crusader-red);
   margin-top: 4px;
-  box-shadow: 0 0 8px rgba(178, 34, 34, 0.6);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
   flex-shrink: 0;
 }
 
@@ -251,7 +251,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 8px 12px;
-  background: linear-gradient(90deg, rgba(178, 34, 34, 0.18), rgba(178, 34, 34, 0.08));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent) 8%, transparent));
   border-bottom: 1px solid var(--crusader-red);
   font-family: var(--font-display);
   font-size: 11px;
@@ -275,14 +275,14 @@
 }
 
 .file-item.multi-selected {
-  background: rgba(178, 34, 34, 0.22);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-left: 3px solid var(--crusader-red-bright);
   padding-left: 9px;
-  box-shadow: inset 0 0 0 1px rgba(212, 48, 47, 0.4);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-bright) 40%, transparent);
 }
 
 .file-item.multi-selected.selected {
-  background: rgba(212, 48, 47, 0.28);
+  background: color-mix(in srgb, var(--accent-bright) 28%, transparent);
 }
 
 .file-checkbox {
@@ -321,7 +321,7 @@
 .mini-btn:hover {
   border-color: var(--crusader-red);
   color: var(--bone-white);
-  background: rgba(178, 34, 34, 0.1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .file-list {
@@ -341,7 +341,7 @@
 
 .file-item:hover { background: var(--bg-panel); }
 .file-item.selected {
-  background: rgba(178, 34, 34, 0.15);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
   border-left: 3px solid var(--crusader-red);
   padding-left: 9px;
 }
@@ -363,7 +363,7 @@
 .file-status.deleted { color: var(--crusader-red); }
 .file-status.renamed { color: #6db8c4; }
 .file-status.untracked { color: var(--parchment-dim); }
-.file-status.conflicted { color: var(--crusader-red-bright); background: rgba(178,34,34,0.2); }
+.file-status.conflicted { color: var(--crusader-red-bright); background: color-mix(in srgb, var(--accent) 20%, transparent); }
 
 .file-path {
   font-family: var(--font-mono);
@@ -462,8 +462,10 @@
 .diff-view-btn + .diff-view-btn { border-left: 1px solid var(--border-strong); }
 .diff-view-btn:hover { background: var(--bg-raised); color: var(--bone-white); }
 .diff-view-btn.active {
-  background: var(--crusader-red);
-  color: var(--bone-white);
+  background: var(--accent);
+  color: var(--head-pill-text, var(--bone-white));
+  font-weight: 700;
+  text-shadow: none;
 }
 
 .diff-content {
@@ -672,14 +674,14 @@
 }
 .graph-row:hover { background: var(--bg-panel); }
 .graph-row.selected {
-  background: rgba(178, 34, 34, 0.14);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   box-shadow: inset 3px 0 0 var(--crusader-red);
 }
 .graph-row.head {
   /* Subtle highlight for current HEAD commit */
 }
 .graph-row.drop-target {
-  background: rgba(212, 48, 47, 0.25);
+  background: color-mix(in srgb, var(--accent-bright) 25%, transparent);
   box-shadow: inset 0 0 0 2px var(--crusader-red-bright);
 }
 
@@ -778,7 +780,7 @@
   opacity: 1;
   color: var(--bone-white);
   border-color: var(--crusader-red-bright);
-  box-shadow: 0 0 8px rgba(212, 48, 47, 0.45);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-bright) 45%, transparent);
 }
 /* On the selected/current row the hash is already emphasized */
 .graph-row.selected .graph-row-hash,
@@ -951,11 +953,11 @@
 }
 .strategy-option:hover {
   border-color: var(--crusader-red);
-  background: rgba(178, 34, 34, 0.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 .strategy-option.selected {
   border-color: var(--crusader-red);
-  background: rgba(178, 34, 34, 0.15);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
   box-shadow: inset 0 0 0 1px var(--crusader-red);
 }
 .strategy-option-title {
@@ -1085,7 +1087,7 @@
 .modal {
   background: var(--bg-panel);
   border: 1px solid var(--crusader-red);
-  box-shadow: 0 0 0 1px var(--ink-black), 0 0 40px rgba(178, 34, 34, 0.4);
+  box-shadow: 0 0 0 1px var(--ink-black), 0 0 40px color-mix(in srgb, var(--accent) 40%, transparent);
   min-width: 460px;
   max-width: 720px;
   max-height: 80vh;
@@ -1316,7 +1318,7 @@
 }
 
 .context-item:hover {
-  background: rgba(178, 34, 34, 0.15);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
   color: var(--bone-white);
 }
 
