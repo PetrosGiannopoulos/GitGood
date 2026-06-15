@@ -1,0 +1,1840 @@
+// ============================================
+// GRAPH LAYOUT ALGORITHM
+// ============================================
+// Standard "lane" commit-graph layout. Processes commits top-to-bottom (newest
+// first). At every row we know which lanes are active and which commit each lane
+// is currently "routing toward" (its next expected commit = the parent it follows).
+//
+// CRITICAL: edges only ever connect ONE row to the NEXT row. A vertical line that
+// spans many rows is emitted as many short row→row+1 segments. A lane only bends
+// (curves) at the single row boundary where it actually shifts columns. This is
+// what keeps lines tracking their dots instead of swooping across the whole graph.
+//
+// Returns: { positions: Map<hash,{row,lane}>, edges: [{fromLane,toLane,fromRow,toRow,colorLane,type}], laneCount }
+function layoutGraph(commits) {
+  const positions = new Map();
+  const edges = [];
+
+  // lanes[i] = hash that lane i is currently routing toward (the next commit it
+  // expects to land on), or null if the lane is free.
+  let lanes = [];
+  let maxLaneCount = 0;
+
+  // Stable color assignment: once a lane gets a color index it keeps it until freed.
+  // We color by the lane index directly (laneColor handles wrap-around), which is
+  // simple and stable enough for our purposes.
+
+  const findLane = (hash) => {
+    for (let i = 0; i < lanes.length; i++) if (lanes[i] === hash) return i;
+    return -1;
+  };
+  const allocLane = () => {
+    for (let i = 0; i < lanes.length; i++) if (lanes[i] === null) return i;
+    lanes.push(null);
+    return lanes.length - 1;
+  };
+
+  for (let row = 0; row < commits.length; row++) {
+    const c = commits[row];
+    const parents = c.parents || [];
+
+    // 1. Which lane is this commit on? The lane that was routing toward it.
+    let myLane = findLane(c.hash);
+    if (myLane === -1) myLane = allocLane();
+    positions.set(c.hash, { row, lane: myLane });
+
+    // 2. Collect every lane currently routing toward THIS commit (besides myLane).
+    //    Those lanes converge into myLane at this row (merge of branch lines).
+    const convergingLanes = [];
+    for (let i = 0; i < lanes.length; i++) {
+      if (i !== myLane && lanes[i] === c.hash) convergingLanes.push(i);
+    }
+
+    // 3. Snapshot the lane state BEFORE this commit reassigns anything. We need it
+    //    to draw the segments from THIS row down to the NEXT row.
+    //    First, update lane assignments for the row below:
+    //    - myLane now routes toward the first parent (continues the line straight).
+    //    - converging lanes are freed (they joined myLane here).
+    //    - extra parents (merge) claim lanes routing toward them.
+
+    // Free converging lanes (they merged into myLane at this row)
+    for (const i of convergingLanes) lanes[i] = null;
+
+    // Assign myLane to follow the first parent
+    if (parents.length > 0) {
+      lanes[myLane] = parents[0];
+    } else {
+      lanes[myLane] = null; // root commit; lane ends
+    }
+
+    // Extra parents (merge commits): route each toward its parent in some lane.
+    const mergeParentLanes = [];
+    for (let p = 1; p < parents.length; p++) {
+      const par = parents[p];
+      let pl = findLane(par);
+      if (pl === -1) {
+        pl = allocLane();
+        lanes[pl] = par;
+      }
+      mergeParentLanes.push({ parent: par, lane: pl });
+    }
+
+    // 4. Emit edges from THIS row (row) to the NEXT row (row+1) for every lane that
+    //    is active after the reassignment. Each active lane draws a segment from its
+    //    position at `row` to its position at `row+1`.
+    //
+    //    But a lane's column at `row` may differ from its column at `row+1` only when:
+    //      (a) it's myLane and it just took over (came from myLane, continues at myLane) — vertical
+    //      (b) it's a converging lane — handled below as a join segment into myLane
+    //      (c) it's a merge-parent lane that was newly allocated at a different column
+    //
+    //    The simplest correct model: for each lane active in the NEXT row, draw a
+    //    segment from where that lane's line was at THIS row to where it is at row+1.
+    //    A lane that existed before at column X and still exists at column X → vertical.
+
+    // Converging lanes are freed here; their visual descent into myLane is already
+    // drawn by the first-parent carry segments emitted in pass 2 (the final segment
+    // of each converging branch bends into myLane's column). No separate join edge
+    // is needed, which avoids double-drawing.
+
+    // For myLane continuing to first parent: the parent may be in a different column
+    // than myLane (it usually isn't until the parent is actually placed). We DON'T know
+    // the parent's final column yet, so we emit a per-row vertical "carry" below in pass 2.
+
+    // Merge-parent connections (second+ parents) are drawn entirely in Pass 2c, where
+    // every commit's final row/lane is known — so we can route the line in the correct
+    // direction (the parent may be above OR below this merge commit). We only needed
+    // the lane bookkeeping above (mergeParentLanes) to reserve lanes for the layout.
+    void mergeParentLanes;
+
+    if (lanes.length > maxLaneCount) maxLaneCount = lanes.length;
+  }
+
+  // ----- Pass 2: carry segments -----
+  // For every commit, its first-parent line descends from this commit's row to the
+  // parent's row, occupying myLane's column the whole way (until the parent, which
+  // may shift columns at the very last segment). We emit one segment PER ROW so long
+  // vertical runs are straight and only the final segment bends toward the parent's
+  // column if it differs.
+  for (let row = 0; row < commits.length; row++) {
+    const c = commits[row];
+    const pos = positions.get(c.hash);
+    if (!pos) continue;
+    const parents = c.parents || [];
+    if (!parents.length) continue;
+
+    const firstParent = parents[0];
+    const fpPos = positions.get(firstParent);
+    if (!fpPos) {
+      // First parent is outside the loaded window. Draw the line continuing straight
+      // down past the bottom edge so it reads as "history continues below" rather than
+      // stopping mid-air at the commit's dot. Each row below this commit is owned by
+      // another commit (which draws its own vertical), so we only need the segment(s)
+      // from this commit's row down to the bottom, with the very last one fading off.
+      const lastRow = commits.length - 1;
+      for (let r = row; r <= lastRow; r++) {
+        const isLast = (r === lastRow);
+        edges.push({
+          fromLane: pos.lane,
+          toLane: pos.lane,
+          fromRow: r,
+          toRow: r + 1,
+          colorLane: pos.lane,
+          type: isLast ? 'continue-down' : 'carry'
+        });
+      }
+      continue;
+    }
+
+    // Emit one straight vertical segment per row from row → fpPos.row-1 in pos.lane,
+    // then a final segment from (pos.lane, fpPos.row-1) → (fpPos.lane, fpPos.row).
+    for (let r = row; r < fpPos.row; r++) {
+      const isLast = (r === fpPos.row - 1);
+      edges.push({
+        fromLane: pos.lane,
+        toLane: isLast ? fpPos.lane : pos.lane,
+        fromRow: r,
+        toRow: r + 1,
+        colorLane: pos.lane,
+        type: 'carry'
+      });
+    }
+  }
+
+  // ----- Pass 2c: draw merge-parent (side branch) connections -----
+  // For each merge commit, connect its dot to every extra parent (2nd, 3rd, ...).
+  // The parent may sit BELOW (normal: branch merged in from history below) or ABOVE
+  // (the merged-in branch tip is newer / drawn above the merge). We route per-row
+  // segments in the correct direction so the side line is never cut off.
+  for (let row = 0; row < commits.length; row++) {
+    const c = commits[row];
+    const pos = positions.get(c.hash);
+    if (!pos) continue;
+    const parents = c.parents || [];
+    if (parents.length < 2) continue;
+
+    for (let p = 1; p < parents.length; p++) {
+      const par = parents[p];
+      const pp = positions.get(par);
+      if (!pp) {
+        // Parent outside window — short stub down off this commit.
+        edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: row + 1, colorLane: pos.lane, type: 'merge-out' });
+        continue;
+      }
+      if (pp.row > pos.row) {
+        // Parent is BELOW: bend out from the merge dot to the parent's lane, then go down.
+        // First segment bends from the merge lane toward the parent lane.
+        edges.push({ fromLane: pos.lane, toLane: pp.lane, fromRow: row, toRow: row + 1, colorLane: pp.lane, type: 'merge-out' });
+        // Fill straight down on the parent's lane to the parent row.
+        for (let r = row + 1; r < pp.row; r++) {
+          edges.push({ fromLane: pp.lane, toLane: pp.lane, fromRow: r, toRow: r + 1, colorLane: pp.lane, type: 'carry' });
+        }
+      } else if (pp.row < pos.row) {
+        // Parent is ABOVE: connect upward. Draw from the parent's row down to the merge,
+        // bending into the merge dot on the final segment. Use the parent's lane for the
+        // vertical run, then bend into the merge dot's lane at the row just above it.
+        for (let r = pp.row; r < row; r++) {
+          const isLast = (r === row - 1);
+          edges.push({
+            fromLane: pp.lane,
+            toLane: isLast ? pos.lane : pp.lane,
+            fromRow: r,
+            toRow: r + 1,
+            colorLane: pp.lane,
+            type: 'carry'
+          });
+        }
+      }
+    }
+  }
+
+  return { positions, edges, laneCount: Math.max(1, maxLaneCount) };
+}
+
+// ============================================
+// GRAPH RENDERING
+// ============================================
+const GRAPH_ROW_H = 30;     // pixels per row
+const GRAPH_LANE_W = 18;    // pixels per lane
+const GRAPH_LANE_X0 = 14;   // left padding
+// Lane colors for the graph. Rebuilt from the active theme's palette so the graph
+// never clashes with a theme (e.g. red dots on a green theme). Defaults to the
+// Crusader palette; refreshThemeLaneColors() overrides per theme.
+let LANE_COLORS = [
+  '#d4302f', '#c8a04a', '#6b8e23', '#6db8c4',
+  '#b388d3', '#e2a5a5', '#c1d9a0', '#efe6d4'
+];
+const laneColor = (lane) => LANE_COLORS[lane % LANE_COLORS.length];
+
+// Resolve any CSS color expression (incl. color-mix / var) to a concrete rgb() string,
+// since SVG presentation attributes (fill/stroke) don't accept color-mix().
+let _colorResolverEl = null;
+function resolveColor(expr) {
+  try {
+    if (!_colorResolverEl) {
+      _colorResolverEl = document.createElement('span');
+      _colorResolverEl.style.display = 'none';
+      document.body.appendChild(_colorResolverEl);
+    }
+    _colorResolverEl.style.color = '';
+    _colorResolverEl.style.color = expr;
+    const c = getComputedStyle(_colorResolverEl).color;
+    return c || expr;
+  } catch (e) { return expr; }
+}
+
+// Build a harmonious 8-lane palette around the theme's accent. Reads the resolved
+// CSS variables so it works for every theme including the custom ones.
+function refreshThemeLaneColors() {
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name, fb) => {
+      const x = (cs.getPropertyValue(name) || '').trim();
+      return x || fb;
+    };
+    const html = document.documentElement;
+    const themed = /theme-/.test(html.className);
+    if (!themed) {
+      LANE_COLORS = ['#d4302f', '#c8a04a', '#6b8e23', '#6db8c4', '#b388d3', '#e2a5a5', '#c1d9a0', '#efe6d4'];
+      return;
+    }
+    const accentBright = v('--accent-bright', '#d4302f');
+    const accent = v('--accent', '#b22222');
+    const gold = v('--gold-accent', '#c8a04a');
+    const added = v('--added', '#3fa34d');
+    const text = v('--text', '#efe6d4');
+    const dim = v('--text-dim', '#c1b89a');
+    LANE_COLORS = [
+      accentBright,
+      gold,
+      added,
+      resolveColor(`color-mix(in srgb, ${accentBright} 55%, ${text})`),
+      resolveColor(`color-mix(in srgb, ${accent} 65%, white)`),
+      dim,
+      resolveColor(`color-mix(in srgb, ${gold} 55%, ${text})`),
+      text
+    ].map(resolveColor);
+  } catch (e) { /* keep current palette */ }
+}
+
+function renderGraph() {
+  const container = $('#graph-container');
+  if (!container) return;
+  const { commits, head, positions, edges, laneCount, hiddenCount, collapsedSet } = state.graph;
+
+  if (!commits || !commits.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">⚔</div>
+        <p>${state.graphLoading ? 'Summoning chronicle…' : 'No chronicles to display.'}</p>
+      </div>
+    `;
+    renderGraphDetail(null);
+    return;
+  }
+
+  // Build a hash → commit lookup once so click handlers don't do O(n) lookups
+  const commitByHash = new Map();
+  for (const c of commits) commitByHash.set(c.hash, c);
+
+  const totalHeight = commits.length * GRAPH_ROW_H;
+  const svgWidth = GRAPH_LANE_X0 + laneCount * GRAPH_LANE_W + 8;
+
+  // Build SVG paths for edges (string array, joined at the end).
+  // All edges span at most one row, so curves are small and local — a lane
+  // only bends at the single boundary where it changes column.
+  const edgeSvgParts = new Array(edges.length);
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    const x1 = GRAPH_LANE_X0 + e.fromLane * GRAPH_LANE_W;
+    const x2 = GRAPH_LANE_X0 + e.toLane * GRAPH_LANE_W;
+    const color = laneColor(e.colorLane != null ? e.colorLane : e.fromLane);
+
+    if (e.type === 'continue-down') {
+      // Line continues toward a parent that isn't loaded — run it from the dot
+      // straight down to the bottom edge of the SVG, fading out via a dashed stroke
+      // that signals "history continues below".
+      const yStart = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+      const yEnd = totalHeight; // the very bottom edge
+      edgeSvgParts[i] = `<line x1="${x1}" y1="${yStart}" x2="${x1}" y2="${yEnd}" stroke="${color}" stroke-width="2" stroke-dasharray="3 3" opacity="0.55"/>`;
+      continue;
+    }
+
+    // 'carry' and 'merge-out' both span fromRow → toRow (one row apart)
+    const y1 = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    const y2 = e.toRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    if (x1 === x2) {
+      edgeSvgParts[i] = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`;
+    } else {
+      const midY = y1 + (y2 - y1) / 2;
+      edgeSvgParts[i] = `<path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"/>`;
+    }
+  }
+
+  // Build SVG circles for commits and the row list HTML
+  const dotsSvg = new Array(commits.length);
+  const rowsHtml = new Array(commits.length);
+  for (let i = 0; i < commits.length; i++) {
+    const c = commits[i];
+    const pos = positions.get(c.hash);
+    if (!pos) { dotsSvg[i] = ''; rowsHtml[i] = ''; continue; }
+    const cx = GRAPH_LANE_X0 + pos.lane * GRAPH_LANE_W;
+    const cy = pos.row * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    const color = laneColor(pos.lane);
+    const isMerge = (c.parents || []).length > 1;
+    const isHead = c.hash === head;
+    const isCollapsed = collapsedSet && collapsedSet.has(c.hash);
+
+    // A commit is collapsible if ANY parent is present in the view and sits below it
+    // (there's a chain we can fold). Checking all parents — not just the first — means
+    // merge commits fold even when their first parent is drawn above.
+    let collapsible = isCollapsed;
+    if (!collapsible) {
+      for (const ph of (c.parents || [])) {
+        const pp = positions.get(ph);
+        if (pp && pp.row > pos.row) { collapsible = true; break; }
+      }
+    }
+
+    const cls = 'commit-dot'
+      + (isMerge ? ' merge' : '')
+      + (isHead ? ' head' : '')
+      + (isCollapsed ? ' collapsed' : '');
+    const r = isMerge ? 6 : 5;
+    // Left-click selects the commit & shows its diff; right-click folds/unfolds its
+    // branch line (handled in the context-menu logic). We tag whether folding applies.
+    let dot = `<circle class="${cls}" cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="${isHead ? '#efe6d4' : '#0a0606'}" stroke-width="${isHead ? 2 : 1.5}" data-hash="${c.hash}" data-foldable="${collapsible ? '1' : ''}">`;
+    if (collapsible) {
+      dot += `<title style="pointer-events:none">${isCollapsed ? 'Right-click to expand this branch line' : 'Right-click to collapse this branch line'}</title>`;
+    }
+    dot += `</circle>`;
+    dotsSvg[i] = dot;
+
+    // Refs: build the pill HTML
+    let refPills = '';
+    if (c.refs && c.refs.length) {
+      for (const r of c.refs) {
+        if (r.type === 'tag') refPills += `<span class="ref-pill tag" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
+        else if (r.type === 'local') {
+          const headCls = r.isHead ? ' head' : '';
+          refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(r.name)}</span>`;
+        } else if (r.type === 'remote') refPills += `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
+        else if (r.type === 'head') refPills += `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
+        else refPills += `<span class="ref-pill" data-ref-type="other">${escapeHtml(r.name)}</span>`;
+      }
+    }
+
+    const shortHash = (c.hash || '').slice(0, 7);
+    const dateStr = c.date ? relativeTime(c.date) : '';
+    const selectedCls = state.selectedGraphHash === c.hash ? ' selected' : '';
+    const headCls = isHead ? ' head' : '';
+    // A clear, easy-to-click fold toggle at the start of the row for foldable commits.
+    const foldToggle = collapsible
+      ? `<button class="graph-fold-btn${isCollapsed ? ' collapsed' : ''}" data-fold="${c.hash}" title="${isCollapsed ? 'Expand branch line' : 'Collapse branch line'}" tabindex="-1">${isCollapsed ? '▸' : '▾'}</button>`
+      : `<span class="graph-fold-spacer"></span>`;
+    rowsHtml[i] =
+      `<div class="graph-row${selectedCls}${headCls}" data-hash="${c.hash}" style="height:${GRAPH_ROW_H}px">` +
+        foldToggle +
+        `<span class="graph-row-msg">${refPills}${escapeHtml(c.message)}</span>` +
+        `<span class="graph-row-author">${escapeHtml(c.author_name || '')}</span>` +
+        `<span class="graph-row-date">${escapeHtml(dateStr)}</span>` +
+        `<span class="graph-row-hash">${escapeHtml(shortHash)}</span>` +
+      `</div>`;
+  }
+
+  // When collapsed, append a clickable summary row showing how many commits are hidden.
+  const hiddenRowHtml = (hiddenCount && hiddenCount > 0)
+    ? `<div class="graph-hidden-row" id="graph-hidden-row" title="Click to expand and show all commits">` +
+        `<span class="graph-hidden-dots">⋯</span>` +
+        `<span class="graph-hidden-label">${hiddenCount.toLocaleString()} earlier commit${hiddenCount === 1 ? '' : 's'} hidden — click to expand</span>` +
+      `</div>`
+    : '';
+
+  container.innerHTML =
+    `<div class="graph-svg-wrap" style="grid-template-columns: ${svgWidth}px 1fr">` +
+      `<svg class="graph-svg" width="${svgWidth}" height="${totalHeight}" viewBox="0 0 ${svgWidth} ${totalHeight}">` +
+        `<g class="graph-edges">${edgeSvgParts.join('')}</g>` +
+        `<g class="graph-dots">${dotsSvg.join('')}</g>` +
+      `</svg>` +
+      `<div class="graph-rows" style="height:${totalHeight}px">${rowsHtml.join('')}</div>` +
+    `</div>` +
+    hiddenRowHtml;
+
+  // ----- Event delegation ----- (one listener per kind on the container)
+  // Cache for click handler — we look up commits via the map, no per-row .find()
+  container._graphCommitsByHash = commitByHash;
+
+  // Replace previously-attached delegated handlers (if any) to avoid stacking
+  if (container._graphHandlers) {
+    container.removeEventListener('click', container._graphHandlers.click);
+    container.removeEventListener('dblclick', container._graphHandlers.dblclick);
+    container.removeEventListener('contextmenu', container._graphHandlers.context);
+    container.removeEventListener('dragstart', container._graphHandlers.dragstart);
+    container.removeEventListener('dragend', container._graphHandlers.dragend);
+    container.removeEventListener('dragover', container._graphHandlers.dragover);
+    container.removeEventListener('dragleave', container._graphHandlers.dragleave);
+    container.removeEventListener('drop', container._graphHandlers.drop);
+  }
+
+  const onClick = (e) => {
+    // Click on the "hidden commits" summary row expands the global collapse.
+    if (e.target.closest('.graph-hidden-row')) {
+      state.graphCollapsed = false;
+      updateGraphCollapseButton();
+      relayoutGraph();
+      return;
+    }
+    // Click on the inline fold toggle button folds/unfolds the commit's branch line.
+    const foldBtn = e.target.closest('.graph-fold-btn');
+    if (foldBtn && foldBtn.dataset.fold) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleCommitFold(foldBtn.dataset.fold);
+      return;
+    }
+    // Left-click on a commit dot OR its row selects the commit and shows its diff.
+    const dot = e.target.closest('circle.commit-dot');
+    const row = e.target.closest('.graph-row');
+    const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash);
+    if (!hash) return;
+    state.selectedGraphHash = hash;
+    const prev = container.querySelector('.graph-row.selected');
+    const targetRow = container.querySelector(`.graph-row[data-hash="${hash}"]`);
+    if (prev && prev !== targetRow) prev.classList.remove('selected');
+    if (targetRow) targetRow.classList.add('selected');
+    const commit = container._graphCommitsByHash.get(hash);
+    if (commit) renderGraphDetail(commit);
+  };
+
+  // Double-click a commit row or dot to fold/unfold its branch line (reliable,
+  // easy-to-hit alternative to right-clicking the small dot).
+  const onDblClick = (e) => {
+    const dot = e.target.closest('circle.commit-dot');
+    const row = e.target.closest('.graph-row');
+    const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash);
+    if (!hash) return;
+    const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(hash);
+    if (isCollapsed || commitIsFoldable(hash)) {
+      e.preventDefault();
+      toggleCommitFold(hash);
+    }
+  };
+
+  const onContext = (e) => {
+    // Ref-pill right click — handle ref menu instead
+    const pill = e.target.closest('.ref-pill');
+    if (pill) {
+      e.preventDefault();
+      e.stopPropagation();
+      showRefContextMenu(pill.dataset.refType, pill.dataset.refName, e.pageX, e.pageY);
+      return;
+    }
+    // Right-click directly on a commit DOT toggles folding of its branch line.
+    const dot = e.target.closest('circle.commit-dot');
+    if (dot && dot.dataset.hash) {
+      const h = dot.dataset.hash;
+      const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(h);
+      if (isCollapsed || commitIsFoldable(h)) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleCommitFold(h);
+        return;
+      }
+      // Not foldable — fall through to the normal commit context menu.
+    }
+    // Right-click elsewhere on the row shows the commit context menu.
+    const row = e.target.closest('.graph-row');
+    if (!row) return;
+    e.preventDefault();
+    e.stopPropagation();
+    showCommitContextMenu(row.dataset.hash, e.pageX, e.pageY);
+  };
+
+  const onDragStart = (e) => {
+    const pill = e.target.closest('.ref-pill[draggable="true"]');
+    if (!pill) return;
+    pill.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/x-gitgood-branch', pill.dataset.refName);
+    e.dataTransfer.setData('text/plain', pill.dataset.refName);
+  };
+
+  const onDragEnd = (e) => {
+    const pill = e.target.closest('.ref-pill.dragging');
+    if (pill) pill.classList.remove('dragging');
+  };
+
+  const onDragOver = (e) => {
+    if (!e.dataTransfer.types.includes('application/x-gitgood-branch')) return;
+    const row = e.target.closest('.graph-row');
+    if (!row) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    // Avoid setting class on every move; only set if not already set
+    if (!row.classList.contains('drop-allowed')) {
+      // Clear previous highlight
+      const prev = container.querySelector('.graph-row.drop-allowed');
+      if (prev) prev.classList.remove('drop-allowed');
+      row.classList.add('drop-allowed');
+    }
+  };
+
+  const onDragLeave = (e) => {
+    const row = e.target.closest('.graph-row');
+    if (row && !row.contains(e.relatedTarget)) row.classList.remove('drop-allowed');
+  };
+
+  const onDrop = async (e) => {
+    const row = e.target.closest('.graph-row');
+    if (!row) return;
+    row.classList.remove('drop-allowed');
+    const branch = e.dataTransfer.getData('application/x-gitgood-branch');
+    const targetHash = row.dataset.hash;
+    if (!branch || !targetHash) return;
+    e.preventDefault();
+    await handleBranchDrop(branch, targetHash);
+  };
+
+  container.addEventListener('click', onClick);
+  container.addEventListener('dblclick', onDblClick);
+  container.addEventListener('contextmenu', onContext);
+  container.addEventListener('dragstart', onDragStart);
+  container.addEventListener('dragend', onDragEnd);
+  container.addEventListener('dragover', onDragOver);
+  container.addEventListener('dragleave', onDragLeave);
+  container.addEventListener('drop', onDrop);
+  container._graphHandlers = { click: onClick, dblclick: onDblClick, context: onContext, dragstart: onDragStart, dragend: onDragEnd, dragover: onDragOver, dragleave: onDragLeave, drop: onDrop };
+
+  // If selection is still valid, show its detail; else clear
+  if (state.selectedGraphHash) {
+    const sel = commitByHash.get(state.selectedGraphHash);
+    if (sel) renderGraphDetail(sel);
+    else { state.selectedGraphHash = null; renderGraphDetail(null); }
+  }
+}
+
+async function renderGraphDetail(commit) {
+  const panel = $('#graph-detail');
+  if (!panel) return;
+  if (!commit) {
+    panel.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">⚜</div>
+        <p>Select a commit to inspect its deeds.</p>
+      </div>
+    `;
+    return;
+  }
+  // Track the request so a slow load doesn't overwrite a newer selection
+  const requestedHash = commit.hash;
+
+  // Render metadata immediately
+  panel.innerHTML = `
+    <div class="detail-section">
+      <div class="detail-header">⚜ Deed</div>
+      <div class="detail-text">${escapeHtml(commit.message)}</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-header">⚔ Author</div>
+      <div class="detail-meta">${escapeHtml(commit.author_name || '')} <span>&lt;${escapeHtml(commit.author_email || '')}&gt;</span></div>
+      <div class="detail-meta"><span>${commit.date ? new Date(commit.date).toLocaleString() : ''}</span></div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-header">⚜ Hash</div>
+      <div class="detail-meta text-mono" style="word-break:break-all">${escapeHtml(commit.hash)}</div>
+    </div>
+    ${commit.parents && commit.parents.length > 1
+      ? `<div class="detail-section"><div class="detail-header">⚒ Merge of ${commit.parents.length} parents</div><div class="detail-meta text-mono" style="word-break:break-all">${commit.parents.map(p => escapeHtml(p.slice(0,7))).join(' + ')}</div></div>`
+      : ''}
+    <div class="detail-section">
+      <div class="detail-header detail-header-row">
+        <span>⚒ Changes</span>
+        ${diffModeToggleHtml()}
+      </div>
+      <div class="diff-content" id="graph-diff-content" style="border:1px solid var(--border);max-height:55vh"><div class="empty-state"><span class="loading"></span></div></div>
+    </div>
+  `;
+
+  let details;
+  try {
+    details = await getCommitDetails(requestedHash);
+  } catch (err) {
+    const diffEl = panel.querySelector('#graph-diff-content');
+    if (diffEl && state.selectedGraphHash === requestedHash) {
+      diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to load commit: ${escapeHtml(err.message || String(err))}</p></div>`;
+    }
+    return;
+  }
+  // Skip if user has selected a different commit while we were loading
+  if (state.selectedGraphHash !== requestedHash) return;
+
+  // Defer the diff render to a separate paint frame so metadata paints first.
+  requestAnimationFrame(() => {
+    // Re-check selection — user may have switched again during raf delay
+    if (state.selectedGraphHash !== requestedHash) return;
+    const diffEl = panel.querySelector('#graph-diff-content');
+    if (!diffEl) return;
+    renderCommitFileBrowser(diffEl, details.diff, {
+      hash: requestedHash,
+      diffTruncated: details.diffTruncated,
+      diffBytes: details.diffBytes
+    });
+  });
+}
+
+// ============================================
+// CONTEXT MENUS — commits and refs
+// ============================================
+function showCommitContextMenu(hash, x, y) {
+  const shortHash = hash.slice(0, 7);
+  const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(hash);
+  const foldable = isCollapsed || commitIsFoldable(hash);
+  const items = [
+    { label: 'Copy hash', icon: '⎘', action: () => { navigator.clipboard.writeText(hash); showToast('Hash copied', 'success'); } },
+    { label: 'Copy short hash', icon: '⎘', action: () => { navigator.clipboard.writeText(shortHash); showToast('Short hash copied', 'success'); } },
+    'sep',
+    { label: `Checkout ${shortHash}`, icon: '⑂', action: () => checkoutCommit(hash) },
+    { label: 'Create branch here…', icon: '+', action: () => showCreateBranchDialog(hash) },
+    { label: 'Create tag here…', icon: '✠', action: () => showCreateTagDialog(hash) },
+    'sep',
+    { label: 'Cherry-pick onto current', icon: '⚒', action: () => doCherryPick(hash) },
+    { label: 'Revert this commit', icon: '↶', action: () => doRevert(hash) },
+    'sep',
+    { label: 'Reset current branch to here…', icon: '↺', action: () => showResetDialog(hash) }
+  ];
+  if (foldable) {
+    items.push('sep');
+    items.push({
+      label: isCollapsed ? 'Expand branch line below' : 'Collapse branch line below',
+      icon: isCollapsed ? '⊞' : '⊟',
+      action: () => toggleCommitFold(hash)
+    });
+  }
+  showContextMenu(items, x, y);
+}
+
+// Is the commit currently foldable? Foldable when ANY of its parents is present in the
+// view and sits below it (there's a chain we can fold away). We check all parents — not
+// just the first — so merge commits whose first parent happens to be drawn above still
+// fold via their other (below) parent. Lanes are not required to match.
+function commitIsFoldable(hash) {
+  const g = state.graph;
+  if (!g || !g.positions) return false;
+  const pos = g.positions.get(hash);
+  if (!pos) return false;
+  const c = (g.commits || []).find(x => x.hash === hash);
+  if (!c) return false;
+  const parents = c.parents || [];
+  for (const ph of parents) {
+    const pp = g.positions.get(ph);
+    if (pp && pp.row > pos.row) return true;
+  }
+  return false;
+}
+
+// Toggle the per-commit fold for a given hash and re-render the graph.
+function toggleCommitFold(hash) {
+  if (!state.collapsedCommits) state.collapsedCommits = new Set();
+  if (state.collapsedCommits.has(hash)) state.collapsedCommits.delete(hash);
+  else state.collapsedCommits.add(hash);
+  relayoutGraph();
+}
+
+function showRefContextMenu(refType, refName, x, y) {
+  if (refType === 'local') {
+    const current = state.branches.local && state.branches.local.current;
+    const isCurrent = refName === current;
+    const items = [];
+    if (!isCurrent) {
+      items.push({ label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutBranch(refName) });
+      items.push({ label: `Merge ${refName} into current (smart)`, icon: '⚒', action: () => showSmartMergeDialog(refName) });
+    }
+    items.push({ label: 'Rename branch…', icon: '✎', action: () => showRenameBranchDialog(refName) });
+    items.push('sep');
+    items.push({ label: 'Delete branch', icon: '✗', danger: true, action: () => deleteBranch(refName, false) });
+    items.push({ label: 'Force delete', icon: '⚔', danger: true, action: () => deleteBranch(refName, true) });
+    showContextMenu(items, x, y);
+  } else if (refType === 'remote') {
+    const local = refName.replace(/^[^/]+\//, '');
+    showContextMenu([
+      { label: `Checkout as local "${local}"`, icon: '⑂', action: () => checkoutRemoteBranch(refName, local) },
+      { label: `Merge ${refName} into current (smart)`, icon: '⚒', action: () => showSmartMergeDialog(refName) },
+      'sep',
+      { label: 'Copy ref name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } }
+    ], x, y);
+  } else if (refType === 'tag') {
+    showContextMenu([
+      { label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutCommit(refName) },
+      { label: 'Copy tag name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } },
+      'sep',
+      { label: 'Delete tag', icon: '✗', danger: true, action: () => doDeleteTag(refName) }
+    ], x, y);
+  }
+}
+
+async function doCherryPick(hash) {
+  const r = await withLoading('Cherry-picking', () => gs.cherryPick(hash));
+  if (handleResult(r, 'Cherry-picked')) await refreshAll();
+}
+async function doRevert(hash) {
+  const confirmed = await modal.confirm({
+    title: 'Revert Commit',
+    message: `Revert commit ${hash.slice(0, 7)}? A new commit will be created that undoes its changes.`,
+    confirmText: 'Revert'
+  });
+  if (!confirmed) return;
+  const r = await withLoading('Reverting', () => gs.revert(hash));
+  if (handleResult(r, 'Reverted')) await refreshAll();
+}
+async function doDeleteTag(tagName) {
+  const confirmed = await modal.confirm({
+    title: 'Delete Tag',
+    message: `Delete tag "${tagName}"?`,
+    danger: true, confirmText: 'Delete'
+  });
+  if (!confirmed) return;
+  const r = await gs.rawCommand(['tag', '-d', tagName]);
+  if (handleResult(r, 'Tag deleted')) await refreshAll();
+}
+
+function showCreateTagDialog(hash) {
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Tag commit <code class="text-mono text-red">${escapeHtml(hash.slice(0,7))}</code></p>
+    <div class="modal-field"><label>Tag Name</label><input class="modal-input" id="new-tag-name" placeholder="v1.0.0" /></div>
+    <div class="modal-field"><label>Message (optional, creates annotated tag)</label><input class="modal-input" id="new-tag-msg" placeholder="Release notes…" /></div>
+  `;
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+  const createBtn = document.createElement('button');
+  createBtn.className = 'btn-medieval primary'; createBtn.textContent = 'Create Tag';
+  createBtn.onclick = async () => {
+    const name = $('#new-tag-name').value.trim();
+    const msg = $('#new-tag-msg').value.trim();
+    if (!name) { showToast('Tag name required', 'error'); return; }
+    modal.hide();
+    const args = ['tag'];
+    if (msg) args.push('-a', name, '-m', msg, hash);
+    else args.push(name, hash);
+    const r = await gs.rawCommand(args);
+    if (handleResult(r, `Tag ${name} forged`)) await refreshAll();
+  };
+  modal.show({ title: 'Create Tag', body, footer: [cancelBtn, createBtn] });
+}
+
+function showRenameBranchDialog(oldName) {
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Rename branch <code class="text-mono text-red">${escapeHtml(oldName)}</code></p>
+    <div class="modal-field"><label>New Name</label><input class="modal-input" id="rename-branch-name" value="${escapeHtml(oldName)}" /></div>
+  `;
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn-medieval primary'; okBtn.textContent = 'Rename';
+  okBtn.onclick = async () => {
+    const newName = $('#rename-branch-name').value.trim();
+    if (!newName) { showToast('Name required', 'error'); return; }
+    if (newName === oldName) { modal.hide(); return; }
+    modal.hide();
+    const r = await gs.rawCommand(['branch', '-m', oldName, newName]);
+    if (handleResult(r, `Renamed to ${newName}`)) await refreshAll();
+  };
+  modal.show({ title: 'Rename Branch', body, footer: [cancelBtn, okBtn] });
+}
+
+function showResetDialog(hash) {
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Reset the current branch to <code class="text-mono text-red">${escapeHtml(hash.slice(0,7))}</code>.</p>
+    <div class="merge-strategies">
+      <label class="merge-strategy selected">
+        <input type="radio" name="reset-mode" value="mixed" checked />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Mixed (default)</div>
+          <div class="merge-strategy-desc">Move HEAD to this commit. Keep working tree changes but unstage them. <strong>Safe.</strong></div>
+        </div>
+      </label>
+      <label class="merge-strategy">
+        <input type="radio" name="reset-mode" value="soft" />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Soft</div>
+          <div class="merge-strategy-desc">Move HEAD only. Keep everything staged and in the working tree. <strong>Safest.</strong></div>
+        </div>
+      </label>
+      <label class="merge-strategy">
+        <input type="radio" name="reset-mode" value="hard" />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Hard ⚠</div>
+          <div class="merge-strategy-desc">Move HEAD and <strong>discard all uncommitted changes and staged files</strong>. Cannot be undone.</div>
+        </div>
+      </label>
+    </div>
+  `;
+  // Radio selection visuals
+  body.querySelectorAll('.merge-strategy').forEach(card => {
+    card.onclick = (e) => {
+      const radio = card.querySelector('input[type="radio"]');
+      if (radio) radio.checked = true;
+      body.querySelectorAll('.merge-strategy').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+    };
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn-medieval danger'; okBtn.textContent = 'Reset';
+  okBtn.onclick = async () => {
+    const mode = body.querySelector('input[name="reset-mode"]:checked').value;
+    modal.hide();
+    if (mode === 'hard') {
+      const sure = await modal.confirm({
+        title: 'Confirm Hard Reset',
+        message: 'This will permanently discard uncommitted changes. Continue?',
+        danger: true, confirmText: 'Yes, reset hard'
+      });
+      if (!sure) return;
+    }
+    const r = await withLoading('Resetting', () => gs.reset({ hash, mode }));
+    if (handleResult(r, `Reset (${mode}) complete`)) await refreshAll();
+  };
+  modal.show({ title: 'Reset Current Branch', body, footer: [cancelBtn, okBtn] });
+}
+
+// ============================================
+// BRANCH DROP — drag a branch pill onto a commit row
+// ============================================
+async function handleBranchDrop(branch, targetHash) {
+  // Confirm — if it's the current branch, this triggers a reset-hard via moveBranch
+  const isCurrent = state.branches.local && state.branches.local.current === branch;
+  const message = isCurrent
+    ? `Move the CURRENT branch "${branch}" to commit ${targetHash.slice(0,7)}? This performs a hard reset and discards uncommitted changes.`
+    : `Move branch "${branch}" to commit ${targetHash.slice(0,7)}? (Uses git branch -f)`;
+  const confirmed = await modal.confirm({
+    title: isCurrent ? 'Move Current Branch (Hard Reset)' : 'Move Branch',
+    message,
+    danger: isCurrent,
+    confirmText: 'Move'
+  });
+  if (!confirmed) return;
+  const r = await withLoading('Moving branch', () => gs.moveBranch({ branch, hash: targetHash }));
+  if (handleResult(r, `Moved ${branch}`)) await refreshAll();
+}
+
+// ============================================
+// SMART MERGE MODAL
+// ============================================
+async function showSmartMergeDialog(branch) {
+  if (!branch) return;
+  // Fetch a preview from main
+  const previewResult = await withLoading(`Analyzing merge of ${branch}`, () => gs.mergePreview(branch));
+  if (!previewResult.ok) {
+    showToast('Preview failed: ' + previewResult.error, 'error', 6000);
+    return;
+  }
+  const preview = previewResult.data;
+  const current = (state.branches.local && state.branches.local.current) || 'current branch';
+
+  const incomingHtml = (preview.incoming || []).slice(0, 30).map(c => `
+    <div class="merge-incoming-row">
+      <span class="text-red text-mono">${escapeHtml(c.hash || '')}</span>
+      <span>${escapeHtml(c.message || '')}</span>
+      <span class="text-muted text-mono">${escapeHtml(c.author || '')}</span>
+    </div>
+  `).join('');
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Merge <strong class="text-red">${escapeHtml(branch)}</strong> into <strong>${escapeHtml(current)}</strong></p>
+
+    <div class="merge-preview">
+      <div class="merge-preview-row">
+        <span>Incoming commits</span>
+        <strong>${preview.behind || 0}</strong>
+      </div>
+      <div class="merge-preview-row">
+        <span>Local-only commits</span>
+        <strong>${preview.ahead || 0}</strong>
+      </div>
+      <div class="merge-preview-row">
+        <span>Fast-forward possible</span>
+        ${preview.canFastForward
+          ? '<span class="merge-preview-ok">✓ Yes</span>'
+          : '<span class="merge-preview-warn">✗ Diverged — merge commit needed</span>'}
+      </div>
+    </div>
+
+    ${(preview.incoming && preview.incoming.length)
+      ? `<label class="branches-label" style="display:block;margin-bottom:6px">⚒ Incoming Commits</label>
+         <div class="merge-incoming">${incomingHtml}${preview.incoming.length > 30 ? `<div class="merge-incoming-row text-muted" style="grid-template-columns:1fr"><span>…and ${(preview.behind || 0) - 30} more</span></div>` : ''}</div>`
+      : ''}
+
+    <label class="branches-label" style="display:block;margin-bottom:6px">⚜ Strategy</label>
+    <div class="merge-strategies" id="merge-strategy-cards">
+      <label class="merge-strategy${preview.canFastForward ? ' selected' : ''}${!preview.canFastForward ? ' disabled' : ''}">
+        <input type="radio" name="merge-strategy" value="ff-only" ${preview.canFastForward ? 'checked' : 'disabled'} />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Fast-forward (clean)</div>
+          <div class="merge-strategy-desc">Just move the current branch pointer forward. ${preview.canFastForward ? 'Clean, no merge commit.' : 'Not available — branches have diverged.'}</div>
+        </div>
+      </label>
+      <label class="merge-strategy${!preview.canFastForward ? ' selected' : ''}">
+        <input type="radio" name="merge-strategy" value="auto" ${!preview.canFastForward ? 'checked' : ''} />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Default (auto)</div>
+          <div class="merge-strategy-desc">Fast-forward if possible, otherwise create a merge commit.</div>
+        </div>
+      </label>
+      <label class="merge-strategy">
+        <input type="radio" name="merge-strategy" value="no-ff" />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Always create merge commit</div>
+          <div class="merge-strategy-desc">Force a merge commit even when fast-forward is possible. Preserves branch history visually.</div>
+        </div>
+      </label>
+      <label class="merge-strategy">
+        <input type="radio" name="merge-strategy" value="squash" />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">Squash</div>
+          <div class="merge-strategy-desc">Combine all incoming commits into a single new commit on the current branch.</div>
+        </div>
+      </label>
+    </div>
+
+    <div class="modal-field" id="merge-msg-field" style="display:none">
+      <label>Merge Commit Message</label>
+      <input class="modal-input" id="merge-msg" placeholder="${escapeHtml(`Merge branch '${branch}' into ${current}`)}" />
+    </div>
+  `;
+
+  // Radio interaction — toggle visual selection and show/hide message field
+  const cards = body.querySelectorAll('.merge-strategy');
+  const msgField = body.querySelector('#merge-msg-field');
+  function syncSelectionUI() {
+    const sel = body.querySelector('input[name="merge-strategy"]:checked');
+    const val = sel ? sel.value : 'auto';
+    cards.forEach(c => {
+      const r = c.querySelector('input[type="radio"]');
+      c.classList.toggle('selected', r && r.checked);
+    });
+    msgField.style.display = (val === 'no-ff' || val === 'squash') ? 'block' : 'none';
+  }
+  cards.forEach(card => {
+    card.onclick = (e) => {
+      const radio = card.querySelector('input[type="radio"]');
+      if (radio && !radio.disabled) {
+        radio.checked = true;
+        syncSelectionUI();
+      }
+    };
+  });
+  syncSelectionUI();
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn-medieval primary'; okBtn.innerHTML = '<span class="btn-icon">⚒</span> Merge';
+  okBtn.onclick = async () => {
+    const strategy = body.querySelector('input[name="merge-strategy"]:checked').value;
+    const messageInput = body.querySelector('#merge-msg');
+    const message = (messageInput && messageInput.value.trim()) || undefined;
+    modal.hide();
+    const r = await withLoading(`Merging ${branch}`, () => gs.merge({ branch, strategy, message }));
+    if (!r.ok) {
+      // Conflict — show a structured message
+      if (/conflict/i.test(r.error)) {
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'btn-medieval primary'; closeBtn.textContent = 'OK';
+        closeBtn.onclick = () => modal.hide();
+        const abortBtn = document.createElement('button');
+        abortBtn.className = 'btn-medieval danger'; abortBtn.textContent = 'Abort Merge';
+        abortBtn.onclick = async () => {
+          modal.hide();
+          const ar = await gs.mergeAbort();
+          if (handleResult(ar, 'Merge aborted')) await refreshAll();
+        };
+        modal.show({
+          title: 'Merge Conflict',
+          body: `<pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:12px;color:var(--text-dim);line-height:1.5;max-height:50vh;overflow:auto">${escapeHtml(r.error)}</pre>`,
+          footer: [abortBtn, closeBtn]
+        });
+        await refreshAll();
+      } else {
+        showToast(r.error, 'error', 8000);
+      }
+      return;
+    }
+    showToast(`Merged ${branch}`, 'success');
+    await refreshAll();
+  };
+  modal.show({ title: 'Smart Merge', body, footer: [cancelBtn, okBtn] });
+}
+
+// ============================================
+// CUSTOM SELECT DROPDOWN COMPONENT
+// ============================================
+// Used for the checkout / merge branch pickers in the Branches tab.
+// Builds a styled dropdown with a search field, grouped by Local / Remote.
+function setupCustomSelect({ triggerId, dropdownId, placeholder, onSelect, getCurrentValue }) {
+  const trigger = document.getElementById(triggerId);
+  const dropdown = document.getElementById(dropdownId);
+  if (!trigger || !dropdown) return null;
+  const container = trigger.parentElement;
+  let currentSearch = '';
+  let currentValue = null;
+
+  function setLabel(value) {
+    currentValue = value;
+    const span = trigger.querySelector('.cs-text');
+    if (!span) return;
+    if (value) {
+      span.textContent = value;
+      span.classList.remove('placeholder');
+    } else {
+      span.textContent = placeholder || 'Select…';
+      span.classList.add('placeholder');
+    }
+  }
+
+  function close() {
+    container.classList.remove('open');
+    currentSearch = '';
+  }
+
+  function open() {
+    // Close any other open dropdowns
+    document.querySelectorAll('.custom-select.open').forEach(el => { if (el !== container) el.classList.remove('open'); });
+    container.classList.add('open');
+    rebuildOptions();
+    setTimeout(() => {
+      const s = dropdown.querySelector('.cs-search');
+      if (s) s.focus();
+    }, 50);
+  }
+
+  function rebuildOptions() {
+    const { local, remotes } = state.branches || {};
+    const localAll = (local && local.all) || [];
+    const remoteAll = (remotes && remotes.all) || [];
+    const currentBranch = (local && local.current) || '';
+    const filter = currentSearch.trim().toLowerCase();
+
+    const filteredLocal = localAll.filter(b => !filter || b.toLowerCase().includes(filter));
+    const filteredRemote = remoteAll.filter(b => !filter || b.toLowerCase().includes(filter));
+
+    const parts = [`
+      <div class="cs-search-wrap">
+        <input type="text" class="cs-search" placeholder="Filter branches…" value="${escapeHtml(currentSearch)}" />
+      </div>
+    `];
+
+    if (filteredLocal.length) {
+      parts.push(`<div class="cs-group-label">Local</div>`);
+      for (const b of filteredLocal) {
+        const isCurrent = b === currentBranch;
+        const isSelected = currentValue === b;
+        const meta = isCurrent ? '<span class="cs-option-meta">current</span>' : '';
+        parts.push(`
+          <div class="cs-option${isSelected ? ' selected' : ''}${isCurrent ? ' disabled' : ''}" data-value="${escapeHtml(b)}" data-is-current="${isCurrent}">
+            <span class="cs-option-icon">⑂</span>
+            <span>${escapeHtml(b)}</span>
+            ${meta}
+          </div>
+        `);
+      }
+    }
+    if (filteredRemote.length) {
+      parts.push(`<div class="cs-group-label">Remote</div>`);
+      for (const b of filteredRemote) {
+        const isSelected = currentValue === b;
+        parts.push(`
+          <div class="cs-option${isSelected ? ' selected' : ''}" data-value="${escapeHtml(b)}">
+            <span class="cs-option-icon" style="color:#6b8e23">⟁</span>
+            <span>${escapeHtml(b)}</span>
+          </div>
+        `);
+      }
+    }
+    if (!filteredLocal.length && !filteredRemote.length) {
+      parts.push(`<div class="cs-empty">${filter ? 'No matches' : 'No branches'}</div>`);
+    }
+
+    dropdown.innerHTML = parts.join('');
+
+    const searchInput = dropdown.querySelector('.cs-search');
+    if (searchInput) {
+      searchInput.oninput = () => {
+        currentSearch = searchInput.value;
+        rebuildOptions();
+      };
+      searchInput.onkeydown = (e) => {
+        if (e.key === 'Escape') { close(); trigger.focus(); }
+      };
+    }
+    dropdown.querySelectorAll('.cs-option').forEach(opt => {
+      opt.onclick = () => {
+        if (opt.classList.contains('disabled')) return;
+        const val = opt.dataset.value;
+        setLabel(val);
+        close();
+        if (onSelect) onSelect(val);
+      };
+    });
+  }
+
+  trigger.onclick = (e) => {
+    e.stopPropagation();
+    if (container.classList.contains('open')) close();
+    else open();
+  };
+  // Close on outside click
+  document.addEventListener('click', (e) => {
+    if (!container.contains(e.target)) close();
+  });
+
+  // Initial label
+  setLabel(getCurrentValue ? getCurrentValue() : null);
+
+  return { setLabel, open, close, rebuild: rebuildOptions };
+}
+
+// ============================================
+// BRANCHES TAB
+// ============================================
+let checkoutSelectCtl = null;
+let mergeSelectCtl = null;
+
+function renderBranchesTab() {
+  // Update current banner card
+  const card = $('#branches-current-card');
+  if (card) {
+    const current = (state.branches.local && state.branches.local.current) || '';
+    card.textContent = current ? '⑂ ' + current : '— no branch —';
+  }
+
+  // Lazy-init the custom selects on first render
+  if (!checkoutSelectCtl) {
+    checkoutSelectCtl = setupCustomSelect({
+      triggerId: 'checkout-trigger',
+      dropdownId: 'checkout-dropdown',
+      placeholder: 'Select a branch…',
+      onSelect: (val) => { state.checkoutTarget = val; }
+    });
+  } else {
+    checkoutSelectCtl.rebuild();
+  }
+  if (!mergeSelectCtl) {
+    mergeSelectCtl = setupCustomSelect({
+      triggerId: 'merge-trigger',
+      dropdownId: 'merge-dropdown',
+      placeholder: 'Select a branch to merge…',
+      onSelect: (val) => { state.mergeTarget = val; }
+    });
+  } else {
+    mergeSelectCtl.rebuild();
+  }
+
+  // Render the full branches list
+  renderBranchesFullList();
+}
+
+function renderBranchesFullList() {
+  const list = $('#branches-full-list');
+  if (!list) return;
+  const { local, remotes } = state.branches || {};
+  const localAll = (local && local.all) || [];
+  const remoteAll = (remotes && remotes.all) || [];
+  const currentBranch = (local && local.current) || '';
+  const filter = (state.branchesFilter || '').trim().toLowerCase();
+  const matches = (b) => !filter || b.toLowerCase().includes(filter);
+
+  const filteredLocal = localAll.filter(matches);
+  const filteredRemote = remoteAll.filter(matches);
+
+  const rows = [];
+
+  filteredLocal.forEach(b => {
+    const isCurrent = b === currentBranch;
+    rows.push(`
+      <li class="branch-row${isCurrent ? ' is-current' : ''}" data-branch="${escapeHtml(b)}" data-kind="local">
+        <span class="branch-icon">⑂</span>
+        <span class="branch-name">${escapeHtml(b)}</span>
+        <span class="branch-type-pill">${isCurrent ? 'Current' : 'Local'}</span>
+        <span class="branch-actions">
+          ${!isCurrent ? `<button class="mini-btn" data-action="checkout">Checkout</button>` : ''}
+          ${!isCurrent ? `<button class="mini-btn" data-action="merge">Merge</button>` : ''}
+          ${!isCurrent ? `<button class="mini-btn" data-action="delete">Delete</button>` : ''}
+        </span>
+      </li>
+    `);
+  });
+  filteredRemote.forEach(b => {
+    rows.push(`
+      <li class="branch-row is-remote" data-branch="${escapeHtml(b)}" data-kind="remote">
+        <span class="branch-icon">⟁</span>
+        <span class="branch-name">${escapeHtml(b)}</span>
+        <span class="branch-type-pill">Remote</span>
+        <span class="branch-actions">
+          <button class="mini-btn" data-action="checkout-remote">Checkout</button>
+          <button class="mini-btn" data-action="merge">Merge</button>
+        </span>
+      </li>
+    `);
+  });
+
+  if (!rows.length) {
+    list.innerHTML = `<li class="file-empty">${filter ? 'No matches' : 'No branches'}</li>`;
+    return;
+  }
+  list.innerHTML = rows.join('');
+
+  list.querySelectorAll('.branch-row').forEach(row => {
+    const branch = row.dataset.branch;
+    const kind = row.dataset.kind;
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      if (kind === 'local') showRefContextMenu('local', branch, e.pageX, e.pageY);
+      else showRefContextMenu('remote', branch, e.pageX, e.pageY);
+    };
+    row.querySelectorAll('button[data-action]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const a = btn.dataset.action;
+        if (a === 'checkout') checkoutBranch(branch);
+        else if (a === 'checkout-remote') {
+          const local = branch.replace(/^[^/]+\//, '');
+          checkoutRemoteBranch(branch, local);
+        }
+        else if (a === 'merge') showSmartMergeDialog(branch);
+        else if (a === 'delete') deleteBranch(branch, false);
+      };
+    });
+  });
+}
+
+// Wire up branches tab buttons (once)
+function wireBranchesTab() {
+  const filter = $('#branches-filter');
+  if (filter) {
+    filter.oninput = () => { state.branchesFilter = filter.value; renderBranchesFullList(); };
+  }
+  const checkoutBtn = $('#checkout-btn');
+  if (checkoutBtn) {
+    checkoutBtn.onclick = () => {
+      if (!state.checkoutTarget) { showToast('Select a branch first', 'error'); return; }
+      const target = state.checkoutTarget;
+      const remotes = (state.branches.remotes && state.branches.remotes.all) || [];
+      if (remotes.includes(target)) {
+        const local = target.replace(/^[^/]+\//, '');
+        checkoutRemoteBranch(target, local);
+      } else {
+        checkoutBranch(target);
+      }
+    };
+  }
+  const mergeBtn = $('#merge-btn');
+  if (mergeBtn) {
+    mergeBtn.onclick = () => {
+      if (!state.mergeTarget) { showToast('Select a branch first', 'error'); return; }
+      showSmartMergeDialog(state.mergeTarget);
+    };
+  }
+  const newBranchBtn = $('#new-branch-btn');
+  if (newBranchBtn) {
+    newBranchBtn.onclick = async () => {
+      const name = $('#new-branch-input').value.trim();
+      const checkout = $('#new-branch-checkout').checked;
+      if (!name) { showToast('Branch name required', 'error'); return; }
+      const r = await gs.createBranch({ name, checkout });
+      if (handleResult(r, `Branch ${name} forged`)) {
+        $('#new-branch-input').value = '';
+        await refreshAll();
+      }
+    };
+  }
+  const newInput = $('#new-branch-input');
+  if (newInput) {
+    newInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('#new-branch-btn').click();
+    });
+  }
+}
+
+// Wire up graph tab controls (once)
+function wireGraphTab() {
+  const limit = $('#graph-limit');
+  if (limit) {
+    limit.onchange = async () => {
+      let v = parseInt(limit.value, 10);
+      if (isNaN(v) || v < 50) return;
+      // Hard cap — beyond this the renderer becomes unresponsive without virtual scrolling.
+      const HARD_CAP = 5000;
+      if (v > HARD_CAP) {
+        const ok = await modal.confirm({
+          title: 'Large Chronicle',
+          message: `Rendering more than ${HARD_CAP.toLocaleString()} commits may slow the app or cause it to lock up. Continue with ${v.toLocaleString()}? (Recommended: keep at ${HARD_CAP.toLocaleString()} or below.)`,
+          danger: true,
+          confirmText: 'Continue'
+        });
+        if (!ok) {
+          v = HARD_CAP;
+          limit.value = v;
+        }
+      }
+      state.graphLimit = v;
+      refreshGraph();
+    };
+  }
+  const refresh = $('#graph-refresh');
+  if (refresh) refresh.onclick = () => refreshGraph();
+
+  const collapseBtn = $('#graph-collapse-toggle');
+  if (collapseBtn) collapseBtn.onclick = () => {
+    state.graphCollapsed = !state.graphCollapsed;
+    updateGraphCollapseButton();
+    relayoutGraph();
+  };
+  updateGraphCollapseButton();
+
+  // Graph search/filter (debounced so typing stays smooth on large graphs)
+  const graphSearch = $('#graph-search');
+  const graphMode = $('#graph-search-mode');
+  if (graphSearch) {
+    let t = null;
+    graphSearch.value = state.graphFilter || '';
+    if (graphMode) graphMode.value = state.graphFilterMode || 'message';
+    const applyGraph = async () => {
+      state.graphFilter = graphSearch.value;
+      // If filtering by files, make sure the commit→files map is loaded first.
+      if ((state.graphFilterMode === 'files' || state.graphFilterMode === 'all') && state.graphFilter.trim()) {
+        await ensureCommitFilesMap();
+      }
+      relayoutGraph();
+    };
+    graphSearch.oninput = () => { clearTimeout(t); t = setTimeout(applyGraph, 180); };
+    graphSearch.onkeydown = (e) => {
+      if (e.key === 'Escape') { graphSearch.value = ''; state.graphFilter = ''; relayoutGraph(); }
+    };
+    if (graphMode) graphMode.onchange = () => {
+      state.graphFilterMode = graphMode.value;
+      applyGraph();
+    };
+  }
+
+  // History search/filter
+  const historySearch = $('#history-search');
+  const historyMode = $('#history-search-mode');
+  if (historySearch) {
+    let t2 = null;
+    historySearch.value = state.historyFilter || '';
+    if (historyMode) historyMode.value = state.historyFilterMode || 'message';
+    const applyHistory = async () => {
+      state.historyFilter = historySearch.value;
+      if ((state.historyFilterMode === 'files' || state.historyFilterMode === 'all') && state.historyFilter.trim()) {
+        await ensureCommitFilesMap();
+      }
+      renderHistory();
+    };
+    historySearch.oninput = () => { clearTimeout(t2); t2 = setTimeout(applyHistory, 180); };
+    historySearch.onkeydown = (e) => {
+      if (e.key === 'Escape') { historySearch.value = ''; state.historyFilter = ''; renderHistory(); }
+    };
+    if (historyMode) historyMode.onchange = () => {
+      state.historyFilterMode = historyMode.value;
+      applyHistory();
+    };
+  }
+}
+
+// Reflect the collapse state on the toolbar button.
+function updateGraphCollapseButton() {
+  const btn = document.getElementById('graph-collapse-toggle');
+  if (!btn) return;
+  if (state.graphCollapsed) {
+    btn.innerHTML = '⊞ Expand';
+    btn.title = 'Show all commits';
+    btn.classList.add('active');
+  } else {
+    btn.innerHTML = '⊟ Collapse';
+    btn.title = `Collapse the middle of long history, showing only the newest ${GRAPH_COLLAPSE_VISIBLE} commits`;
+    btn.classList.remove('active');
+  }
+}
+
+// Call wiring on load (idempotent since onclick reassigns)
+wireBranchesTab();
+wireGraphTab();
+
+// Detached-HEAD banner buttons
+(() => {
+  const ret = document.getElementById('detached-banner-return');
+  if (ret) ret.onclick = () => returnToBranch();
+  const nb = document.getElementById('detached-banner-newbranch');
+  if (nb) nb.onclick = () => {
+    const head = (state.status && state.status.headHash) || 'HEAD';
+    showCreateBranchDialog(head);
+  };
+})();
+
+// ============================================
+// OPERATION PROGRESS (clone/pull/push/fetch/lfs) — feeds real % into opProgress
+// ============================================
+(() => {
+  if (!gs.onOpProgress) return;
+
+  // Human-friendly labels for simple-git's stage names
+  const STAGE_LABELS = {
+    'receiving': 'Receiving',
+    'counting': 'Counting',
+    'compressing': 'Compressing',
+    'writing': 'Writing',
+    'resolving': 'Resolving',
+    'remote:': 'Remote'
+  };
+
+  gs.onOpProgress((p) => {
+    if (p.done || p.active === false) {
+      // The withLoading wrapper around the operation will call end(); but if a
+      // transfer finished without that wrapper, make sure we settle the bar.
+      // We only force-complete the bar's fill here; hiding is handled by end().
+      opProgress.setPercent(100);
+      return;
+    }
+
+    // Build label: "Method · Stage"
+    const method = (p.method || '').toString();
+    const stageRaw = (p.stage || '').toString().toLowerCase();
+    const stage = STAGE_LABELS[stageRaw] || (p.stage || '');
+    const label = [method, stage].filter(Boolean).join(' · ') || 'Working';
+
+    const hasPct = typeof p.progress === 'number' && !isNaN(p.progress) && p.progress > 0;
+    if (hasPct) {
+      opProgress.setPercent(p.progress, label);
+    } else {
+      // No percentage yet — keep an indeterminate bar with the label (without
+      // touching the active-operation counter that begin()/end() manage).
+      opProgress.indeterminate(label);
+    }
+  });
+})();
+
+
+gs.onMenu('menu-open-repo', () => openRepoDialog());
+gs.onMenu('menu-clone-repo', () => showCloneDialog());
+gs.onMenu('menu-about', () => {
+  modal.show({
+    title: 'About GitGood',
+    body: `
+      <div style="text-align:center;padding:20px">
+        <div style="font-family:var(--font-display);font-size:32px;color:var(--bone-white);letter-spacing:0.15em;margin-bottom:8px">GitGood</div>
+        <div style="font-family:var(--font-ornament);color:var(--parchment-dim);margin-bottom:16px">⚜ Version 1.0.0 ⚜</div>
+        <p class="modal-text">A medieval-themed Git GUI client forged in the fires of the crusade.</p>
+        <p class="modal-text" style="font-size:12px;color:var(--muted-text)">Built with Electron and simple-git.</p>
+      </div>
+    `,
+    footer: (() => {
+      const b = document.createElement('button');
+      b.className = 'btn-medieval primary';
+      b.textContent = 'Close';
+      b.onclick = () => modal.hide();
+      return b;
+    })()
+  });
+});
+
+// ============================================
+// DISK MANAGEMENT
+// ============================================
+const _diskState = { loaded: false, lastData: null, stale: false };
+let _diskScanGen = 0;  // increments each refreshDiskUsage call; stale calls bail out
+
+// Show a subtle hint that the disk figures may be out of date (repo changed since
+// the last scan). We don't rescan automatically — the user clicks Refresh to update.
+function markDiskStale() {
+  const refreshBtn = document.getElementById('disk-refresh');
+  if (refreshBtn && _diskState.loaded) {
+    refreshBtn.classList.add('stale');
+    refreshBtn.title = 'Figures may be out of date — click to recalculate';
+  }
+}
+function clearDiskStale() {
+  _diskState.stale = false;
+  const refreshBtn = document.getElementById('disk-refresh');
+  if (refreshBtn) {
+    refreshBtn.classList.remove('stale');
+    refreshBtn.title = 'Recalculate disk usage';
+  }
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+// Subscription handle for disk progress; we unsubscribe between scans.
+let _diskProgressUnsub = null;
+
+async function refreshDiskUsage() {
+  // Each call gets a generation id. If a newer call starts while this one is still
+  // awaiting the backend, this (stale) call must not touch the UI when it resolves —
+  // otherwise a just-cancelled scan's continuation can clobber the fresh scan's UI
+  // (e.g. show "Cancelled" over a running retry).
+  const myGen = ++_diskScanGen;
+  const isStale = () => myGen !== _diskScanGen;
+
+  const loading = $('#disk-loading');
+  const summary = $('#disk-summary');
+  const progress = $('#disk-progress');
+
+  // Drop any previous progress subscription so its events don't bleed into this scan.
+  if (_diskProgressUnsub) { try { _diskProgressUnsub(); } catch (e) {} _diskProgressUnsub = null; }
+
+  // Subscribe to streaming progress for the upcoming scan. The backend automatically
+  // cancels any in-flight scan when a new diskUsage() call arrives (token bump),
+  // so we don't need a manual cancel here.
+  _diskProgressUnsub = gs.onDiskProgress((payload) => {
+    if (isStale() || !progress) return;
+    if (payload.done) {
+      progress.classList.add('hidden');
+      return;
+    }
+    progress.classList.remove('hidden');
+    const label = payload.label || payload.phase || 'Scanning';
+    const bytes = payload.bytes ? fmtBytes(payload.bytes) : '';
+    const files = payload.files ? payload.files.toLocaleString() + ' files' : '';
+    const detail = [bytes, files].filter(Boolean).join(' · ');
+    const labelEl = progress.querySelector('.disk-progress-label');
+    const detailEl = progress.querySelector('.disk-progress-detail');
+    if (labelEl) labelEl.textContent = label + '…';
+    if (detailEl) detailEl.textContent = detail;
+  });
+
+  // Show progress UI
+  if (loading) loading.style.display = 'none';
+  if (progress) progress.classList.remove('hidden');
+  if (summary) summary.style.display = 'flex';
+
+  let r;
+  try {
+    r = await gs.diskUsage();
+  } finally {
+    // Only the most recent scan cleans up the shared progress UI/subscription.
+    if (!isStale()) {
+      if (_diskProgressUnsub) { try { _diskProgressUnsub(); } catch (e) {} _diskProgressUnsub = null; }
+      if (progress) progress.classList.add('hidden');
+    }
+  }
+
+  // A newer scan superseded this one — leave the UI entirely to that newer call.
+  if (isStale()) return;
+
+  if (!r.ok) {
+    if (loading) { loading.style.display = ''; loading.textContent = 'Failed: ' + r.error; }
+    if (summary) summary.style.display = 'none';
+    return;
+  }
+  if (r.data && r.data.cancelled) {
+    if (loading) { loading.style.display = ''; loading.textContent = 'Cancelled — click to retry'; }
+    return;
+  }
+  _diskState.lastData = r.data;
+  _diskState.loaded = true;
+  clearDiskStale();
+  if (loading) loading.style.display = 'none';
+  if (summary) summary.style.display = 'flex';
+
+  const { sizes, counts, lfs } = r.data;
+  const total = sizes.workingTree + sizes.gitTotal;
+
+  $('#disk-grand-total').textContent = fmtBytes(total);
+  $('#disk-total-pill').textContent = fmtBytes(total);
+  $('#disk-working').textContent = fmtBytes(sizes.workingTree);
+  $('#disk-gitdir').textContent = fmtBytes(sizes.gitTotal);
+  $('#disk-packed').textContent = fmtBytes(sizes.objectsPacked);
+  $('#disk-loose').textContent = fmtBytes(sizes.objectsLoose);
+  $('#disk-logs').textContent = fmtBytes(sizes.logs);
+
+  if (lfs.installed) {
+    $('#disk-lfs-row').style.display = '';
+    $('#disk-lfs').textContent = lfs.objectSize ? `${fmtBytes(lfs.objectSize)} (${lfs.objectCount} files)` : 'installed (no cache yet)';
+    $('#disk-lfs-prune').style.display = '';
+  } else {
+    $('#disk-lfs-row').style.display = 'none';
+    $('#disk-lfs-prune').style.display = 'none';
+  }
+
+  // Stacked bar
+  const fill = $('#disk-bar-fill');
+  const segs = [
+    { cls: 'working', value: sizes.workingTree, label: 'Working' },
+    { cls: 'packed',  value: sizes.objectsPacked, label: 'Packed' },
+    { cls: 'loose',   value: sizes.objectsLoose,  label: 'Loose' },
+    { cls: 'logs',    value: sizes.logs,          label: 'Logs' }
+  ];
+  if (lfs.installed && lfs.objectSize) {
+    segs.push({ cls: 'lfs', value: lfs.objectSize, label: 'LFS' });
+  }
+  // "Other" = gitTotal - packed - loose - logs - lfs
+  const accountedGit = sizes.objectsPacked + sizes.objectsLoose + sizes.logs + (lfs.installed ? lfs.objectSize : 0);
+  const otherGit = Math.max(0, sizes.gitTotal - accountedGit);
+  if (otherGit > 0) segs.push({ cls: 'other', value: otherGit, label: 'Other' });
+
+  const sum = segs.reduce((a, s) => a + s.value, 0) || 1;
+  fill.innerHTML = segs.filter(s => s.value > 0)
+    .map(s => `<div class="disk-bar-seg ${s.cls}" style="width:${(s.value / sum * 100).toFixed(2)}%" title="${s.label}: ${fmtBytes(s.value)}"></div>`)
+    .join('');
+
+  // Legend (only segments with > 1% share)
+  $('#disk-legend').innerHTML = segs.filter(s => s.value > 0)
+    .map(s => `<span><span class="swatch" style="background:${segColor(s.cls)}"></span>${s.label}</span>`)
+    .join('');
+
+  // Counts
+  $('#disk-c-local').textContent = counts.localBranches;
+  $('#disk-c-remote').textContent = counts.remoteBranches;
+  $('#disk-c-tags').textContent = counts.tags;
+  $('#disk-c-stash').textContent = counts.stashes;
+  $('#disk-c-reflog').textContent = counts.reflogEntries;
+}
+
+function segColor(cls) {
+  return {
+    working: '#6b8e23',
+    packed: 'var(--crusader-red)',
+    loose: 'var(--gold-accent)',
+    logs: '#6db8c4',
+    lfs: '#b388d3',
+    other: 'var(--border-bright)'
+  }[cls] || '#888';
+}
+
+// Wire up the disk management section
+(() => {
+  // Collapsible sidebar sections: clicking a section header toggles its collapsed state.
+  // (Current Banner, Local/Remote Branches, Disk Management, Stashes, Remotes.)
+  document.querySelectorAll('.sidebar-section.collapsible > .sidebar-header.clickable').forEach(header => {
+    header.addEventListener('click', () => {
+      const section = header.closest('.sidebar-section');
+      if (section) section.classList.toggle('collapsed');
+    });
+  });
+
+  // Clicking the header loads data the first time
+  const section = document.getElementById('section-disk');
+  if (section) {
+    const header = section.querySelector('.sidebar-header');
+    if (header) {
+      header.addEventListener('click', () => {
+        // After the collapse toggle (handled elsewhere), if expanded and not yet loaded, load
+        setTimeout(() => {
+          if (!section.classList.contains('collapsed') && !_diskState.loaded && state.repo) {
+            refreshDiskUsage();
+          }
+        }, 50);
+      });
+    }
+  }
+
+  // Loading placeholder click also triggers load
+  const loading = $('#disk-loading');
+  if (loading) loading.onclick = () => {
+    if (state.repo) refreshDiskUsage();
+    else showToast('Open a repository first', 'error');
+  };
+
+  // Action buttons
+  const wire = (id, handler) => {
+    const el = document.getElementById(id);
+    if (el) el.onclick = handler;
+  };
+
+  wire('disk-refresh', () => refreshDiskUsage());
+  wire('disk-progress-cancel', async () => {
+    try { await gs.diskUsageCancel(); } catch (e) {}
+  });
+
+  wire('disk-gc', async () => {
+    const ok = await modal.confirm({
+      title: 'Run Git Garbage Collection',
+      message: 'Pack loose objects and remove unreachable ones older than 2 weeks. This is the standard cleanup operation.',
+      confirmText: 'Run GC'
+    });
+    if (!ok) return;
+    const r = await withLoading('Running gc', () => gs.gc({}));
+    if (handleResult(r, 'GC complete')) await refreshDiskUsage();
+  });
+
+  wire('disk-gc-aggressive', async () => {
+    const ok = await modal.confirm({
+      title: 'Aggressive Garbage Collection',
+      message: 'Slower but achieves maximum compression by repacking everything. Use sparingly — may take minutes on large repos.',
+      confirmText: 'Run Aggressive GC'
+    });
+    if (!ok) return;
+    const r = await withLoading('Aggressive gc — this may take a while', () => gs.gc({ aggressive: true, prune: true, pruneSpec: 'now' }));
+    if (handleResult(r, 'Aggressive GC complete')) await refreshDiskUsage();
+  });
+
+  wire('disk-prune', async () => {
+    const ok = await modal.confirm({
+      title: 'Prune Unreachable Objects',
+      message: 'Permanently delete loose objects that aren\'t reachable from any branch, tag, or reflog. Anything in the reflog (within its expiry window) is preserved.',
+      danger: true,
+      confirmText: 'Prune'
+    });
+    if (!ok) return;
+    const r = await withLoading('Pruning', () => gs.prune());
+    if (handleResult(r, 'Prune complete')) await refreshDiskUsage();
+  });
+
+  wire('disk-repack', async () => {
+    const ok = await modal.confirm({
+      title: 'Repack Objects',
+      message: 'Repack all objects into a single pack file. Useful after large pulls or merges.',
+      confirmText: 'Repack'
+    });
+    if (!ok) return;
+    const r = await withLoading('Repacking', () => gs.repack());
+    if (handleResult(r, 'Repack complete')) await refreshDiskUsage();
+  });
+
+  wire('disk-reflog', async () => {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <p class="modal-text">Expire reflog entries to free disk space. The reflog records every HEAD update and grows over time.</p>
+      <div class="merge-strategies">
+        <label class="merge-strategy selected">
+          <input type="radio" name="reflog-mode" value="all" checked />
+          <div class="merge-strategy-body">
+            <div class="merge-strategy-title">Expire All Now</div>
+            <div class="merge-strategy-desc">Drop every reflog entry. <strong>You lose the ability to recover lost commits via the reflog.</strong></div>
+          </div>
+        </label>
+        <label class="merge-strategy">
+          <input type="radio" name="reflog-mode" value="unreachable" />
+          <div class="merge-strategy-body">
+            <div class="merge-strategy-title">Expire Unreachable</div>
+            <div class="merge-strategy-desc">Drop only entries pointing to commits no longer reachable from refs. Safer.</div>
+          </div>
+        </label>
+      </div>
+    `;
+    body.querySelectorAll('.merge-strategy').forEach(card => {
+      card.onclick = () => {
+        const radio = card.querySelector('input[type="radio"]');
+        if (radio) radio.checked = true;
+        body.querySelectorAll('.merge-strategy').forEach(c => c.classList.remove('selected'));
+        card.classList.add('selected');
+      };
+    });
+    const cancel = document.createElement('button');
+    cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+    cancel.onclick = () => modal.hide();
+    const ok = document.createElement('button');
+    ok.className = 'btn-medieval danger'; ok.textContent = 'Expire';
+    ok.onclick = async () => {
+      const mode = body.querySelector('input[name="reflog-mode"]:checked').value;
+      modal.hide();
+      const r = await withLoading('Expiring reflog', () => gs.reflogExpire(
+        mode === 'all' ? { expire: 'now', expireUnreachable: 'now' } : { expire: 'never', expireUnreachable: 'now' }
+      ));
+      if (handleResult(r, 'Reflog expired')) await refreshDiskUsage();
+    };
+    modal.show({ title: 'Expire Reflog', body, footer: [cancel, ok] });
+  });
+
+  wire('disk-merged', async () => {
+    const r = await withLoading('Listing branches', () => gs.mergedBranches());
+    if (!r.ok) { showToast(r.error, 'error', 6000); return; }
+    showBranchCleanupDialog(r.data);
+  });
+
+  wire('disk-largest', async () => {
+    const r = await withLoading('Finding largest objects', () => gs.largestObjects(50));
+    if (!r.ok) { showToast(r.error, 'error', 6000); return; }
+    showLargestObjectsDialog(r.data.objects);
+  });
+
+  wire('disk-lfs-prune', async () => {
+    const ok = await modal.confirm({
+      title: 'Prune Git LFS Objects',
+      message: 'Remove LFS objects no longer referenced by any commit reachable from the current branch.',
+      confirmText: 'Prune LFS'
+    });
+    if (!ok) return;
+    const r = await withLoading('Pruning LFS', () => gs.lfsPrune());
+    if (handleResult(r, 'LFS pruned')) await refreshDiskUsage();
+  });
+
+  wire('disk-lfs-manage', () => showLfsManager());
+})();
+
+// ============================================

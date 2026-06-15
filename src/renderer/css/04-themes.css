@@ -1,0 +1,1084 @@
+/* ============================================
+   THEME VARIANTS — five vibrant full-palette themes
+   Applied via class on <html>: theme-crusader (default), plus the five below.
+   Each overrides the entire palette and adds its own neon glow flavor.
+   ============================================ */
+
+/* 1. MOLECULAR TECH — electric blue on bright white, holographic lab */
+html.theme-molecular {
+  --ink-black: #eaf3fd;
+  --shadow-black: #d9e9fa;
+  --panel-black: #f3f8fe;
+  --raised-black: #ffffff;
+  --border-iron: #9cc4ec;
+  --border-bright: #4f9be5;
+  --bone-white: #04182e;
+  --parchment: #0a2a4a;
+  --parchment-dim: #1d4a75;
+  --muted-text: #4a76a3;
+  --crusader-red: #006ade;
+  --crusader-red-bright: #0095ff;
+  --crusader-red-deep: #0050b4;
+  --blood: #003e85;
+  --gold-accent: #00d4e8;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --text: var(--bone-white);
+  --text-dim: var(--parchment-dim);
+  --text-muted: var(--muted-text);
+  --border: var(--border-iron);
+  --border-strong: var(--border-bright);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #00b368;
+  --added-bg: rgba(0, 179, 104, 0.14);
+  --removed: #006ade;
+  --removed-bg: rgba(0, 132, 255, 0.13);
+}
+
+/* 2. BIOHAZARD — radioactive green burning out of pitch black */
+html.theme-biohazard {
+  --ink-black: #010401;
+  --shadow-black: #050d05;
+  --panel-black: #0a1c0a;
+  --raised-black: #143214;
+  --border-iron: #235c23;
+  --border-bright: #4dff2a;
+  --bone-white: #ecffdc;
+  --parchment: #d4ff9e;
+  --parchment-dim: #b6f87a;
+  --muted-text: #82c95e;
+  --crusader-red: #44ff1f;
+  --crusader-red-bright: #8cff52;
+  --crusader-red-deep: #1dc400;
+  --blood: #0a6600;
+  --gold-accent: #e4ff00;
+  --head-pill-text: #021200;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #7dff45;
+  --added-bg: rgba(57, 255, 20, 0.14);
+  --removed: #d8ff00;
+  --removed-bg: rgba(216, 255, 0, 0.12);
+}
+
+/* 3. SWEET FACTORY — hot bubblegum pink on liquorice black */
+html.theme-sweet {
+  --ink-black: #0c0208;
+  --shadow-black: #190511;
+  --panel-black: #2b0a20;
+  --raised-black: #3f1130;
+  --border-iron: #6a2350;
+  --border-bright: #ff3da0;
+  --bone-white: #fff0f8;
+  --parchment: #ffcfe9;
+  --parchment-dim: #ffb3da;
+  --muted-text: #e08fb8;
+  --crusader-red: #ff1f8f;
+  --crusader-red-bright: #ff70bf;
+  --crusader-red-deep: #e00078;
+  --blood: #9c005a;
+  --gold-accent: #ffe24d;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #2dffb8;
+  --added-bg: rgba(45, 255, 184, 0.13);
+  --removed: #ff2d96;
+  --removed-bg: rgba(255, 45, 150, 0.15);
+}
+
+/* 4. BLOOD MONASTERY — blazing crimson on pure white vellum */
+html.theme-monastery {
+  --ink-black: #faf7f0;
+  --shadow-black: #f0e9da;
+  --panel-black: #fdfbf6;
+  --raised-black: #ffffff;
+  --border-iron: #d8c9aa;
+  --border-bright: #c41212;
+  --bone-white: #1c0500;
+  --parchment: #330a02;
+  --parchment-dim: #5e2418;
+  --muted-text: #8a5648;
+  --crusader-red: #c41212;
+  --crusader-red-bright: #ef1f1f;
+  --crusader-red-deep: #8a0a0a;
+  --blood: #a00e0e;
+  --gold-accent: #c89400;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --text: var(--bone-white);
+  --text-dim: var(--parchment-dim);
+  --text-muted: var(--muted-text);
+  --border: var(--border-iron);
+  --border-strong: var(--border-bright);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #1f8a1f;
+  --added-bg: rgba(31, 138, 31, 0.13);
+  --removed: #c41212;
+  --removed-bg: rgba(196, 18, 18, 0.12);
+}
+
+/* 5. RACING PUNK — screaming caution-yellow tearing through asphalt black */
+html.theme-racing {
+  --ink-black: #060604;
+  --shadow-black: #0e0e0a;
+  --panel-black: #19190f;
+  --raised-black: #28281a;
+  --border-iron: #4a4a22;
+  --border-bright: #fff000;
+  --bone-white: #fffce4;
+  --parchment: #fff39a;
+  --parchment-dim: #f0e27a;
+  --muted-text: #c2b66a;
+  --crusader-red: #fff000;
+  --crusader-red-bright: #ffff5c;
+  --crusader-red-deep: #d4bd00;
+  --blood: #7a6c00;
+  --gold-accent: #ff6a00;
+  --head-pill-text: #1a1400;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #b8ff00;
+  --added-bg: rgba(184, 255, 0, 0.13);
+  --removed: #ff6a00;
+  --removed-bg: rgba(255, 106, 0, 0.15);
+}
+
+/* ---- Per-theme vibrancy: neon glows on the elements that carry the accent ---- */
+html.theme-biohazard .btn-medieval.primary,
+html.theme-sweet .btn-medieval.primary,
+html.theme-racing .btn-medieval.primary {
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent-bright) 45%, transparent);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent-bright) 60%, transparent);
+}
+html.theme-biohazard .graph-row-hash:hover,
+html.theme-sweet .graph-row-hash:hover,
+html.theme-racing .graph-row-hash:hover {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent-bright) 70%, transparent);
+}
+html.theme-biohazard .tab.active,
+html.theme-sweet .tab.active,
+html.theme-racing .tab.active {
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent-bright) 70%, transparent);
+}
+html.theme-biohazard .commit-dot,
+html.theme-sweet .commit-dot,
+html.theme-racing .commit-dot {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent-bright) 75%, transparent));
+}
+/* On dark neon themes, brighten panel borders subtly so structure pops */
+html.theme-biohazard .sidebar-header,
+html.theme-sweet .sidebar-header,
+html.theme-racing .sidebar-header {
+  color: var(--accent-bright);
+}
+
+/* ---- Light-theme legibility: vivid but readable diff text on light backgrounds ---- */
+html.theme-molecular .diff-line.add .diff-text,
+html.theme-molecular .dsplit-side.add .dsplit-text,
+html.theme-monastery .diff-line.add .diff-text,
+html.theme-monastery .dsplit-side.add .dsplit-text { color: #067a45; }
+html.theme-molecular .diff-line.del .diff-text,
+html.theme-molecular .dsplit-side.del .dsplit-text { color: #0061c2; }
+html.theme-monastery .diff-line.del .diff-text,
+html.theme-monastery .dsplit-side.del .dsplit-text { color: #b01010; }
+html.theme-molecular .dsplit-side.empty,
+html.theme-monastery .dsplit-side.empty { background: rgba(0,0,0,0.05); }
+html.theme-molecular .dsplit-side.empty .dsplit-num,
+html.theme-monastery .dsplit-side.empty .dsplit-num { background: rgba(0,0,0,0.04); }
+html.theme-molecular .loading-overlay,
+html.theme-monastery .loading-overlay { background: rgba(255,255,255,0.65); }
+
+/* Themed welcome washes so the landing screen carries each identity */
+html.theme-molecular #welcome-screen { background: radial-gradient(ellipse at top, #ffffff 0%, var(--ink-black) 60%), var(--ink-black); }
+html.theme-biohazard #welcome-screen { background: radial-gradient(ellipse at top, #0c2a0c 0%, var(--ink-black) 55%), var(--ink-black); }
+html.theme-sweet     #welcome-screen { background: radial-gradient(ellipse at top, #33102a 0%, var(--ink-black) 55%), var(--ink-black); }
+html.theme-monastery #welcome-screen { background: radial-gradient(ellipse at top, #ffffff 0%, var(--ink-black) 60%), var(--ink-black); }
+html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at top, #26260f 0%, var(--ink-black) 55%), var(--ink-black); }
+
+/* ============================================
+   SETTINGS DIALOG
+   ============================================ */
+.settings-dialog {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  min-width: 720px;
+  max-width: 880px;
+  min-height: 60vh;
+  max-height: 75vh;
+  gap: 0;
+}
+
+.settings-nav {
+  border-right: 1px solid var(--border);
+  background: var(--shadow-black);
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  border-left: 3px solid transparent;
+  color: var(--parchment-dim);
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.12s;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-raised);
+  color: var(--bone-white);
+}
+
+.settings-nav-item.active {
+  background: rgba(178, 34, 34, 0.12);
+  color: var(--crusader-red-bright);
+  border-left-color: var(--crusader-red-bright);
+}
+
+.settings-nav-item .nav-icon {
+  font-size: 14px;
+}
+
+.settings-panel {
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+
+.settings-panel-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--bone-white);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 16px;
+}
+
+.settings-group {
+  margin-bottom: 24px;
+}
+
+.settings-group-title {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--crusader-red-bright);
+  margin-bottom: 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.4);
+}
+.settings-row:last-child { border-bottom: none; }
+
+.settings-row .label {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--parchment);
+}
+
+.settings-row .label small {
+  display: block;
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--muted-text);
+  margin-top: 2px;
+  font-style: italic;
+}
+
+.settings-row .control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-row input[type="text"],
+.settings-row input[type="email"],
+.settings-row input[type="number"],
+.settings-row select {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--bone-white);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 7px 10px;
+  outline: none;
+}
+
+.settings-row input:focus,
+.settings-row select:focus {
+  border-color: var(--crusader-red);
+  box-shadow: 0 0 0 1px var(--crusader-red);
+}
+
+/* Scope toggle pill (global / local) */
+.scope-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.scope-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--parchment-dim);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+}
+.scope-toggle button:last-child { border-right: none; }
+.scope-toggle button.active {
+  background: linear-gradient(180deg, var(--crusader-red) 0%, var(--crusader-red-deep) 100%);
+  color: var(--bone-white);
+}
+.scope-toggle button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Theme picker */
+.theme-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+/* Scrollable grid for the large Alacritty collection */
+.theme-picker-scroll {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.theme-picker-scroll::-webkit-scrollbar { width: 9px; }
+.theme-picker-scroll::-webkit-scrollbar-track { background: var(--shadow-black); }
+.theme-picker-scroll::-webkit-scrollbar-thumb { background: var(--border-iron); border-radius: 5px; }
+.theme-picker-scroll::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+.theme-picker-scroll .theme-card { padding: 8px 9px; gap: 6px; }
+.theme-picker-scroll .theme-card-name {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.theme-card {
+  background: var(--bg);
+  border: 2px solid var(--border);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.12s;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.theme-card:hover { border-color: var(--border-bright); }
+.theme-card.active {
+  border-color: var(--crusader-red-bright);
+  box-shadow: 0 0 0 1px var(--crusader-red-bright);
+}
+.theme-card-name {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--bone-white);
+}
+.theme-swatches {
+  display: flex;
+  gap: 4px;
+  height: 18px;
+}
+.theme-swatches span {
+  flex: 1;
+  border: 1px solid rgba(0,0,0,0.3);
+}
+
+/* Toggle (checkbox) styled like a medieval pill */
+.medieval-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.medieval-toggle input { display: none; }
+.medieval-toggle .toggle-track {
+  width: 38px;
+  height: 20px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  position: relative;
+  transition: background 0.12s, border 0.12s;
+}
+.medieval-toggle .toggle-track::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: var(--parchment-dim);
+  top: 2px;
+  left: 2px;
+  transition: left 0.18s, background 0.12s;
+}
+.medieval-toggle input:checked + .toggle-track {
+  background: linear-gradient(180deg, var(--crusader-red) 0%, var(--crusader-red-deep) 100%);
+  border-color: var(--crusader-red-bright);
+}
+.medieval-toggle input:checked + .toggle-track::after {
+  left: 20px;
+  background: var(--bone-white);
+}
+
+/* Path display row (settings file location, etc.) */
+.settings-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  color: var(--parchment-dim);
+  word-break: break-all;
+  user-select: text;
+}
+
+/* ============================================
+   DISK SCAN PROGRESS
+   ============================================ */
+.disk-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--crusader-red);
+  margin: 6px 0;
+}
+.disk-progress.hidden { display: none; }
+
+.disk-progress-bar {
+  height: 6px;
+  background: var(--shadow-black);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+
+.disk-progress-bar-fill {
+  height: 100%;
+  width: 30%;
+  background: linear-gradient(90deg, var(--crusader-red-deep), var(--crusader-red-bright), var(--crusader-red-deep));
+  background-size: 200% 100%;
+  animation: disk-progress-sweep 1.4s linear infinite;
+  box-shadow: 0 0 8px rgba(212, 48, 47, 0.6);
+}
+
+@keyframes disk-progress-sweep {
+  0%   { transform: translateX(-100%); background-position: 0% 0; }
+  100% { transform: translateX(333%); background-position: 200% 0; }
+}
+
+.disk-progress-label {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--crusader-red-bright);
+}
+
+.disk-progress-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--parchment-dim);
+  font-variant-numeric: tabular-nums;
+  min-height: 14px;
+}
+
+#disk-progress-cancel {
+  align-self: flex-start;
+  font-size: 9.5px;
+  padding: 4px 8px;
+}
+
+/* ============================================
+   OPERATION PROGRESS (status bar, bottom-right)
+   ============================================ */
+.op-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 14px;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
+}
+.op-progress.hidden { display: none; }
+
+.op-progress-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--crusader-red-bright);
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.op-progress-bar {
+  width: 90px;
+  height: 7px;
+  background: var(--shadow-black);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+
+.op-progress-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--crusader-red-deep), var(--crusader-red-bright));
+  box-shadow: 0 0 6px rgba(212, 48, 47, 0.6);
+  transition: width 0.2s ease-out;
+}
+
+/* Indeterminate state (no percentage available) */
+.op-progress-bar-fill.indeterminate {
+  width: 35% !important;
+  animation: op-progress-indet 1.2s ease-in-out infinite;
+}
+@keyframes op-progress-indet {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+
+.op-progress-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--bone-white);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* ============================================
+   GIT LFS MANAGER
+   ============================================ */
+.lfs-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 560px;
+  max-width: 680px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.lfs-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.lfs-status-banner.ok { border-left: 4px solid #6b8e23; }
+.lfs-status-banner.warn { border-left: 4px solid var(--gold-accent); }
+.lfs-status-banner.not-available { border-left: 4px solid var(--crusader-red); }
+
+.lfs-status-icon { font-size: 22px; color: var(--crusader-red-bright); }
+.lfs-status-banner.ok .lfs-status-icon { color: #8fb44a; }
+.lfs-status-banner.warn .lfs-status-icon { color: var(--gold-accent); }
+
+.lfs-status-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--bone-white);
+}
+.lfs-status-text {
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--parchment-dim);
+  margin-top: 2px;
+}
+.lfs-status-banner .btn-medieval { margin-left: auto; flex-shrink: 0; }
+
+.lfs-section { display: flex; flex-direction: column; gap: 8px; }
+
+.lfs-section-title {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--crusader-red-bright);
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 4px;
+}
+
+.lfs-btn-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.lfs-track-add { display: flex; gap: 8px; }
+.lfs-track-add .modal-input { flex: 1; }
+
+.lfs-pattern-list, .lfs-files-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); }
+
+.lfs-pattern-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.4);
+}
+.lfs-pattern-item:last-child { border-bottom: none; }
+.lfs-pattern-name { font-size: 13px; color: var(--bone-white); }
+
+.lfs-files-list { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+.lfs-file-item {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 12px;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.3);
+  font-size: 12px;
+}
+.lfs-file-item:last-child { border-bottom: none; }
+.lfs-file-dl { color: var(--crusader-red-bright); text-align: center; }
+.lfs-file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.lfs-file-size { color: var(--gold-accent); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.lfs-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--muted-text);
+  font-style: italic;
+  font-size: 12px;
+}
+
+/* Disk refresh button hint when figures may be stale */
+#disk-refresh.stale {
+  border-color: var(--gold-accent);
+  color: var(--gold-accent);
+  box-shadow: 0 0 6px rgba(200, 160, 74, 0.4);
+}
+#disk-refresh.stale::after { content: ' •'; }
+
+/* ============================================
+   GRAPH: collapsed-history summary row
+   ============================================ */
+.graph-hidden-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 8px;
+  margin-left: 6px;
+  cursor: pointer;
+  color: var(--parchment-dim);
+  border-top: 1px dashed var(--border-strong);
+  border-bottom: 1px dashed var(--border-strong);
+  background: linear-gradient(180deg, rgba(212,48,47,0.05), transparent);
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
+}
+.graph-hidden-row:hover {
+  background: rgba(212, 48, 47, 0.12);
+  color: var(--bone-white);
+}
+.graph-hidden-dots {
+  font-size: 18px;
+  line-height: 1;
+  color: var(--crusader-red-bright);
+  letter-spacing: 2px;
+}
+.graph-hidden-label {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Collapse toggle active state */
+#graph-collapse-toggle.active {
+  background: var(--crusader-red);
+  color: var(--bone-white);
+  border-color: var(--crusader-red-bright);
+}
+
+/* ============================================
+   COMMIT SEARCH / FILTER (graph + history)
+   ============================================ */
+.commit-search {
+  flex: 0 1 280px;
+  min-width: 140px;
+  height: 26px;
+  padding: 0 10px;
+  margin-left: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--bone-white);
+  font-family: var(--font-body);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.commit-search::placeholder { color: var(--text-dim); }
+.commit-search:focus {
+  border-color: var(--crusader-red-bright);
+  box-shadow: 0 0 0 2px rgba(212, 48, 47, 0.18);
+}
+.commit-search.has-no-matches {
+  border-color: var(--gold-accent);
+  box-shadow: 0 0 0 2px rgba(200, 160, 74, 0.2);
+}
+
+/* Filter-mode dropdown beside the commit search box */
+.commit-search-mode {
+  height: 26px;
+  margin-left: 6px;
+  padding: 0 6px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--parchment-dim);
+  font-family: var(--font-body);
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.12s;
+}
+.commit-search-mode:focus { border-color: var(--crusader-red-bright); }
+
+/* File filter inside the commit file browser */
+.cfile-searchbar {
+  flex-shrink: 0;
+  padding: 5px 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.cfile-search {
+  width: 100%;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--bone-white);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+.cfile-search::placeholder { color: var(--text-dim); }
+.cfile-search:focus { border-color: var(--crusader-red-bright); }
+.cfile-search.has-no-matches { border-color: var(--gold-accent); }
+
+/* "No matches" / filter-status note shown in a list */
+.filter-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+.filter-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ============================================
+   DETACHED HEAD BANNER
+   ============================================ */
+.detached-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: linear-gradient(180deg, rgba(200, 160, 74, 0.18) 0%, rgba(200, 160, 74, 0.08) 100%);
+  border-bottom: 2px solid var(--gold-accent);
+  flex-shrink: 0;
+  position: relative;
+}
+.detached-banner.hidden { display: none; }
+.detached-banner-icon {
+  font-size: 24px;
+  color: var(--gold-accent);
+  filter: drop-shadow(0 0 6px rgba(200, 160, 74, 0.6));
+  flex-shrink: 0;
+}
+.detached-banner-body { flex: 1; min-width: 0; }
+.detached-banner-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--bone-white);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.detached-banner-subtitle {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--parchment-dim);
+}
+.detached-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.detached-banner-actions .btn-medieval { padding: 8px 14px; }
+
+/* ============================================
+   REPO LOADING OVERLAY (blocks interaction while a repo loads)
+   ============================================ */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 6, 6, 0.72);
+  backdrop-filter: blur(6px) saturate(0.8);
+  -webkit-backdrop-filter: blur(6px) saturate(0.8);
+  animation: lo-fade-in 0.18s ease-out;
+  cursor: wait;
+}
+.loading-overlay.hidden { display: none; }
+.loading-overlay.closing { animation: lo-fade-out 0.22s ease-in forwards; }
+
+@keyframes lo-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes lo-fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+.loading-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 36px 48px;
+  text-align: center;
+}
+
+.loading-shield {
+  width: 72px;
+  height: 72px;
+  color: var(--crusader-red-bright);
+  filter: drop-shadow(0 0 12px rgba(212, 48, 47, 0.5));
+  animation: lo-pulse 1.6s ease-in-out infinite;
+}
+@keyframes lo-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.85; filter: drop-shadow(0 0 8px rgba(212,48,47,0.35)); }
+  50% { transform: scale(1.06); opacity: 1; filter: drop-shadow(0 0 18px rgba(212,48,47,0.7)); }
+}
+
+.loading-overlay-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: 0.14em;
+  color: var(--bone-white);
+  text-transform: uppercase;
+}
+.loading-overlay-sub {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--parchment-dim);
+  min-height: 18px;
+}
+
+.loading-overlay-bar {
+  width: 260px;
+  height: 4px;
+  margin-top: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+.loading-overlay-bar-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--crusader-red-bright), transparent);
+  border-radius: 2px;
+  animation: lo-sweep 1.1s ease-in-out infinite;
+}
+@keyframes lo-sweep {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+
+/* Clean file header (replaces raw "diff --git" plumbing) */
+.diff-file-header {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--crusader-red-bright);
+  background: var(--bg-raised);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diff-file-header:first-child { border-top: none; }
+.dsplit-file {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--crusader-red-bright);
+  background: var(--bg-raised);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ============================================
+   COMMIT FILE BROWSER (per-file diff in commit previews)
+   ============================================ */
+.cfile-browser {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.cfile-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-strong);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.cfile-selall {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--parchment-dim);
+  user-select: none;
+}
+.cfile-selall:hover { color: var(--bone-white); }
+.cfile-selcount { color: var(--accent-bright); flex: 1; }
+.cfile-restore-btn {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  background: var(--bg-raised);
+  color: var(--parchment-dim);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.cfile-restore-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bone-white);
+  border-color: var(--accent-bright);
+}
+.cfile-restore-btn:disabled { opacity: 0.4; cursor: default; }
+.cfile-check { cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
+
+.cfile-list {
+  flex-shrink: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  border-bottom: 2px solid var(--border-strong);
+  background: var(--bg);
+}
+.cfile-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+.cfile-item:hover { background: var(--bg-panel); }
+.cfile-item.active {
+  background: rgba(178, 34, 34, 0.14);
+  border-left-color: var(--crusader-red);
+}
+.cfile-status {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: bold;
+  color: var(--ink-black);
+}
+.cfile-status.added { background: var(--added); }
+.cfile-status.modified { background: var(--gold-accent); }
+.cfile-status.deleted { background: var(--crusader-red); color: var(--bone-white); }
+.cfile-status.renamed { background: #6a8ec8; }
+.cfile-path {
+  color: var(--parchment-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* keep the filename (end of path) visible when truncated */
+  text-align: left;
+}
+.cfile-item.active .cfile-path { color: var(--bone-white); }
+.cfile-diff {
+  flex: 1;
+  min-height: 120px;
+  max-height: 40vh;
+  overflow: auto;
+}
+
