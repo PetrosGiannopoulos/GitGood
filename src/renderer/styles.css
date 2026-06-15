@@ -1566,31 +1566,31 @@ body.sidebar-is-collapsed .sidebar-toggle-icon {
 .ref-pill.dragging { opacity: 0.5; }
 
 .ref-pill.local {
-  background: rgba(178, 34, 34, 0.18);
-  border-color: var(--crusader-red);
+  background: color-mix(in srgb, var(--accent) 28%, var(--bg-panel));
+  border-color: var(--accent);
   color: var(--bone-white);
 }
 .ref-pill.local.head {
-  background: var(--crusader-red);
-  color: white;
-  box-shadow: 0 0 8px rgba(212, 48, 47, 0.6);
+  background: var(--accent);
+  color: var(--head-pill-text, #ffffff);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent-bright) 55%, transparent);
 }
 .ref-pill.local.head::before { content: '⚜ '; }
 .ref-pill.remote {
-  background: rgba(107, 142, 35, 0.15);
-  border-color: #6b8e23;
-  color: #c1d9a0;
+  background: color-mix(in srgb, var(--added) 24%, var(--bg-panel));
+  border-color: var(--added);
+  color: color-mix(in srgb, var(--added) 35%, var(--bone-white));
 }
 .ref-pill.remote::before { content: '⟁ '; opacity: 0.7; }
 .ref-pill.tag {
-  background: rgba(200, 160, 74, 0.18);
+  background: color-mix(in srgb, var(--gold-accent) 26%, var(--bg-panel));
   border-color: var(--gold-accent);
-  color: var(--gold-accent);
+  color: color-mix(in srgb, var(--gold-accent) 40%, var(--bone-white));
 }
 .ref-pill.tag::before { content: '✠ '; }
 .ref-pill.head-only {
-  background: rgba(212, 48, 47, 0.18);
-  border-color: var(--crusader-red);
+  background: color-mix(in srgb, var(--accent) 26%, var(--bg-panel));
+  border-color: var(--accent);
   color: var(--bone-white);
 }
 
@@ -3655,69 +3655,214 @@ body.resizing-panes * {
 }
 
 /* ============================================
-   THEME VARIANTS — swap accent color family
-   Applied via class on the <html> element: theme-crusader (default),
-   theme-tyrian, theme-verdant, theme-midnight, theme-sandstone.
+   THEME VARIANTS — five vibrant full-palette themes
+   Applied via class on <html>: theme-crusader (default), plus the five below.
+   Each overrides the entire palette and adds its own neon glow flavor.
    ============================================ */
 
-html.theme-tyrian {
-  --crusader-red: #6e1b4e;
-  --crusader-red-bright: #a13775;
-  --crusader-red-deep: #4a0f33;
-  --blood: #3a0b29;
+/* 1. MOLECULAR TECH — electric blue on bright white, holographic lab */
+html.theme-molecular {
+  --ink-black: #eaf3fd;
+  --shadow-black: #d9e9fa;
+  --panel-black: #f3f8fe;
+  --raised-black: #ffffff;
+  --border-iron: #9cc4ec;
+  --border-bright: #4f9be5;
+  --bone-white: #04182e;
+  --parchment: #0a2a4a;
+  --parchment-dim: #1d4a75;
+  --muted-text: #4a76a3;
+  --crusader-red: #006ade;
+  --crusader-red-bright: #0095ff;
+  --crusader-red-deep: #0050b4;
+  --blood: #003e85;
+  --gold-accent: #00d4e8;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --text: var(--bone-white);
+  --text-dim: var(--parchment-dim);
+  --text-muted: var(--muted-text);
+  --border: var(--border-iron);
+  --border-strong: var(--border-bright);
   --accent: var(--crusader-red);
   --accent-bright: var(--crusader-red-bright);
-  --removed: var(--crusader-red);
-  --removed-bg: rgba(110, 27, 78, 0.15);
+  --added: #00b368;
+  --added-bg: rgba(0, 179, 104, 0.14);
+  --removed: #006ade;
+  --removed-bg: rgba(0, 132, 255, 0.13);
 }
 
-html.theme-verdant {
-  --crusader-red: #2f5d3c;
-  --crusader-red-bright: #4a8a5d;
-  --crusader-red-deep: #1a3924;
-  --blood: #14291b;
-  --gold-accent: #c8a04a;
-  --accent: var(--crusader-red);
-  --accent-bright: var(--crusader-red-bright);
-  --removed: #b22222;
-  --removed-bg: rgba(178, 34, 34, 0.12);
-}
-
-html.theme-midnight {
-  --crusader-red: #2c4a7a;
-  --crusader-red-bright: #4a72b5;
-  --crusader-red-deep: #16294a;
-  --blood: #0e1c33;
-  --gold-accent: #bfc7da;
-  --accent: var(--crusader-red);
-  --accent-bright: var(--crusader-red-bright);
-  --removed: #c14e4e;
-  --removed-bg: rgba(193, 78, 78, 0.14);
-}
-
-html.theme-sandstone {
-  --ink-black: #1a1410;
-  --shadow-black: #221b15;
-  --panel-black: #2c241c;
-  --raised-black: #382e25;
-  --border-iron: #4a3e32;
-  --border-bright: #6a5a48;
-  --bone-white: #f5e8cf;
-  --parchment: #e8d8b8;
-  --parchment-dim: #c8b894;
-  --crusader-red: #a14a22;
-  --crusader-red-bright: #d06b3a;
-  --crusader-red-deep: #6a2e14;
-  --blood: #4a1f0a;
-  --gold-accent: #d4b770;
+/* 2. BIOHAZARD — radioactive green burning out of pitch black */
+html.theme-biohazard {
+  --ink-black: #010401;
+  --shadow-black: #050d05;
+  --panel-black: #0a1c0a;
+  --raised-black: #143214;
+  --border-iron: #235c23;
+  --border-bright: #4dff2a;
+  --bone-white: #ecffdc;
+  --parchment: #d4ff9e;
+  --parchment-dim: #b6f87a;
+  --muted-text: #82c95e;
+  --crusader-red: #44ff1f;
+  --crusader-red-bright: #8cff52;
+  --crusader-red-deep: #1dc400;
+  --blood: #0a6600;
+  --gold-accent: #e4ff00;
+  --head-pill-text: #021200;
   --bg: var(--ink-black);
   --bg-panel: var(--panel-black);
   --bg-raised: var(--raised-black);
   --accent: var(--crusader-red);
   --accent-bright: var(--crusader-red-bright);
-  --removed: var(--crusader-red);
-  --removed-bg: rgba(161, 74, 34, 0.15);
+  --added: #7dff45;
+  --added-bg: rgba(57, 255, 20, 0.14);
+  --removed: #d8ff00;
+  --removed-bg: rgba(216, 255, 0, 0.12);
 }
+
+/* 3. SWEET FACTORY — hot bubblegum pink on liquorice black */
+html.theme-sweet {
+  --ink-black: #0c0208;
+  --shadow-black: #190511;
+  --panel-black: #2b0a20;
+  --raised-black: #3f1130;
+  --border-iron: #6a2350;
+  --border-bright: #ff3da0;
+  --bone-white: #fff0f8;
+  --parchment: #ffcfe9;
+  --parchment-dim: #ffb3da;
+  --muted-text: #e08fb8;
+  --crusader-red: #ff1f8f;
+  --crusader-red-bright: #ff70bf;
+  --crusader-red-deep: #e00078;
+  --blood: #9c005a;
+  --gold-accent: #ffe24d;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #2dffb8;
+  --added-bg: rgba(45, 255, 184, 0.13);
+  --removed: #ff2d96;
+  --removed-bg: rgba(255, 45, 150, 0.15);
+}
+
+/* 4. BLOOD MONASTERY — blazing crimson on pure white vellum */
+html.theme-monastery {
+  --ink-black: #faf7f0;
+  --shadow-black: #f0e9da;
+  --panel-black: #fdfbf6;
+  --raised-black: #ffffff;
+  --border-iron: #d8c9aa;
+  --border-bright: #c41212;
+  --bone-white: #1c0500;
+  --parchment: #330a02;
+  --parchment-dim: #5e2418;
+  --muted-text: #8a5648;
+  --crusader-red: #c41212;
+  --crusader-red-bright: #ef1f1f;
+  --crusader-red-deep: #8a0a0a;
+  --blood: #a00e0e;
+  --gold-accent: #c89400;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --text: var(--bone-white);
+  --text-dim: var(--parchment-dim);
+  --text-muted: var(--muted-text);
+  --border: var(--border-iron);
+  --border-strong: var(--border-bright);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #1f8a1f;
+  --added-bg: rgba(31, 138, 31, 0.13);
+  --removed: #c41212;
+  --removed-bg: rgba(196, 18, 18, 0.12);
+}
+
+/* 5. RACING PUNK — screaming caution-yellow tearing through asphalt black */
+html.theme-racing {
+  --ink-black: #060604;
+  --shadow-black: #0e0e0a;
+  --panel-black: #19190f;
+  --raised-black: #28281a;
+  --border-iron: #4a4a22;
+  --border-bright: #fff000;
+  --bone-white: #fffce4;
+  --parchment: #fff39a;
+  --parchment-dim: #f0e27a;
+  --muted-text: #c2b66a;
+  --crusader-red: #fff000;
+  --crusader-red-bright: #ffff5c;
+  --crusader-red-deep: #d4bd00;
+  --blood: #7a6c00;
+  --gold-accent: #ff6a00;
+  --head-pill-text: #1a1400;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  --added: #b8ff00;
+  --added-bg: rgba(184, 255, 0, 0.13);
+  --removed: #ff6a00;
+  --removed-bg: rgba(255, 106, 0, 0.15);
+}
+
+/* ---- Per-theme vibrancy: neon glows on the elements that carry the accent ---- */
+html.theme-biohazard .btn-medieval.primary,
+html.theme-sweet .btn-medieval.primary,
+html.theme-racing .btn-medieval.primary {
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent-bright) 45%, transparent);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent-bright) 60%, transparent);
+}
+html.theme-biohazard .graph-row-hash:hover,
+html.theme-sweet .graph-row-hash:hover,
+html.theme-racing .graph-row-hash:hover {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent-bright) 70%, transparent);
+}
+html.theme-biohazard .tab.active,
+html.theme-sweet .tab.active,
+html.theme-racing .tab.active {
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent-bright) 70%, transparent);
+}
+html.theme-biohazard .commit-dot,
+html.theme-sweet .commit-dot,
+html.theme-racing .commit-dot {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent-bright) 75%, transparent));
+}
+/* On dark neon themes, brighten panel borders subtly so structure pops */
+html.theme-biohazard .sidebar-header,
+html.theme-sweet .sidebar-header,
+html.theme-racing .sidebar-header {
+  color: var(--accent-bright);
+}
+
+/* ---- Light-theme legibility: vivid but readable diff text on light backgrounds ---- */
+html.theme-molecular .diff-line.add .diff-text,
+html.theme-molecular .dsplit-side.add .dsplit-text,
+html.theme-monastery .diff-line.add .diff-text,
+html.theme-monastery .dsplit-side.add .dsplit-text { color: #067a45; }
+html.theme-molecular .diff-line.del .diff-text,
+html.theme-molecular .dsplit-side.del .dsplit-text { color: #0061c2; }
+html.theme-monastery .diff-line.del .diff-text,
+html.theme-monastery .dsplit-side.del .dsplit-text { color: #b01010; }
+html.theme-molecular .dsplit-side.empty,
+html.theme-monastery .dsplit-side.empty { background: rgba(0,0,0,0.05); }
+html.theme-molecular .dsplit-side.empty .dsplit-num,
+html.theme-monastery .dsplit-side.empty .dsplit-num { background: rgba(0,0,0,0.04); }
+html.theme-molecular .loading-overlay,
+html.theme-monastery .loading-overlay { background: rgba(255,255,255,0.65); }
+
+/* Themed welcome washes so the landing screen carries each identity */
+html.theme-molecular #welcome-screen { background: radial-gradient(ellipse at top, #ffffff 0%, var(--ink-black) 60%), var(--ink-black); }
+html.theme-biohazard #welcome-screen { background: radial-gradient(ellipse at top, #0c2a0c 0%, var(--ink-black) 55%), var(--ink-black); }
+html.theme-sweet     #welcome-screen { background: radial-gradient(ellipse at top, #33102a 0%, var(--ink-black) 55%), var(--ink-black); }
+html.theme-monastery #welcome-screen { background: radial-gradient(ellipse at top, #ffffff 0%, var(--ink-black) 60%), var(--ink-black); }
+html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at top, #26260f 0%, var(--ink-black) 55%), var(--ink-black); }
 
 /* ============================================
    SETTINGS DIALOG
@@ -4569,3 +4714,569 @@ html.theme-sandstone {
   max-height: 40vh;
   overflow: auto;
 }
+
+/* ============================================
+   VIBRANT THEME EFFECTS — 3D depth + animated fire borders
+   Scoped to html[class*='theme-'] so the default Crusader theme is untouched.
+   Each theme defines its own flame palette (--flame-a/b/c).
+   ============================================ */
+
+@property --gg-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes gg-rotate { to { --gg-angle: 360deg; } }
+@keyframes gg-flow { to { background-position: 200% 0; } }
+@keyframes gg-flicker {
+  0%, 100% { opacity: 0.85; filter: blur(0.3px) drop-shadow(0 0 5px var(--flame-a)); }
+  20%      { opacity: 1;    filter: blur(0.5px) drop-shadow(0 0 9px var(--flame-a)); }
+  45%      { opacity: 0.75; filter: blur(0.2px) drop-shadow(0 0 4px var(--flame-b)); }
+  70%      { opacity: 0.95; filter: blur(0.6px) drop-shadow(0 0 11px var(--flame-a)); }
+}
+
+/* Flame palettes — the fire that runs through each theme's borders */
+html.theme-molecular { --flame-a: #0095ff; --flame-b: #00e6ff; --flame-c: #0050b4; }
+html.theme-biohazard { --flame-a: #39ff14; --flame-b: #d8ff00; --flame-c: #0f5500; }
+html.theme-sweet     { --flame-a: #ff2d96; --flame-b: #ffdf3d; --flame-c: #8a0050; }
+html.theme-monastery { --flame-a: #ef1f1f; --flame-b: #ff9d00; --flame-c: #8a0a0a; }
+html.theme-racing    { --flame-a: #ffe600; --flame-b: #ff6a00; --flame-c: #ff2200; }
+
+/* ---- FIRE: molten strip flowing along the toolbar's bottom border ---- */
+html[class*='theme-'] .toolbar {
+  background: linear-gradient(180deg, var(--bg-raised) 0%, var(--shadow-black) 100%);
+}
+html[class*='theme-'] .toolbar::after {
+  height: 2px;
+  bottom: -2px;
+  opacity: 1;
+  background: linear-gradient(90deg,
+    var(--flame-c), var(--flame-a) 18%, var(--flame-b) 38%,
+    var(--flame-a) 55%, var(--flame-c) 75%, var(--flame-a) 90%, var(--flame-c));
+  background-size: 200% 100%;
+  animation: gg-flow 4s linear infinite, gg-flicker 2.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* ---- FIRE: the active tab's underline burns ---- */
+html[class*='theme-'] .tab.active::after {
+  background: linear-gradient(90deg,
+    transparent, var(--flame-a) 25%, var(--flame-b) 50%, var(--flame-a) 75%, transparent);
+  background-size: 200% 100%;
+  height: 3px;
+  animation: gg-flow 2.2s linear infinite, gg-flicker 2s ease-in-out infinite;
+}
+
+/* ---- FIRE: status bar carries an ember line along its top edge ---- */
+html[class*='theme-'] .statusbar { position: relative; }
+html[class*='theme-'] .statusbar::before {
+  content: '';
+  position: absolute;
+  top: -1px; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg,
+    var(--flame-c), var(--flame-a) 30%, var(--flame-b) 50%, var(--flame-a) 70%, var(--flame-c));
+  background-size: 200% 100%;
+  animation: gg-flow 5s linear infinite reverse;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+/* ---- FIRE: primary buttons wear a rotating ring of flame ---- */
+html[class*='theme-'] .btn-medieval.primary {
+  border: 2px solid transparent;
+  background:
+    linear-gradient(180deg, var(--crusader-red) 0%, var(--crusader-red-deep) 100%) padding-box,
+    conic-gradient(from var(--gg-angle),
+      var(--flame-a), var(--flame-b), var(--flame-a), var(--flame-c), var(--flame-a)) border-box;
+  animation: gg-rotate 3.2s linear infinite;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--flame-a) 40%, transparent),
+              0 3px 6px rgba(0, 0, 0, 0.35);
+}
+html[class*='theme-'] .btn-medieval.primary:hover {
+  background:
+    linear-gradient(180deg, var(--crusader-red-bright) 0%, var(--crusader-red) 100%) padding-box,
+    conic-gradient(from var(--gg-angle),
+      var(--flame-b), var(--flame-a), var(--flame-b), var(--flame-a), var(--flame-b)) border-box;
+  animation-duration: 1.4s;
+  box-shadow: 0 0 20px color-mix(in srgb, var(--flame-a) 65%, transparent),
+              0 3px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* ---- FIRE: loading shield burns in theme colors ---- */
+html[class*='theme-'] .loading-shield {
+  animation: lo-pulse 1.6s ease-in-out infinite, gg-flicker 1.8s ease-in-out infinite;
+}
+
+/* ---- 3D DEPTH: buttons read as raised, press down on click ---- */
+html[class*='theme-'] .btn-medieval {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(0, 0, 0, 0.16));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
+              inset 0 -1px 0 rgba(0, 0, 0, 0.30),
+              0 2px 5px rgba(0, 0, 0, 0.30);
+}
+html[class*='theme-'] .btn-medieval:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.40);
+}
+html[class*='theme-'] .mini-btn,
+html[class*='theme-'] .tool-btn {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10),
+              0 1px 3px rgba(0, 0, 0, 0.30);
+}
+html[class*='theme-'] .mini-btn:active,
+html[class*='theme-'] .tool-btn:active { transform: translateY(1px); box-shadow: inset 0 1px 4px rgba(0,0,0,0.35); }
+
+/* ---- 3D DEPTH: surfaces ---- */
+html[class*='theme-'] .sidebar-header {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(0, 0, 0, 0.10));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+html[class*='theme-'] .sidebar { box-shadow: inset -4px 0 10px rgba(0, 0, 0, 0.18); }
+html[class*='theme-'] .tabs { box-shadow: inset 0 -4px 8px rgba(0, 0, 0, 0.14); }
+html[class*='theme-'] .modal {
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55),
+              inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+html[class*='theme-'] .graph-row-hash,
+html[class*='theme-'] .commit-hash {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+html[class*='theme-'] .recent-item {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 4px rgba(0, 0, 0, 0.25);
+}
+html[class*='theme-'] .recent-item:hover { box-shadow: 0 4px 10px rgba(0,0,0,0.35), 0 0 8px color-mix(in srgb, var(--flame-a) 25%, transparent); }
+
+/* Light themes: soften the dark insets so depth reads as paper, not soot */
+html.theme-molecular .sidebar, html.theme-monastery .sidebar { box-shadow: inset -4px 0 10px rgba(0, 0, 0, 0.07); }
+html.theme-molecular .tabs, html.theme-monastery .tabs { box-shadow: inset 0 -4px 8px rgba(0, 0, 0, 0.05); }
+html.theme-molecular .btn-medieval, html.theme-monastery .btn-medieval {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(0, 0, 0, 0.05));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8),
+              inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+              0 2px 5px rgba(0, 0, 0, 0.12);
+}
+
+/* Accessibility: kill the motion if the OS asks for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  html[class*='theme-'] .toolbar::after,
+  html[class*='theme-'] .tab.active::after,
+  html[class*='theme-'] .statusbar::before,
+  html[class*='theme-'] .btn-medieval.primary,
+  html[class*='theme-'] .loading-shield { animation: none; }
+}
+
+/* ============================================
+   HEARTH FIRE (status bar flames) — keep the bar's text above the fire canvas
+   ============================================ */
+.statusbar > *:not(canvas) {
+  position: relative;
+  z-index: 1;
+}
+
+/* ============================================
+   THEME SKELETON — sculpted 3D surfaces, cracks, and per-theme texturing.
+   Gives the non-default themes a tactile, carved-material feel. Scoped to
+   html[class*='theme-'] so the default Crusader theme is untouched.
+   ============================================ */
+
+/* --- Shared carved depth on the structural skeleton --- */
+html[class*='theme-'] .toolbar,
+html[class*='theme-'] .statusbar {
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-strong));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08),
+              inset 0 -1px 0 rgba(0,0,0,0.45),
+              0 2px 6px rgba(0,0,0,0.35);
+}
+html[class*='theme-'] .sidebar {
+  box-shadow: inset -6px 0 14px rgba(0,0,0,0.30),
+              inset 1px 0 0 rgba(255,255,255,0.05);
+  border-right: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+}
+html[class*='theme-'] .sidebar-section {
+  border-bottom: 1px solid rgba(0,0,0,0.4);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+html[class*='theme-'] .sidebar-header {
+  background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.07), rgba(0,0,0,0.18));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08),
+              inset 0 -2px 4px rgba(0,0,0,0.35),
+              0 1px 0 rgba(0,0,0,0.4);
+  border-left: 3px solid transparent;
+}
+html[class*='theme-'] .sidebar-section:not(.collapsed) > .sidebar-header {
+  border-left-color: var(--accent);
+}
+html[class*='theme-'] .tabs {
+  box-shadow: inset 0 -5px 10px rgba(0,0,0,0.28);
+}
+html[class*='theme-'] .tab.active {
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent);
+  box-shadow: inset 0 2px 0 rgba(255,255,255,0.06);
+}
+html[class*='theme-'] .detail-section,
+html[class*='theme-'] .changes-section,
+html[class*='theme-'] .diff-header {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), inset 0 -1px 0 rgba(0,0,0,0.3);
+}
+html[class*='theme-'] .modal {
+  box-shadow: 0 24px 60px rgba(0,0,0,0.6),
+              inset 0 1px 0 rgba(255,255,255,0.12),
+              inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+/* Raised, pressable commit/graph rows with a carved divider */
+html[class*='theme-'] .graph-row,
+html[class*='theme-'] .commit-row {
+  border-bottom: 1px solid rgba(0,0,0,0.35);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+}
+html[class*='theme-'] .graph-row-hash,
+html[class*='theme-'] .commit-hash {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.12),
+              inset 0 -1px 0 rgba(0,0,0,0.4),
+              0 1px 2px rgba(0,0,0,0.4);
+}
+
+/* --- Surface grain on the sidebar: fine, isotropic, tiles cleanly (no stretch) --- */
+html[class*='theme-'] .sidebar {
+  position: relative;
+}
+html[class*='theme-'] .sidebar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
+  background-size: 140px 140px;
+}
+/* Keep real content above the grain layer */
+html[class*='theme-'] .sidebar > * { position: relative; z-index: 1; }
+
+/* ============================================================
+   PER-THEME SURFACE TEXTURE — premium procedural grain via SVG feTurbulence.
+   Real organic noise (not CSS stripes), encoded as data URIs so it stays offline.
+   A global micro-grain overlay gives every surface a tactile, high-end finish;
+   per-theme grain layers give each its own material character.
+   ============================================================ */
+
+/* Global fine micro-grain across the whole app — the thing that kills "flat & cheap".
+   fractalNoise at high frequency = film-grain speckle, blended very subtly. */
+html[class*='theme-'] body::before,
+html[class*='theme-'] .screen::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+}
+
+/* MOLECULAR — fine clean tech speckle, cool sheen (bars only) */
+html.theme-molecular .toolbar,
+html.theme-molecular .statusbar,
+html.theme-molecular .sidebar-header {
+  background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.5), rgba(0,60,130,0.04)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='m'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23m)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size: auto, 160px 160px;
+  background-blend-mode: normal, soft-light;
+}
+html.theme-molecular .sidebar { background-color: var(--bg-panel); }
+html.theme-molecular .sidebar::after { mix-blend-mode: multiply; opacity: 0.05; }
+
+/* BIOHAZARD — fine irradiated metal grain (clean tile, no stretch) */
+html.theme-biohazard .toolbar,
+html.theme-biohazard .statusbar,
+html.theme-biohazard .sidebar-header {
+  background-image:
+    linear-gradient(180deg, rgba(68,255,31,0.05), rgba(0,0,0,0.42)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='b'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23b)' opacity='0.6'/%3E%3C/svg%3E");
+  background-size: auto, 160px 160px;
+  background-blend-mode: normal, overlay;
+}
+
+/* SWEET — glossy candy enamel with a fine sugar sparkle */
+html.theme-sweet .toolbar,
+html.theme-sweet .statusbar,
+html.theme-sweet .sidebar-header {
+  background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.15), transparent 40%, rgba(0,0,0,0.3)),
+    radial-gradient(130% 90% at 28% -12%, rgba(255,126,193,0.2), transparent 60%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='s'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='150' height='150' filter='url(%23s)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size: auto, auto, 150px 150px;
+  background-blend-mode: normal, normal, soft-light;
+}
+
+/* MONASTERY — warm paper fibre grain */
+html.theme-monastery .toolbar,
+html.theme-monastery .statusbar,
+html.theme-monastery .sidebar-header {
+  background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.5), rgba(140,40,20,0.04)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='v'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23v)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size: auto, 180px 180px;
+  background-blend-mode: normal, multiply;
+}
+html.theme-monastery .sidebar::after { mix-blend-mode: multiply; opacity: 0.07; }
+
+/* RACING — fine carbon weave (small clean tile) */
+html.theme-racing .toolbar,
+html.theme-racing .statusbar,
+html.theme-racing .sidebar-header {
+  background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.5)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Crect width='8' height='8' fill='%23000' fill-opacity='0'/%3E%3Cpath d='M0 0h4v4H0zM4 4h4v4H4z' fill='%23ffffff' fill-opacity='0.045'/%3E%3C/svg%3E");
+  background-size: auto, 8px 8px;
+  background-blend-mode: normal, normal;
+}
+html.theme-racing .sidebar::after { opacity: 0.05; }
+
+/* Light themes: soften the carved insets so depth reads as paper, not soot */
+html.theme-molecular .sidebar,
+html.theme-monastery .sidebar {
+  box-shadow: inset -6px 0 12px rgba(0,0,0,0.08), inset 1px 0 0 rgba(255,255,255,0.6);
+}
+html.theme-molecular .toolbar, html.theme-molecular .statusbar,
+html.theme-monastery .toolbar, html.theme-monastery .statusbar {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.8),
+              inset 0 -1px 0 rgba(0,0,0,0.12),
+              0 2px 6px rgba(0,0,0,0.12);
+}
+html.theme-molecular .sidebar-header,
+html.theme-monastery .sidebar-header {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.7),
+              inset 0 -2px 4px rgba(0,0,0,0.08);
+}
+
+
+/* ============================================
+   THEME PUNCH — accent glow + depth so the UI pops (dark themes especially)
+   ============================================ */
+
+/* Saturated, glowing primary action buttons */
+html[class*='theme-']:not(.theme-molecular):not(.theme-monastery) .btn-medieval.primary {
+  background-image: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent-bright) 88%, white 0%),
+    var(--accent-deep, var(--crusader-red-deep)));
+  text-shadow: 0 1px 2px rgba(0,0,0,0.45);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent-bright) 50%, transparent),
+              inset 0 1px 0 rgba(255,255,255,0.25),
+              0 3px 8px rgba(0,0,0,0.45);
+}
+
+/* Active tab gets an accent glow bar so it reads instantly */
+html[class*='theme-'] .tab.active {
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent-bright) 55%, transparent);
+}
+
+/* Selected / hovered rows light up with the accent */
+html[class*='theme-'] .graph-row.selected,
+html[class*='theme-'] .commit-row.selected {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
+  box-shadow: inset 3px 0 0 var(--accent-bright),
+              inset 0 1px 0 rgba(255,255,255,0.05);
+}
+html[class*='theme-'] .sidebar-item.active,
+html[class*='theme-'] .sidebar-item.current {
+  box-shadow: inset 3px 0 0 var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* Hash pills glow faintly on the dark neon themes */
+html.theme-biohazard .graph-row-hash:hover,
+html.theme-sweet .graph-row-hash:hover,
+html.theme-racing .graph-row-hash:hover {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-bright) 75%, transparent);
+  color: var(--accent-bright);
+}
+
+/* Dark-theme vignette: subtle radial darkening at the edges for depth & focus */
+html.theme-biohazard .workspace,
+html.theme-sweet .workspace,
+html.theme-racing .workspace {
+  position: relative;
+}
+html.theme-biohazard .workspace::before,
+html.theme-sweet .workspace::before,
+html.theme-racing .workspace::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  mix-blend-mode: multiply;
+  background: radial-gradient(120% 130% at 50% 40%, transparent 58%, rgba(0,0,0,0.40) 100%);
+}
+
+/* Crisper accent borders on inputs/controls when focused — premium feedback */
+html[class*='theme-'] input:focus,
+html[class*='theme-'] select:focus,
+html[class*='theme-'] textarea:focus,
+html[class*='theme-'] .commit-search:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-bright) 35%, transparent),
+              0 0 12px color-mix(in srgb, var(--accent-bright) 25%, transparent);
+  border-color: var(--accent-bright);
+}
+
+/* ============================================
+   EMBEDDED GIT TERMINAL
+   ============================================ */
+.terminal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.terminal-overlay.hidden { display: none; }
+
+.terminal-window {
+  width: 86vw;
+  height: 78vh;
+  max-width: 1200px;
+  display: flex;
+  flex-direction: column;
+  background: var(--ink-black);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6),
+              inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.terminal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.terminal-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+}
+.terminal-titlebar-actions { display: flex; gap: 6px; }
+
+.terminal-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.015), transparent 120px),
+    var(--ink-black);
+  outline: none;
+}
+.terminal-output .term-dim { color: var(--text-muted); }
+.terminal-output .term-err { color: var(--removed); }
+.terminal-output .term-cmd { color: var(--text); font-weight: 600; }
+.terminal-output .term-prompt-echo { color: var(--accent-bright); font-weight: 700; }
+
+.terminal-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.terminal-prompt {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent-bright);
+  flex-shrink: 0;
+}
+.terminal-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  caret-color: var(--accent-bright);
+}
+.terminal-input::placeholder { color: var(--text-muted); opacity: 0.7; }
+
+.terminal-output::-webkit-scrollbar { width: 10px; }
+.terminal-output::-webkit-scrollbar-track { background: var(--shadow-black); }
+.terminal-output::-webkit-scrollbar-thumb { background: var(--border-iron); border-radius: 5px; }
+.terminal-output::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ============================================
+   TOOLBAR SYNC DROPDOWN (Fetch / Pull / Push)
+   ============================================ */
+.tool-dropdown { position: relative; display: inline-flex; }
+.tool-caret { font-size: 9px; margin-left: 4px; opacity: 0.7; }
+.badge-push { background: var(--added, #3fa34d); }
+
+.tool-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 240px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.5),
+              inset 0 1px 0 rgba(255,255,255,0.08);
+  padding: 6px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tool-dropdown-menu.hidden { display: none; }
+
+.tool-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  font-family: var(--font-body);
+  transition: background 0.12s;
+}
+.tool-dropdown-item:hover { background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel)); }
+.tool-dropdown-item .tool-icon { font-size: 15px; color: var(--accent-bright); flex-shrink: 0; }
+.tool-dropdown-label {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+}
+.tool-dropdown-label small {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.tool-dropdown-item .badge { margin-left: auto; }

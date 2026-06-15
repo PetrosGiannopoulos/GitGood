@@ -1112,6 +1112,82 @@ ipcMain.handle('shell:openExternal', (_, url) => {
 });
 
 // ============================================
+// EMBEDDED TERMINAL — a persistent shell session (Git Bash on Windows if present,
+// otherwise the system shell). Commands are written to the shell's stdin and output
+// is streamed back to the renderer, so cd / env / shell state persist like a real
+// terminal. Not a full PTY (no curses/interactive editors), but behaves like Git Bash
+// for command-line git work.
+// ============================================
+let _term = null; // { proc, type }
+
+function _findShell() {
+  if (process.platform === 'win32') {
+    const candidates = [
+      process.env.ProgramW6432 && path.join(process.env.ProgramW6432, 'Git', 'bin', 'bash.exe'),
+      process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Git', 'bin', 'bash.exe'),
+      process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Git', 'bin', 'bash.exe'),
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe'
+    ].filter(Boolean);
+    for (const c of candidates) {
+      try { if (fs.existsSync(c)) return { cmd: c, args: ['--noprofile', '--norc'], type: 'bash', label: 'Git Bash' }; } catch (e) {}
+    }
+    return { cmd: process.env.COMSPEC || 'cmd.exe', args: ['/Q'], type: 'cmd', label: 'Command Prompt' };
+  }
+  const sh = process.env.SHELL || '/bin/bash';
+  return { cmd: sh, args: [], type: 'bash', label: path.basename(sh) };
+}
+
+ipcMain.handle('term:start', (_e, opts) => {
+  const { spawn } = require('child_process');
+  if (_term && _term.proc) { try { _term.proc.kill(); } catch (e) {} _term = null; }
+  const cwd = (opts && opts.cwd) || currentRepoPath || os.homedir();
+  const sh = _findShell();
+  // Disable pagers/color so output streams cleanly into a non-TTY pipe.
+  const env = Object.assign({}, process.env, {
+    TERM: 'dumb', GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0'
+  });
+  let proc;
+  try {
+    proc = spawn(sh.cmd, sh.args, { cwd, env, windowsHide: true });
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  _term = { proc, type: sh.type };
+  const send = (channel, data) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data);
+  };
+  proc.stdout.on('data', d => send('term:data', { data: d.toString() }));
+  proc.stderr.on('data', d => send('term:data', { data: d.toString() }));
+  proc.on('error', (err) => send('term:data', { data: '\n[shell error] ' + err.message + '\n' }));
+  proc.on('exit', (code) => {
+    // Only report the exit if this is still the active terminal. When restarting,
+    // the old process is killed and replaced; its (async) exit must NOT bubble up
+    // and tear down the freshly started session.
+    if (_term && _term.proc === proc) { _term = null; send('term:exit', { code }); }
+  });
+  return { ok: true, data: { cwd, shell: sh.cmd, type: sh.type, label: sh.label } };
+});
+
+ipcMain.handle('term:input', (_e, text) => {
+  if (!_term || !_term.proc) return { ok: false, error: 'No active terminal' };
+  try { _term.proc.stdin.write(text); return { ok: true }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('term:signal', (_e, sig) => {
+  if (!_term || !_term.proc) return { ok: false, error: 'No active terminal' };
+  try { _term.proc.kill(sig || 'SIGINT'); return { ok: true }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('term:kill', () => {
+  if (_term && _term.proc) { try { _term.proc.kill(); } catch (e) {} _term = null; }
+  return { ok: true };
+});
+
+
+// ============================================
 // CONFLICT RESOLUTION
 // ============================================
 
@@ -2196,7 +2272,7 @@ ipcMain.handle('repo:deleteBranches', wrap(async (_, opts) => {
 // ============================================
 // Default app settings — only used when settings file doesn't override.
 const DEFAULT_APP_SETTINGS = {
-  theme: 'crusader',                  // crusader|tyrian|verdant|midnight|sandstone
+  theme: 'crusader',                  // crusader|molecular|biohazard|sweet|monastery|racing
   defaultBranchName: 'main',          // default branch when initializing a new repo
   graphLimit: 300,                    // default commits to load in graph
   autoFetchOnFocus: true,             // auto-refresh on window focus

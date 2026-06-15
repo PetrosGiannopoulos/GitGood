@@ -264,12 +264,42 @@ const loadingOverlay = {
   }
 };
 
-// Run an async repo-open routine behind the blocking overlay. Guarantees the overlay
-// is removed even if loading throws.
+// Wait until the main thread has settled and the browser has painted, so the app is
+// actually responsive (not just done fetching data). Heavy rendering — especially the
+// commit graph DOM — keeps running after data resolves; if we drop the overlay too early
+// the window freezes (Windows shows the "not responding" spinner). We wait for a couple
+// of animation frames to let any pending rAF renders run and the browser paint, then for
+// an idle slice of the main thread, with a hard timeout so we never hang forever.
+function waitUntilIdle(maxWaitMs = 4000) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    const raf = (cb) => requestAnimationFrame(cb);
+    // Two frames: frame 1 lets queued rAF render callbacks fire, frame 2 fires after the
+    // browser has had a chance to lay out and paint the resulting DOM.
+    raf(() => raf(() => {
+      const finishIdle = () => resolve();
+      if (typeof requestIdleCallback === 'function') {
+        const remaining = Math.max(50, maxWaitMs - (Date.now() - start));
+        requestIdleCallback(finishIdle, { timeout: remaining });
+      } else {
+        // Fallback: a short settle delay after paint.
+        setTimeout(finishIdle, 80);
+      }
+    }));
+  });
+}
+
+// Run an async repo-open routine behind the blocking overlay. Keeps the overlay up until
+// the data has loaded AND the UI has finished rendering and the thread is idle, so the
+// app is genuinely responsive when the overlay clears. Guaranteed to remove the overlay
+// even if loading throws.
 async function withRepoOpen(title, fn) {
   loadingOverlay.show(title || 'Summoning the chronicle…', 'Preparing thy realm');
   try {
-    return await fn();
+    const result = await fn();
+    loadingOverlay.setSub('Polishing the parapets…');
+    await waitUntilIdle();
+    return result;
   } finally {
     loadingOverlay.hide();
   }
@@ -509,6 +539,7 @@ async function openRepoByPath(p) {
   // Block interaction behind the overlay until the full initial load completes, so the
   // user can't click into a half-rendered graph or changes list.
   await withRepoOpen(`Opening “${result.data.name}”`, () => refreshAll());
+  setStatus('Ready');
   showToast(`Opened "${result.data.name}"`, 'success');
 }
 
@@ -3533,7 +3564,20 @@ async function showStashBrowser(stashIndex) {
 // ============================================
 // TOOLBAR ACTIONS
 // ============================================
+// Sync split-button: the dropdown reveals Fetch / Pull / Push.
+const syncDropdown = $('#sync-dropdown');
+const syncMenu = $('#sync-menu');
+function closeSyncMenu() { if (syncMenu) syncMenu.classList.add('hidden'); }
+function toggleSyncMenu() { if (syncMenu) syncMenu.classList.toggle('hidden'); }
+if ($('#btn-sync')) $('#btn-sync').onclick = (e) => { e.stopPropagation(); toggleSyncMenu(); };
+// Close the menu when clicking elsewhere or pressing Esc
+document.addEventListener('click', (e) => {
+  if (syncDropdown && !syncDropdown.contains(e.target)) closeSyncMenu();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSyncMenu(); });
+
 $('#btn-fetch').onclick = async () => {
+  closeSyncMenu();
   const r = await withLoading('Fetching', () => gs.fetch());
   if (handleResult(r, 'Fetched from remote')) {
     await refreshAll();
@@ -3541,6 +3585,7 @@ $('#btn-fetch').onclick = async () => {
 };
 
 $('#btn-pull').onclick = async () => {
+  closeSyncMenu();
   const r = await withLoading('Pulling', () => gs.pull());
   if (handleResult(r, 'Pulled from remote')) {
     await refreshAll();
@@ -3548,6 +3593,7 @@ $('#btn-pull').onclick = async () => {
 };
 
 $('#btn-push').onclick = async () => {
+  closeSyncMenu();
   const r = await withLoading('Pushing', () => gs.push());
   if (!r.ok && /no upstream|has no upstream branch|set-upstream/i.test(r.error || '')) {
     // Offer set-upstream
@@ -3573,6 +3619,8 @@ $('#btn-refresh').onclick = async () => {
   await refreshAll();
   showToast('Refreshed', 'success', 1500);
 };
+
+$('#btn-terminal').onclick = () => openTerminal();
 
 $('#btn-branch').onclick = () => {
   // Switch to the Branches tab
@@ -3961,26 +4009,6 @@ function toggleSidebar() {
 })();
 
 // ============================================
-// SIDEBAR COLLAPSIBLES
-// ============================================
-function wireSidebarHeaders() {
-  $$('.sidebar-header.clickable').forEach(header => {
-    header.onclick = (e) => {
-      // Ignore clicks on buttons or count badges inside the header
-      if (e.target.closest('button') || e.target.closest('.count')) return;
-
-      const section = header.closest('.sidebar-section');
-      if (section) {
-        section.classList.toggle('collapsed');
-      }
-    };
-  });
-}
-
-// Run it after DOM is ready
-document.addEventListener('DOMContentLoaded', wireSidebarHeaders);
-
-// ============================================
 // GRAPH LAYOUT ALGORITHM
 // ============================================
 // Standard "lane" commit-graph layout. Processes commits top-to-bottom (newest
@@ -4199,17 +4227,65 @@ function layoutGraph(commits) {
 const GRAPH_ROW_H = 30;     // pixels per row
 const GRAPH_LANE_W = 18;    // pixels per lane
 const GRAPH_LANE_X0 = 14;   // left padding
-const LANE_COLORS = [
-  '#d4302f', // crusader red bright
-  '#c8a04a', // gold
-  '#6b8e23', // olive (allied)
-  '#6db8c4', // teal
-  '#b388d3', // purple
-  '#e2a5a5', // rose
-  '#c1d9a0', // pale green
-  '#efe6d4'  // bone white
+// Lane colors for the graph. Rebuilt from the active theme's palette so the graph
+// never clashes with a theme (e.g. red dots on a green theme). Defaults to the
+// Crusader palette; refreshThemeLaneColors() overrides per theme.
+let LANE_COLORS = [
+  '#d4302f', '#c8a04a', '#6b8e23', '#6db8c4',
+  '#b388d3', '#e2a5a5', '#c1d9a0', '#efe6d4'
 ];
 const laneColor = (lane) => LANE_COLORS[lane % LANE_COLORS.length];
+
+// Resolve any CSS color expression (incl. color-mix / var) to a concrete rgb() string,
+// since SVG presentation attributes (fill/stroke) don't accept color-mix().
+let _colorResolverEl = null;
+function resolveColor(expr) {
+  try {
+    if (!_colorResolverEl) {
+      _colorResolverEl = document.createElement('span');
+      _colorResolverEl.style.display = 'none';
+      document.body.appendChild(_colorResolverEl);
+    }
+    _colorResolverEl.style.color = '';
+    _colorResolverEl.style.color = expr;
+    const c = getComputedStyle(_colorResolverEl).color;
+    return c || expr;
+  } catch (e) { return expr; }
+}
+
+// Build a harmonious 8-lane palette around the theme's accent. Reads the resolved
+// CSS variables so it works for every theme including the custom ones.
+function refreshThemeLaneColors() {
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name, fb) => {
+      const x = (cs.getPropertyValue(name) || '').trim();
+      return x || fb;
+    };
+    const html = document.documentElement;
+    const themed = /theme-/.test(html.className);
+    if (!themed) {
+      LANE_COLORS = ['#d4302f', '#c8a04a', '#6b8e23', '#6db8c4', '#b388d3', '#e2a5a5', '#c1d9a0', '#efe6d4'];
+      return;
+    }
+    const accentBright = v('--accent-bright', '#d4302f');
+    const accent = v('--accent', '#b22222');
+    const gold = v('--gold-accent', '#c8a04a');
+    const added = v('--added', '#3fa34d');
+    const text = v('--text', '#efe6d4');
+    const dim = v('--text-dim', '#c1b89a');
+    LANE_COLORS = [
+      accentBright,
+      gold,
+      added,
+      resolveColor(`color-mix(in srgb, ${accentBright} 55%, ${text})`),
+      resolveColor(`color-mix(in srgb, ${accent} 65%, white)`),
+      dim,
+      resolveColor(`color-mix(in srgb, ${gold} 55%, ${text})`),
+      text
+    ].map(resolveColor);
+  } catch (e) { /* keep current palette */ }
+}
 
 function renderGraph() {
   const container = $('#graph-container');
@@ -5445,6 +5521,7 @@ gs.onMenu('menu-about', () => {
 // DISK MANAGEMENT
 // ============================================
 const _diskState = { loaded: false, lastData: null, stale: false };
+let _diskScanGen = 0;  // increments each refreshDiskUsage call; stale calls bail out
 
 // Show a subtle hint that the disk figures may be out of date (repo changed since
 // the last scan). We don't rescan automatically — the user clicks Refresh to update.
@@ -5476,6 +5553,13 @@ function fmtBytes(n) {
 let _diskProgressUnsub = null;
 
 async function refreshDiskUsage() {
+  // Each call gets a generation id. If a newer call starts while this one is still
+  // awaiting the backend, this (stale) call must not touch the UI when it resolves —
+  // otherwise a just-cancelled scan's continuation can clobber the fresh scan's UI
+  // (e.g. show "Cancelled" over a running retry).
+  const myGen = ++_diskScanGen;
+  const isStale = () => myGen !== _diskScanGen;
+
   const loading = $('#disk-loading');
   const summary = $('#disk-summary');
   const progress = $('#disk-progress');
@@ -5487,7 +5571,7 @@ async function refreshDiskUsage() {
   // cancels any in-flight scan when a new diskUsage() call arrives (token bump),
   // so we don't need a manual cancel here.
   _diskProgressUnsub = gs.onDiskProgress((payload) => {
-    if (!progress) return;
+    if (isStale() || !progress) return;
     if (payload.done) {
       progress.classList.add('hidden');
       return;
@@ -5512,9 +5596,15 @@ async function refreshDiskUsage() {
   try {
     r = await gs.diskUsage();
   } finally {
-    if (_diskProgressUnsub) { try { _diskProgressUnsub(); } catch (e) {} _diskProgressUnsub = null; }
-    if (progress) progress.classList.add('hidden');
+    // Only the most recent scan cleans up the shared progress UI/subscription.
+    if (!isStale()) {
+      if (_diskProgressUnsub) { try { _diskProgressUnsub(); } catch (e) {} _diskProgressUnsub = null; }
+      if (progress) progress.classList.add('hidden');
+    }
   }
+
+  // A newer scan superseded this one — leave the UI entirely to that newer call.
+  if (isStale()) return;
 
   if (!r.ok) {
     if (loading) { loading.style.display = ''; loading.textContent = 'Failed: ' + r.error; }
@@ -5598,6 +5688,15 @@ function segColor(cls) {
 
 // Wire up the disk management section
 (() => {
+  // Collapsible sidebar sections: clicking a section header toggles its collapsed state.
+  // (Current Banner, Local/Remote Branches, Disk Management, Stashes, Remotes.)
+  document.querySelectorAll('.sidebar-section.collapsible > .sidebar-header.clickable').forEach(header => {
+    header.addEventListener('click', () => {
+      const section = header.closest('.sidebar-section');
+      if (section) section.classList.toggle('collapsed');
+    });
+  });
+
   // Clicking the header loads data the first time
   const section = document.getElementById('section-disk');
   if (section) {
@@ -6077,11 +6176,12 @@ function showLargestObjectsDialog(objects) {
 // ============================================
 
 const AVAILABLE_THEMES = [
-  { id: 'crusader', name: 'Crusader',  swatches: ['#0a0606', '#b22222', '#c8a04a', '#efe6d4'] },
-  { id: 'tyrian',   name: 'Tyrian',    swatches: ['#0a0606', '#6e1b4e', '#c8a04a', '#efe6d4'] },
-  { id: 'verdant',  name: 'Verdant',   swatches: ['#0a0606', '#2f5d3c', '#c8a04a', '#efe6d4'] },
-  { id: 'midnight', name: 'Midnight',  swatches: ['#0a0606', '#2c4a7a', '#bfc7da', '#efe6d4'] },
-  { id: 'sandstone', name: 'Sandstone', swatches: ['#1a1410', '#a14a22', '#d4b770', '#f5e8cf'] }
+  { id: 'crusader',  name: 'Crusader',        swatches: ['#0a0606', '#b22222', '#c8a04a', '#efe6d4'] },
+  { id: 'molecular', name: 'Molecular Tech',  swatches: ['#eaf3fd', '#006ade', '#00d4e8', '#04182e'] },
+  { id: 'biohazard', name: 'Biohazard',       swatches: ['#030803', '#39ff14', '#d8ff00', '#e8ffd6'] },
+  { id: 'sweet',     name: 'Sweet Factory',   swatches: ['#0f040b', '#ff2d96', '#ffdf3d', '#ffeaf6'] },
+  { id: 'monastery', name: 'Blood Monastery', swatches: ['#faf7f0', '#c41212', '#c89400', '#1c0500'] },
+  { id: 'racing',    name: 'Racing Punk',     swatches: ['#0a0a08', '#ffe600', '#ff6a00', '#fffbe0'] }
 ];
 
 // Apply a theme: set the html class. Called on load (with saved theme) and from the picker.
@@ -6090,6 +6190,11 @@ function applyTheme(themeId) {
   // Remove any previous theme class
   for (const t of AVAILABLE_THEMES) html.classList.remove('theme-' + t.id);
   if (themeId && themeId !== 'crusader') html.classList.add('theme-' + themeId);
+  // Recolor the commit graph to match the new theme, then redraw if it's loaded.
+  if (typeof refreshThemeLaneColors === 'function') {
+    refreshThemeLaneColors();
+    try { if (state && state.graph && state.graph.commits && state.graph.commits.length) relayoutGraph(); } catch (e) {}
+  }
 }
 
 // Apply font scale by genuinely resizing fonts (not zooming layout). The UI uses
@@ -6799,4 +6904,191 @@ function computeTrackList(target, resizerEl) {
     try { await showWelcome(); } catch (e) { console.error(e); }
     showToast('Init warning: ' + (err.message || err), 'error', 6000);
   }
+})();
+
+
+// ============================================
+// EMBEDDED GIT TERMINAL — front-end controller for the persistent shell session.
+// Streams output from the backend shell, sends typed commands, supports history
+// and Ctrl+C. Behaves like Git Bash for command-line git work.
+// ============================================
+const terminal = {
+  started: false,
+  unsubData: null,
+  unsubExit: null,
+  history: [],
+  histIdx: -1,
+  running: false,
+
+  els() {
+    return {
+      overlay: document.getElementById('terminal-overlay'),
+      output: document.getElementById('terminal-output'),
+      input: document.getElementById('terminal-input'),
+      prompt: document.getElementById('terminal-prompt'),
+      label: document.getElementById('terminal-shell-label')
+    };
+  },
+
+  // Strip ANSI escape / control sequences so the plain console stays readable.
+  clean(s) {
+    return s
+      .replace(/\x1b\][^\x07]*\x07/g, '')             // OSC sequences
+      .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')     // CSI sequences
+      .replace(/\x1b[@-Z\\-_]/g, '')                  // other escapes
+      .replace(/\r/g, '');                            // carriage returns
+  },
+
+  write(text, cls) {
+    const { output } = this.els();
+    if (!output) return;
+    const atBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 30;
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = text;
+    output.appendChild(span);
+    if (atBottom) output.scrollTop = output.scrollHeight;
+  },
+
+  async open() {
+    const { overlay, input } = this.els();
+    if (!overlay) return;
+    overlay.classList.remove('hidden');
+    if (!this.started) await this.start();
+    setTimeout(() => input && input.focus(), 30);
+  },
+
+  close() {
+    const { overlay } = this.els();
+    if (overlay) overlay.classList.add('hidden');
+    // Keep the session alive in the background so state persists if reopened.
+  },
+
+  async start() {
+    const { output, label, prompt } = this.els();
+    if (output) output.textContent = '';
+    // Bump the session id; any data/exit event from an older session is ignored.
+    const mySession = (this.session = (this.session || 0) + 1);
+
+    // Tear down old subscriptions before starting a new backend session.
+    if (this.unsubData) { this.unsubData(); this.unsubData = null; }
+    if (this.unsubExit) { this.unsubExit(); this.unsubExit = null; }
+
+    const cwd = (state.repo && state.repo.path) || undefined;
+    let r;
+    try {
+      r = await gs.termStart({ cwd });
+    } catch (e) {
+      this.write('Failed to start shell: ' + (e.message || e) + '\n', 'term-err');
+      return;
+    }
+    if (mySession !== this.session) return;  // superseded by a newer start()
+    if (!r || !r.ok) {
+      this.write('Failed to start shell: ' + ((r && r.error) || 'unknown') + '\n', 'term-err');
+      this.started = false;
+      return;
+    }
+    this.started = true;
+    this.running = false;
+    if (label) label.textContent = r.data.label || 'Terminal';
+    if (prompt) prompt.textContent = (r.data.type === 'cmd') ? '>' : '$';
+    this.write(`${r.data.label} — ${r.data.shell}\n`, 'term-dim');
+    this.write(`${r.data.cwd}\n\n`, 'term-dim');
+
+    // Subscribe to streamed output, gated on this session id.
+    this.unsubData = gs.onTermData(({ data }) => {
+      if (mySession === this.session) this.write(this.clean(data));
+    });
+    this.unsubExit = gs.onTermExit(({ code }) => {
+      if (mySession !== this.session) return;
+      this.write(`\n[shell exited${code != null ? ' with code ' + code : ''}] — press Restart to start a new session.\n`, 'term-dim');
+      this.started = false;
+      this.running = false;
+    });
+  },
+
+  async restart() {
+    // start() already replaces the backend session (term:start kills any existing
+    // shell). The session-id guard ensures the old shell's exit event is ignored.
+    this.write('\n[restarting shell…]\n', 'term-dim');
+    this.started = false;
+    await this.start();
+  },
+
+  send(line) {
+    if (!this.started) { this.write('No active shell. Press Restart.\n', 'term-err'); return; }
+    // Echo the command with a prompt, like a real terminal.
+    const { prompt } = this.els();
+    this.write((prompt ? prompt.textContent : '$') + ' ', 'term-prompt-echo');
+    this.write(line + '\n', 'term-cmd');
+    gs.termInput(line + '\n');
+    if (line.trim()) {
+      this.history.push(line);
+      if (this.history.length > 200) this.history.shift();
+    }
+    this.histIdx = this.history.length;
+  },
+
+  interrupt() {
+    if (this.started) { gs.termSignal('SIGINT'); this.write('^C\n', 'term-dim'); }
+  }
+};
+
+function openTerminal() { terminal.open(); }
+
+// Wire terminal controls once the DOM exists.
+(function wireTerminal() {
+  const input = document.getElementById('terminal-input');
+  const overlay = document.getElementById('terminal-overlay');
+  if (!input || !overlay) return;
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const line = input.value;
+      input.value = '';
+      terminal.send(line);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (terminal.history.length) {
+        terminal.histIdx = Math.max(0, terminal.histIdx - 1);
+        input.value = terminal.history[terminal.histIdx] || '';
+        setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (terminal.history.length) {
+        terminal.histIdx = Math.min(terminal.history.length, terminal.histIdx + 1);
+        input.value = terminal.history[terminal.histIdx] || '';
+      }
+    } else if (e.key === 'c' && e.ctrlKey) {
+      // Ctrl+C interrupts the running command (only when no text is selected to copy)
+      if (!window.getSelection().toString()) {
+        e.preventDefault();
+        terminal.interrupt();
+      }
+    } else if (e.key === 'l' && e.ctrlKey) {
+      e.preventDefault();
+      const out = document.getElementById('terminal-output');
+      if (out) out.textContent = '';
+    }
+  });
+
+  const closeBtn = document.getElementById('terminal-close');
+  const clearBtn = document.getElementById('terminal-clear');
+  const restartBtn = document.getElementById('terminal-restart');
+  if (closeBtn) closeBtn.onclick = () => terminal.close();
+  if (clearBtn) clearBtn.onclick = () => { const o = document.getElementById('terminal-output'); if (o) o.textContent = ''; };
+  if (restartBtn) restartBtn.onclick = () => terminal.restart();
+
+  // Click anywhere in the output focuses the input (terminal feel)
+  const output = document.getElementById('terminal-output');
+  if (output) output.addEventListener('mouseup', () => {
+    if (!window.getSelection().toString()) input.focus();
+  });
+
+  // Esc closes the terminal (only when it's the active surface)
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); terminal.close(); }
+  });
 })();

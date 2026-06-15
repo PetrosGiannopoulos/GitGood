@@ -140,6 +140,22 @@ const api = {
   rawCommand: (args) => ipcRenderer.invoke('repo:rawCommand', args),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 
+  // Embedded terminal
+  termStart: (opts) => ipcRenderer.invoke('term:start', opts),
+  termInput: (text) => ipcRenderer.invoke('term:input', text),
+  termSignal: (sig) => ipcRenderer.invoke('term:signal', sig),
+  termKill: () => ipcRenderer.invoke('term:kill'),
+  onTermData: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('term:data', handler);
+    return () => ipcRenderer.removeListener('term:data', handler);
+  },
+  onTermExit: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('term:exit', handler);
+    return () => ipcRenderer.removeListener('term:exit', handler);
+  },
+
   // Menu events from main process
   onMenu: (channel, cb) => {
     const valid = ['menu-open-repo', 'menu-clone-repo', 'menu-about'];

@@ -113,17 +113,28 @@
       </div>
 
       <div class="toolbar-center">
-        <button class="tool-btn" id="btn-fetch" title="Fetch from remote">
-          <span class="tool-icon">⤓</span><span>Fetch</span>
-        </button>
-        <button class="tool-btn" id="btn-pull" title="Pull from remote">
-          <span class="tool-icon">↓</span><span>Pull</span>
-          <span class="badge" id="pull-badge" style="display:none">0</span>
-        </button>
-        <button class="tool-btn" id="btn-push" title="Push to remote">
-          <span class="tool-icon">↑</span><span>Push</span>
-          <span class="badge" id="push-badge" style="display:none">0</span>
-        </button>
+        <div class="tool-dropdown" id="sync-dropdown">
+          <button class="tool-btn" id="btn-sync" title="Sync with remote">
+            <span class="tool-icon">⟳</span><span>Sync</span>
+            <span class="badge" id="pull-badge" style="display:none">0</span>
+            <span class="badge badge-push" id="push-badge" style="display:none">0</span>
+            <span class="tool-caret">▾</span>
+          </button>
+          <div class="tool-dropdown-menu hidden" id="sync-menu">
+            <button class="tool-dropdown-item" id="btn-fetch">
+              <span class="tool-icon">⤓</span>
+              <span class="tool-dropdown-label">Fetch<small>Download refs without merging</small></span>
+            </button>
+            <button class="tool-dropdown-item" id="btn-pull">
+              <span class="tool-icon">↓</span>
+              <span class="tool-dropdown-label">Pull<small>Fetch and merge from remote</small></span>
+            </button>
+            <button class="tool-dropdown-item" id="btn-push">
+              <span class="tool-icon">↑</span>
+              <span class="tool-dropdown-label">Push<small>Upload commits to remote</small></span>
+            </button>
+          </div>
+        </div>
         <div class="tool-sep"></div>
         <button class="tool-btn" id="btn-branch" title="Branches">
           <span class="tool-icon">⑂</span><span>Branch</span>
@@ -132,6 +143,9 @@
           <span class="tool-icon">⚿</span><span>Stash</span>
         </button>
         <div class="tool-sep"></div>
+        <button class="tool-btn" id="btn-terminal" title="Open Git terminal">
+          <span class="tool-icon">⌨</span><span>Terminal</span>
+        </button>
         <button class="tool-btn" id="btn-refresh" title="Refresh">
           <span class="tool-icon">⟳</span><span>Refresh</span>
         </button>
@@ -548,6 +562,27 @@
       <div class="loading-overlay-title" id="loading-overlay-title">Summoning the chronicle…</div>
       <div class="loading-overlay-sub" id="loading-overlay-sub">Preparing thy realm</div>
       <div class="loading-overlay-bar"><div class="loading-overlay-bar-fill" id="loading-overlay-fill"></div></div>
+    </div>
+  </div>
+
+  <!-- Embedded Git terminal -->
+  <div id="terminal-overlay" class="terminal-overlay hidden">
+    <div class="terminal-window">
+      <div class="terminal-titlebar">
+        <span class="terminal-title">⌨ <span id="terminal-shell-label">Git Terminal</span></span>
+        <div class="terminal-titlebar-actions">
+          <button class="mini-btn" id="terminal-clear" title="Clear screen">⌫ Clear</button>
+          <button class="mini-btn" id="terminal-restart" title="Restart shell">⟳ Restart</button>
+          <button class="mini-btn" id="terminal-close" title="Close (Esc)">✕ Close</button>
+        </div>
+      </div>
+      <div class="terminal-output" id="terminal-output" tabindex="0"></div>
+      <div class="terminal-inputrow">
+        <span class="terminal-prompt" id="terminal-prompt">$</span>
+        <input type="text" class="terminal-input" id="terminal-input"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+               placeholder="Type a command (e.g. git status) — Enter to run, Ctrl+C to interrupt" />
+      </div>
     </div>
   </div>
 
