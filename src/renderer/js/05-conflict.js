@@ -927,13 +927,25 @@ function updateStatusBar() {
   $('#status-changes').textContent = `${changes} change${changes === 1 ? '' : 's'}`;
   $('#status-ahead-behind').textContent = `↑${s.ahead || 0} ↓${s.behind || 0}`;
 
-  // Toolbar badges
+  // Toolbar badges: ahead/behind now live on the Push/Pull items inside the Sync menu.
   const pushBadge = $('#push-badge');
   const pullBadge = $('#pull-badge');
-  if (s.ahead > 0) { pushBadge.textContent = s.ahead; pushBadge.style.display = 'inline-block'; }
-  else pushBadge.style.display = 'none';
-  if (s.behind > 0) { pullBadge.textContent = s.behind; pullBadge.style.display = 'inline-block'; }
-  else pullBadge.style.display = 'none';
+  if (pushBadge) {
+    if (s.ahead > 0) { pushBadge.textContent = s.ahead; pushBadge.style.display = 'inline-block'; pushBadge.title = `${s.ahead} commit(s) to push`; }
+    else pushBadge.style.display = 'none';
+  }
+  if (pullBadge) {
+    if (s.behind > 0) { pullBadge.textContent = s.behind; pullBadge.style.display = 'inline-block'; pullBadge.title = `${s.behind} commit(s) to pull`; }
+    else pullBadge.style.display = 'none';
+  }
+  // A small dot on the collapsed Sync button hints there's something to sync, so the
+  // counts are discoverable without opening the menu.
+  const dot = $('#sync-dot');
+  if (dot) {
+    const has = (s.ahead > 0) || (s.behind > 0);
+    dot.style.display = has ? 'inline-block' : 'none';
+    dot.title = has ? `↑${s.ahead || 0} to push · ↓${s.behind || 0} to pull` : '';
+  }
 }
 
 // ============================================

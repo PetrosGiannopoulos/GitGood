@@ -429,6 +429,118 @@ function applyFontScale(scale) {
   }
 }
 
+// ---- Nerd Fonts ----------------------------------------------------------------
+// We only offer fonts the system actually has installed. The candidate list below is
+// the set of popular Nerd Fonts we know how to label; detection (queryLocalFonts or a
+// canvas measurement fallback) filters it down to what's really available.
+const NERD_FONT_CANDIDATES = [
+  'JetBrainsMono Nerd Font', 'JetBrainsMono Nerd Font Mono', 'FiraCode Nerd Font', 'FiraCode Nerd Font Mono',
+  'FiraMono Nerd Font', 'Hack Nerd Font', 'Hack Nerd Font Mono',
+  'CaskaydiaCove Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'CaskaydiaMono Nerd Font',
+  'MesloLGS Nerd Font', 'MesloLGM Nerd Font', 'MesloLGL Nerd Font',
+  'SauceCodePro Nerd Font', 'UbuntuMono Nerd Font', 'Ubuntu Nerd Font', 'RobotoMono Nerd Font',
+  'DejaVuSansMono Nerd Font', 'DejaVuSansM Nerd Font', 'Iosevka Nerd Font', 'IosevkaTerm Nerd Font',
+  'IosevkaTermSlab Nerd Font', 'VictorMono Nerd Font', 'BlexMono Nerd Font', 'CommitMono Nerd Font',
+  'GeistMono Nerd Font', 'Hasklug Nerd Font', 'Inconsolata Nerd Font', 'InconsolataGo Nerd Font',
+  'Mononoki Nerd Font', 'SpaceMono Nerd Font', 'AnonymicePro Nerd Font', 'AnonymiceProMono Nerd Font',
+  'Terminess Nerd Font', 'ProFont Nerd Font', 'Monofur Nerd Font', 'Cousine Nerd Font',
+  'Agave Nerd Font', 'IBMPlexMono Nerd Font', 'BlexMono Nerd Font Mono', 'Lekton Nerd Font',
+  'GoMono Nerd Font', 'DroidSansMono Nerd Font', 'BigBlueTerminal Nerd Font', 'Lilex Nerd Font',
+  'ComicShannsMono Nerd Font', 'ZedMono Nerd Font', 'ShureTechMono Nerd Font', 'Noto Nerd Font',
+  'Symbols Nerd Font', 'Symbols Nerd Font Mono', 'OpenDyslexic Nerd Font', 'Overpass Nerd Font',
+  'Tinos Nerd Font', 'Arimo Nerd Font', 'GohuFont Nerd Font', 'Hurmit Nerd Font',
+  'BitstreamVeraSansMono Nerd Font', 'CodeNewRoman Nerd Font', 'DaddyTimeMono Nerd Font',
+  'Fura Code Nerd Font', 'Fura Mono Nerd Font', 'Literation Mono Nerd Font'
+];
+// A handful of non-Nerd developer fonts that are nice to offer if present.
+const EXTRA_FONT_CANDIDATES = [
+  'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'Source Code Pro',
+  'Consolas', 'Menlo', 'Monaco', 'SF Mono', 'Ubuntu Mono', 'Roboto Mono', 'IBM Plex Mono',
+  'Inconsolata', 'Hack', 'Iosevka', 'Victor Mono', 'Courier New'
+];
+
+// Detected, installed-only list (populated by detectInstalledFonts on first settings open).
+let _installedFonts = null;          // Set of family names known installed
+let _detectedFontList = null;        // sorted array offered in the picker
+
+// Canvas-based detection: a font is "installed" if rendering a probe string in it
+// measures differently than in three generic baselines (serif/sans/monospace).
+function makeFontDetector() {
+  const probe = 'mmmmmmmmmmlli WO. 0123 \uE0B0\uF015';
+  const size = '72px';
+  const baselines = ['monospace', 'serif', 'sans-serif'];
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const baseWidths = {};
+  for (const b of baselines) { ctx.font = `${size} ${b}`; baseWidths[b] = ctx.measureText(probe).width; }
+  return function isInstalled(family) {
+    for (const b of baselines) {
+      ctx.font = `${size} "${family}", ${b}`;
+      const w = ctx.measureText(probe).width;
+      // If width differs from this generic baseline, the real font was used.
+      if (Math.abs(w - baseWidths[b]) > 0.5) return true;
+    }
+    return false;
+  };
+}
+
+// Build the installed-font list. Prefers the Local Font Access API (exact family list);
+// falls back to canvas measurement over our candidate list. Cached after first run.
+async function detectInstalledFonts() {
+  if (_detectedFontList) return _detectedFontList;
+  const found = new Set();
+
+  // 1) Local Font Access API (Chromium) — gives the true installed family list.
+  try {
+    if (typeof window.queryLocalFonts === 'function') {
+      const fonts = await window.queryLocalFonts();
+      const families = new Set(fonts.map(f => f.family));
+      for (const cand of NERD_FONT_CANDIDATES.concat(EXTRA_FONT_CANDIDATES)) {
+        if (families.has(cand)) found.add(cand);
+      }
+      // Also surface ANY installed family containing "Nerd Font" that we didn't list.
+      for (const fam of families) {
+        if (/nerd font/i.test(fam)) found.add(fam);
+      }
+    }
+  } catch (e) { /* permission denied or unsupported — fall through to canvas */ }
+
+  // 2) Canvas measurement fallback (no permission needed).
+  if (found.size === 0) {
+    const isInstalled = makeFontDetector();
+    for (const cand of NERD_FONT_CANDIDATES.concat(EXTRA_FONT_CANDIDATES)) {
+      if (isInstalled(cand)) found.add(cand);
+    }
+  }
+
+  _installedFonts = found;
+  _detectedFontList = Array.from(found).sort((a, b) => a.localeCompare(b));
+  return _detectedFontList;
+}
+
+// Default font stacks (mirror the CSS :root definitions, used as fallbacks).
+const FONT_MONO_FALLBACK = "'JetBrains Mono', 'Consolas', monospace";
+const FONT_UI_FALLBACK = "'EB Garamond', 'Palatino', serif";
+
+// Apply chosen fonts app-wide by overriding the CSS variables. Empty/'default'
+// restores the built-in stacks. The chosen family is prepended to the fallback so
+// uninstalled fonts degrade gracefully.
+function applyFonts(monoFont, uiFont) {
+  const root = document.documentElement;
+  if (monoFont && monoFont !== 'default') {
+    root.style.setProperty('--font-mono', `"${monoFont}", ${FONT_MONO_FALLBACK}`);
+  } else {
+    root.style.removeProperty('--font-mono');
+  }
+  if (uiFont && uiFont !== 'default') {
+    // Apply the interface font to body/general text only (keep the medieval display
+    // and ornament fonts for headings/titles so the app keeps its character).
+    root.style.setProperty('--font-body', `"${uiFont}", ${FONT_UI_FALLBACK}`);
+  } else {
+    root.style.removeProperty('--font-body');
+  }
+}
+
 async function showSettingsDialog() {
   // Load both app settings and git config in parallel
   const [appR, gitR] = await Promise.all([gs.getAppSettings(), gs.getGitConfig()]);
@@ -537,6 +649,28 @@ async function showSettingsDialog() {
             <span style="color:var(--muted-text);font-size:11px">× (0.75–1.5)</span>
           </div>
         </div>
+        <div class="settings-row">
+          <div class="label">Monospace font<small>Code, diffs, hashes & terminal. Only fonts installed on your system are listed.</small></div>
+          <div class="control">
+            <select id="set-mono-font">
+              <option value="default"${(appSettings.monoFont||'default')==='default'?' selected':''}>Default (JetBrains Mono)</option>
+              <option disabled>Detecting installed fonts…</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="label">Interface font<small>General UI text (headings keep the medieval display font).</small></div>
+          <div class="control">
+            <select id="set-ui-font">
+              <option value="default"${(appSettings.uiFont||'default')==='default'?' selected':''}>Default (EB Garamond)</option>
+              <option disabled>Detecting installed fonts…</option>
+            </select>
+          </div>
+        </div>
+        <p class="modal-text text-muted" style="font-size:11px;margin-top:8px">
+          <span id="font-detect-status">Scanning your system fonts…</span>
+          Want more options? <a href="#" id="nerdfonts-link" style="color:var(--accent-bright)">Download Nerd Fonts ↗</a> — install the ones you like, then reopen Settings.
+        </p>
       </div>
     `;
     // Theme cards: live preview on click (both built-in and Alacritty grids)
@@ -571,6 +705,49 @@ async function showSettingsDialog() {
         appChanges.fontScale = v;
         applyFontScale(v);
       }
+    };
+
+    // Nerd Font pickers — live preview on change, persisted on Save.
+    const monoSel = panel.querySelector('#set-mono-font');
+    const uiSel = panel.querySelector('#set-ui-font');
+    const previewFonts = () => {
+      const mono = monoSel ? monoSel.value : (appChanges.monoFont ?? appSettings.monoFont);
+      const ui = uiSel ? uiSel.value : (appChanges.uiFont ?? appSettings.uiFont);
+      applyFonts(mono, ui);
+    };
+    if (monoSel) monoSel.onchange = () => { appChanges.monoFont = monoSel.value; previewFonts(); };
+    if (uiSel) uiSel.onchange = () => { appChanges.uiFont = uiSel.value; previewFonts(); };
+
+    // Auto-detect installed fonts and fill the dropdowns with only what's available.
+    (async () => {
+      const installed = await detectInstalledFonts();
+      const statusEl = panel.querySelector('#font-detect-status');
+      const fill = (sel, current, defaultLabel) => {
+        if (!sel) return;
+        const opts = [`<option value="default"${(!current||current==='default')?' selected':''}>${defaultLabel}</option>`];
+        // If the saved font isn't currently installed, still show it (marked) so the
+        // selection is preserved and the user knows it's missing.
+        if (current && current !== 'default' && !installed.includes(current)) {
+          opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (not installed)</option>`);
+        }
+        for (const f of installed) {
+          opts.push(`<option value="${escapeHtml(f)}"${current===f?' selected':''}>${escapeHtml(f)}</option>`);
+        }
+        sel.innerHTML = opts.join('');
+      };
+      fill(monoSel, appSettings.monoFont, 'Default (JetBrains Mono)');
+      fill(uiSel, appSettings.uiFont, 'Default (EB Garamond)');
+      if (statusEl) {
+        statusEl.textContent = installed.length
+          ? `Found ${installed.length} installed font${installed.length === 1 ? '' : 's'}. `
+          : 'No extra developer fonts detected. ';
+      }
+    })();
+
+    const nf = panel.querySelector('#nerdfonts-link');
+    if (nf) nf.onclick = (e) => {
+      e.preventDefault();
+      gs.openExternal('https://www.nerdfonts.com/font-downloads');
     };
   }
 
@@ -736,6 +913,7 @@ async function showSettingsDialog() {
         Object.keys(appChanges).forEach(k => delete appChanges[k]);
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
+        applyFonts(appSettings.monoFont, appSettings.uiFont);
         showToast('Preferences reset', 'success');
       }
     };
@@ -761,6 +939,7 @@ async function showSettingsDialog() {
     // Roll back any live theme/font preview changes
     applyTheme(appSettings.theme);
     applyFontScale(appSettings.fontScale);
+    applyFonts(appSettings.monoFont, appSettings.uiFont);
     modal.hide();
   };
 
@@ -784,6 +963,7 @@ async function showSettingsDialog() {
         // Re-apply in case Save changed anything
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
+        applyFonts(appSettings.monoFont, appSettings.uiFont);
       }
     }
 
@@ -819,7 +999,9 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   autoFetchOnFocus: true,
   confirmDestructive: true,
   defaultSshKeyPath: '',
-  fontScale: 1.0
+  fontScale: 1.0,
+  monoFont: 'default',
+  uiFont: 'default'
 };
 
 // Apply saved app settings (theme + font) at startup
@@ -829,6 +1011,7 @@ async function applySavedAppSettings() {
     if (r && r.ok) {
       applyTheme(r.data.theme);
       applyFontScale(r.data.fontScale);
+      applyFonts(r.data.monoFont, r.data.uiFont);
       // Mirror a few into state for downstream code
       if (typeof state !== 'undefined') {
         if (r.data.graphLimit) state.graphLimit = r.data.graphLimit;

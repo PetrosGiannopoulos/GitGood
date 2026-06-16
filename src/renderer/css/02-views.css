@@ -1089,7 +1089,7 @@
   border: 1px solid var(--crusader-red);
   box-shadow: 0 0 0 1px var(--ink-black), 0 0 40px color-mix(in srgb, var(--accent) 40%, transparent);
   min-width: 460px;
-  max-width: 720px;
+  max-width: min(940px, 94vw);
   max-height: 80vh;
   display: flex;
   flex-direction: column;

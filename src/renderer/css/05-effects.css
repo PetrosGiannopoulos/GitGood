@@ -564,6 +564,16 @@ html[class*='theme-'] .commit-search:focus {
 }
 .tool-dropdown-item .badge { margin-left: auto; }
 
+/* Small hint dot on the collapsed Sync button when there's anything to push/pull */
+.sync-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  margin-left: 5px;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent-bright) 70%, transparent);
+}
+
 /* ============================================
    LIGHT ALACRITTY THEMES — soften carved insets so depth reads as paper, not soot.
    (html.theme-light is set for imported light terminal palettes.)

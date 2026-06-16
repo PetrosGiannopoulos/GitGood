@@ -62,6 +62,19 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
+  // Allow the Local Font Access API (used to list installed fonts for the font picker);
+  // deny everything else by default. The renderer falls back to canvas detection if
+  // this is unavailable, so denial is harmless.
+  try {
+    const ses = mainWindow.webContents.session;
+    ses.setPermissionRequestHandler((wc, permission, callback) => {
+      callback(permission === 'local-fonts');
+    });
+    if (ses.setPermissionCheckHandler) {
+      ses.setPermissionCheckHandler((wc, permission) => permission === 'local-fonts');
+    }
+  } catch (e) { /* non-fatal */ }
+
   // Open DevTools when launched with --dev flag, or if env var is set
   if (process.argv.includes('--dev') || process.env.GITGOOD_DEBUG) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -2204,6 +2217,8 @@ const DEFAULT_APP_SETTINGS = {
   confirmDestructive: true,           // extra confirm on discard/force-push/etc.
   defaultSshKeyPath: '',              // pre-fill path for clone SSH key picker
   fontScale: 1.0,                     // UI font scale multiplier
+  monoFont: 'default',                // monospace font family (Nerd Font name or 'default')
+  uiFont: 'default',                  // interface font family (Nerd Font name or 'default')
 };
 
 function getAppSettings() {

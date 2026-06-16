@@ -120,8 +120,7 @@
         <div class="tool-dropdown" id="sync-dropdown">
           <button class="tool-btn" id="btn-sync" title="Sync with remote">
             <span class="tool-icon">⟳</span><span>Sync</span>
-            <span class="badge" id="pull-badge" style="display:none">0</span>
-            <span class="badge badge-push" id="push-badge" style="display:none">0</span>
+            <span class="sync-dot" id="sync-dot" style="display:none"></span>
             <span class="tool-caret">▾</span>
           </button>
           <div class="tool-dropdown-menu hidden" id="sync-menu">
@@ -132,10 +131,12 @@
             <button class="tool-dropdown-item" id="btn-pull">
               <span class="tool-icon">↓</span>
               <span class="tool-dropdown-label">Pull<small>Fetch and merge from remote</small></span>
+              <span class="badge" id="pull-badge" style="display:none">0</span>
             </button>
             <button class="tool-dropdown-item" id="btn-push">
               <span class="tool-icon">↑</span>
               <span class="tool-dropdown-label">Push<small>Upload commits to remote</small></span>
+              <span class="badge badge-push" id="push-badge" style="display:none">0</span>
             </button>
           </div>
         </div>

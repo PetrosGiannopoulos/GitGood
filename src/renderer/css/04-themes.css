@@ -216,13 +216,16 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
    ============================================ */
 .settings-dialog {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 220px 1fr;
+  width: min(900px, 92vw);
   min-width: 720px;
-  max-width: 880px;
   min-height: 60vh;
   max-height: 75vh;
   gap: 0;
 }
+/* When the modal hosts the settings dialog, drop body padding so the nav reaches the
+   edges and the content area gets full width. */
+.modal-body:has(.settings-dialog) { padding: 0; }
 
 .settings-nav {
   border-right: 1px solid var(--border);
@@ -298,8 +301,8 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
 
 .settings-row {
   display: grid;
-  grid-template-columns: 200px 1fr;
-  gap: 14px;
+  grid-template-columns: minmax(160px, 1fr) minmax(240px, 1.2fr);
+  gap: 18px;
   align-items: center;
   padding: 10px 0;
   border-bottom: 1px solid rgba(58, 48, 42, 0.4);
@@ -325,13 +328,16 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .settings-row input[type="text"],
 .settings-row input[type="email"],
 .settings-row input[type="number"],
 .settings-row select {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
   background: var(--bg);
   border: 1px solid var(--border-strong);
   color: var(--bone-white);
@@ -339,7 +345,9 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   font-size: 13px;
   padding: 7px 10px;
   outline: none;
+  border-radius: 4px;
 }
+.settings-row select { cursor: pointer; }
 
 .settings-row input:focus,
 .settings-row select:focus {
