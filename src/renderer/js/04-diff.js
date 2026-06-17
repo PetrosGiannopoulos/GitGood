@@ -30,6 +30,7 @@ function diffModeToggleHtml() {
   return `<span class="diff-view-toggle">` +
     `<button class="diff-view-btn${u}" data-diffmode="unified" title="Unified view">☰ Unified</button>` +
     `<button class="diff-view-btn${s}" data-diffmode="split" title="Side-by-side view">◫ Split</button>` +
+    `<button class="diff-view-btn diff-popout-btn" data-diffpopout="1" title="Pop the diff out into a large window">⤢ Pop Out</button>` +
   `</span>`;
 }
 
@@ -64,7 +65,7 @@ function renderDiffUnified(diffText, opts) {
       continue; // drop git plumbing
     }
     if (raw.startsWith('Binary files')) {
-      out.push(`<div class="diff-line hunk"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
+      out.push(`<div class="diff-notice">${escapeHtml(raw)}</div>`);
       continue;
     }
     if (raw.startsWith('@@')) {
@@ -96,7 +97,7 @@ function renderDiffUnified(diffText, opts) {
     const reason = truncatedByCap
       ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
       : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
-    html += `<div class="diff-line hunk" style="background:color-mix(in srgb, var(--accent) 12%, transparent);border-top:2px solid var(--accent);padding:10px;"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
+    html += `<div class="diff-notice">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div>`;
   }
   return html;
 }
@@ -220,7 +221,7 @@ function renderDiffSplit(diffText, opts) {
     const reason = truncatedByCap
       ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
       : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
-    html += `<div class="diff-line hunk" style="background:color-mix(in srgb, var(--accent) 12%, transparent);border-top:2px solid var(--accent);padding:10px;"><div class="diff-text" style="white-space:pre-wrap;font-style:italic">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div></div>`;
+    html += `<div class="diff-notice">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div>`;
   }
   return html;
 }

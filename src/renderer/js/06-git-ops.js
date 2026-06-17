@@ -941,14 +941,19 @@ function setDiffMode(mode) {
   document.querySelectorAll('.diff-view-toggle .diff-view-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.diffmode === mode));
 
-  // Re-render the Changes-tab diff (from memory) in the new mode.
-  if (_lastDiff) {
-    const el = document.getElementById('diff-content');
-    if (el) {
-      const prev = el.scrollTop;
-      el.innerHTML = renderDiff(_lastDiff.text, _lastDiff.opts);
-      el.scrollTop = prev;
+  // Re-render the Changes-tab diff for ITS currently-selected file. We deliberately do
+  // NOT use the shared _lastDiff here — that global is overwritten by commit diffs in
+  // the Graph/History tabs, which previously caused the Changes tab to show a commit's
+  // diff after viewing one. selectFile re-fetches the correct file in the new mode.
+  const changesDiffEl = document.getElementById('diff-content');
+  if (changesDiffEl) {
+    if (state.selectedFile) {
+      const prev = changesDiffEl.scrollTop;
+      // selectFile is async (re-fetches the diff); restore scroll once it settles.
+      Promise.resolve(selectFile(state.selectedFile, state.selectedFileStaged))
+        .then(() => { try { changesDiffEl.scrollTop = prev; } catch (e) {} });
     }
+    // If no file is selected in the Changes tab, leave its empty-state as-is.
   }
 
   // For the Graph/History commit previews, re-render ONLY the currently-selected file's
@@ -965,15 +970,193 @@ function setDiffMode(mode) {
       ? _historyDetailDiff.details : null;
     renderHistoryDetail(state.selectedCommit, d);
   }
+
+  // Keep the pop-out window in sync if it's open.
+  refreshPopoutDiff();
 }
 
 // One delegated listener handles every diff-view toggle (Changes pane + Graph/History
-// detail headers), since those headers are re-created dynamically.
+// detail headers + the popout header), since those headers are re-created dynamically.
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.diff-view-btn');
   if (!btn) return;
+  if (btn.dataset.diffpopout) { openDiffPopout(); return; }
   setDiffMode(btn.dataset.diffmode);
 });
+
+// ============================================
+// POP-OUT DIFF VIEWER — a large overlay with its own file list + filter + diff area,
+// independent of the panel grid. Works for the Changes tab and for commit previews.
+// ============================================
+// Build the popout's model: a list of files and a way to render each one's diff.
+// The model is chosen by the ACTIVE TAB, not by whatever diff DOM happens to exist —
+// otherwise a previously-viewed commit (whose .cfile-browser stays in the hidden
+// Graph/History panel) would hijack the Changes tab's pop-out.
+function buildPopoutModel() {
+  const tab = state.currentTab || 'graph';
+
+  // Changes tab → working-tree files (staged + unstaged), diff fetched on demand.
+  if (tab === 'changes') {
+    const staged = (state.stagedFiles || []).map(f => ({ ...f, staged: true }));
+    const unstaged = (state.unstagedFiles || []).map(f => ({ ...f, staged: false }));
+    const files = staged.concat(unstaged);
+    if (!files.length) return null;
+    return {
+      kind: 'changes',
+      label: 'Working tree changes',
+      files: files.map(f => ({ path: f.path, status: f.status, staged: f.staged })),
+      render: async (file, into) => {
+        into.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+        const result = file.staged ? await gs.diffStaged(file.path) : await gs.diffUnstaged(file.path);
+        if (!result.ok) { into.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(result.error)}</p></div>`; return; }
+        if (!result.data || !result.data.trim()) {
+          if (!file.staged) {
+            const fc = await gs.fileContent(file.path);
+            if (fc.ok && fc.data !== null) {
+              const lines = (fc.data || '').split('\n');
+              into.innerHTML = lines.map((l, i) => `<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${i+1}</div><div class="diff-text">+${escapeHtml(l)}</div></div>`).join('') || '<div class="empty-state"><p>Empty file.</p></div>';
+              return;
+            }
+          }
+          into.innerHTML = '<div class="empty-state"><p>No textual differences (binary or empty).</p></div>';
+          return;
+        }
+        into.innerHTML = renderDiff(result.data);
+      }
+    };
+  }
+
+  // Graph / History tab → reuse the active commit file browser's in-memory diffs.
+  const detailId = tab === 'history' ? 'history-detail' : 'graph-detail';
+  const detail = document.getElementById(detailId);
+  let owner = detail ? detail.querySelector('.cfile-browser') : null;
+  while (owner && !owner._cfiles) owner = owner.parentElement;
+  if (owner && owner._cfiles && owner._cfiles.length) {
+    const opts = owner._cfileOpts || {};
+    return {
+      kind: 'commit',
+      label: opts.hash ? `Commit ${String(opts.hash).slice(0,7)}` : 'Commit changes',
+      files: owner._cfiles.map(f => ({ path: f.path, status: f.status, _diff: f.diff })),
+      render: (file, into) => {
+        try { into.innerHTML = renderDiff(file._diff, opts); }
+        catch (e) { into.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(e.message||String(e))}</p></div>`; }
+      }
+    };
+  }
+  return null;
+}
+
+let _popoutModel = null;
+let _popoutActivePath = null;
+
+function renderPopoutFileList() {
+  const listEl = document.getElementById('diff-popout-filelist');
+  const filterEl = document.getElementById('diff-popout-filter');
+  if (!listEl || !_popoutModel) return;
+  const q = (filterEl && filterEl.value.trim().toLowerCase()) || '';
+  const terms = q.split(/\s+/).filter(Boolean);
+  const matches = (p) => terms.every(t => p.toLowerCase().includes(t));
+  listEl.innerHTML = '';
+  const shown = _popoutModel.files.filter(f => !terms.length || matches(f.path));
+  if (!shown.length) {
+    listEl.innerHTML = `<li class="file-empty">${q ? 'No matches for "'+escapeHtml(q)+'"' : 'No files'}</li>`;
+    return;
+  }
+  const letterFor = (s) => ({ added:'A', modified:'M', deleted:'D', renamed:'R', conflicted:'!', untracked:'U' })[s] || 'M';
+  shown.forEach(f => {
+    const li = document.createElement('li');
+    li.className = 'file-item' + (f.path === _popoutActivePath ? ' selected' : '');
+    li.innerHTML = `
+      <div class="file-status ${f.status || 'modified'}">${letterFor(f.status)}</div>
+      <div class="file-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</div>`;
+    li.onclick = () => selectPopoutFile(f);
+    listEl.appendChild(li);
+  });
+}
+
+async function selectPopoutFile(file) {
+  _popoutActivePath = file.path;
+  const content = document.getElementById('diff-popout-content');
+  const label = document.getElementById('diff-popout-label');
+  if (label) label.textContent = file.path;
+  // Update selected visual without a full re-render
+  document.querySelectorAll('#diff-popout-filelist .file-item').forEach(el =>
+    el.classList.toggle('selected', el.querySelector('.file-path')?.getAttribute('title') === file.path));
+  if (content && _popoutModel) await _popoutModel.render(file, content);
+}
+
+function openDiffPopout() {
+  const model = buildPopoutModel();
+  if (!model) { showToast('No changes to view', 'info', 2500); return; }
+  _popoutModel = model;
+  // Pick the currently-selected file if we can identify it, else the first file.
+  let initial = model.files[0];
+  if (model.kind === 'changes' && state.selectedFile) {
+    const found = model.files.find(f => f.path === state.selectedFile);
+    if (found) initial = found;
+  } else {
+    // commit: try the active cfile-item
+    const active = document.querySelector('.cfile-item.active .cfile-path, .cfile-item.active');
+    if (active) {
+      const path = (active.textContent || '').trim();
+      const found = model.files.find(f => path.includes(f.path));
+      if (found) initial = found;
+    }
+  }
+  _popoutActivePath = initial ? initial.path : null;
+
+  const filterEl = document.getElementById('diff-popout-filter');
+  if (filterEl) {
+    filterEl.value = '';
+    filterEl.oninput = () => renderPopoutFileList();
+    filterEl.onkeydown = (e) => { if (e.key === 'Escape') { e.stopPropagation(); filterEl.value=''; renderPopoutFileList(); } };
+  }
+  // Sync mode buttons
+  document.querySelectorAll('#diff-popout-toggle .diff-view-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.diffmode === state.diffMode));
+
+  renderPopoutFileList();
+  if (initial) selectPopoutFile(initial);
+
+  const overlay = document.getElementById('diff-popout-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+  setTimeout(() => { const f = document.getElementById('diff-popout-filter'); if (f) f.focus(); }, 40);
+}
+
+function closeDiffPopout() {
+  const overlay = document.getElementById('diff-popout-overlay');
+  if (overlay) overlay.classList.add('hidden');
+  _popoutModel = null;
+  _popoutActivePath = null;
+}
+
+// Re-render the currently shown popout file (e.g. after a Unified/Split change).
+function refreshPopoutDiff() {
+  if (!_popoutModel || !_popoutActivePath) return;
+  const overlay = document.getElementById('diff-popout-overlay');
+  if (!overlay || overlay.classList.contains('hidden')) return;
+  const file = _popoutModel.files.find(f => f.path === _popoutActivePath);
+  const content = document.getElementById('diff-popout-content');
+  if (file && content) _popoutModel.render(file, content);
+  document.querySelectorAll('#diff-popout-toggle .diff-view-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.diffmode === state.diffMode));
+}
+
+(() => {
+  const closeBtn = document.getElementById('diff-popout-close');
+  if (closeBtn) closeBtn.onclick = () => closeDiffPopout();
+  const overlay = document.getElementById('diff-popout-overlay');
+  // Note: intentionally NOT closing on backdrop click — only the Close button or Esc.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const ov = document.getElementById('diff-popout-overlay');
+      if (ov && !ov.classList.contains('hidden')) { e.preventDefault(); closeDiffPopout(); }
+    }
+  });
+})();
+
+// Clean up the persistence key from the earlier Expand build.
+try { localStorage.removeItem('gitgood:diff-focus'); } catch (e) {}
 
 // Reflect the restored mode on any static toggle present at load (the Changes header).
 (() => {

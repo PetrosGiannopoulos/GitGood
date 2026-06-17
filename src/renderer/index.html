@@ -497,6 +497,7 @@
                 <span class="diff-view-toggle" id="diff-view-toggle">
                   <button class="diff-view-btn active" data-diffmode="unified" title="Unified view">☰ Unified</button>
                   <button class="diff-view-btn" data-diffmode="split" title="Side-by-side view">◫ Split</button>
+                  <button class="diff-view-btn diff-popout-btn" data-diffpopout="1" title="Pop the diff out into a large window">⤢ Pop Out</button>
                 </span>
               </div>
               <div class="diff-content" id="diff-content">
@@ -567,6 +568,29 @@
       <div class="loading-overlay-title" id="loading-overlay-title">Summoning the chronicle…</div>
       <div class="loading-overlay-sub" id="loading-overlay-sub">Preparing thy realm</div>
       <div class="loading-overlay-bar"><div class="loading-overlay-bar-fill" id="loading-overlay-fill"></div></div>
+    </div>
+  </div>
+
+  <!-- Pop-out diff viewer -->
+  <div id="diff-popout-overlay" class="diff-popout-overlay hidden">
+    <div class="diff-popout-window">
+      <div class="diff-popout-titlebar">
+        <span class="diff-popout-title" id="diff-popout-label">Diff</span>
+        <div class="diff-popout-actions">
+          <span class="diff-view-toggle" id="diff-popout-toggle">
+            <button class="diff-view-btn" data-diffmode="unified" title="Unified view">☰ Unified</button>
+            <button class="diff-view-btn" data-diffmode="split" title="Side-by-side view">◫ Split</button>
+          </span>
+          <button class="mini-btn" id="diff-popout-close" title="Close (Esc)">✕ Close</button>
+        </div>
+      </div>
+      <div class="diff-popout-body">
+        <div class="diff-popout-files" id="diff-popout-files">
+          <input type="text" id="diff-popout-filter" class="changes-search" placeholder="Filter files…" autocomplete="off" />
+          <ul class="file-list" id="diff-popout-filelist"></ul>
+        </div>
+        <div class="diff-popout-content" id="diff-popout-content"></div>
+      </div>
     </div>
   </div>
 

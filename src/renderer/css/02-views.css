@@ -543,6 +543,22 @@
   border-left: 3px solid transparent;
 }
 
+/* Full-width notice block for binary / truncated-diff messages (wraps normally,
+   doesn't get squeezed into the diff grid's text column). */
+.diff-notice {
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-top: 2px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  color: var(--gold-accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-style: italic;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
 .diff-line .diff-gutter {
   color: var(--muted-text);
   text-align: right;
@@ -1360,3 +1376,108 @@
 .text-muted { color: var(--muted-text); }
 .text-mono { font-family: var(--font-mono); }
 
+
+/* ============================================
+   POP-OUT DIFF VIEWER
+   A large overlay window that shows the current diff independently of the panel layout.
+   ============================================ */
+.diff-popout-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9650;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.diff-popout-overlay.hidden { display: none; }
+
+.diff-popout-window {
+  width: 92vw;
+  height: 88vh;
+  max-width: 1500px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.diff-popout-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--shadow-black);
+  border-bottom: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.diff-popout-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--bone-white);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.diff-popout-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+/* Vertical body: filter + file list on top (full width), diff below. */
+.diff-popout-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.diff-popout-files {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--bg);
+  flex-shrink: 0;
+  max-height: 34vh;
+}
+.diff-popout-files .changes-search {
+  margin: 8px 10px;
+  flex: 0 0 auto;       /* fixed height, don't grow in the column */
+  width: auto;          /* stretch horizontally to the container minus margins */
+}
+.diff-popout-files .file-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.diff-popout-content {
+  flex: 1;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: var(--bg);
+  min-height: 0;
+}
+
+/* The popout's file rows only have a status chip + path (no checkbox/actions), so use a
+   2-column grid instead of the 4-column changes-list grid (which squashed the path). */
+.diff-popout-files .file-item {
+  grid-template-columns: 22px 1fr;
+}
+.diff-popout-files .file-path {
+  direction: ltr;
+  text-align: left;
+  min-width: 0;
+}
+/* Keep diff lines full-width inside the popout (don't let the 1fr text column collapse
+   to one-word-per-line); allow horizontal scroll for very long lines. */
+.diff-popout-content .diff-line { min-width: 100%; width: max-content; }
+.diff-popout-content .diff-line .diff-text { white-space: pre; overflow: visible; text-overflow: clip; }
+.diff-popout-content::-webkit-scrollbar { width: 12px; height: 12px; }
+.diff-popout-content::-webkit-scrollbar-track { background: var(--shadow-black); }
+.diff-popout-content::-webkit-scrollbar-thumb { background: var(--border-iron); border-radius: 6px; }
+.diff-popout-content::-webkit-scrollbar-thumb:hover { background: var(--accent); }
