@@ -951,6 +951,34 @@ ipcMain.handle('repo:stashDrop', wrap(async (_, index) => {
   return true;
 }));
 
+// Drop every auto-stash (current or legacy marker) bound to a given branch. Used to
+// prevent duplicate auto-stashes from accumulating across repeated checkouts. Drops
+// from the highest index downward so earlier indices stay valid during removal.
+ipcMain.handle('repo:dropAutoStashFor', wrap(async (_, branch) => {
+  const g = ensureGit();
+  if (!branch) return { dropped: 0 };
+  const SEP = '\x1f';
+  let listed = '';
+  try { listed = await g.raw(['stash', 'list', `--pretty=format:%gd${SEP}%s`]); }
+  catch (e) { return { dropped: 0 }; }
+  const stale = listed.split('\n').map(s => s.trim()).filter(Boolean)
+    .map(line => {
+      const [ref, message] = line.split(SEP);
+      const m = (ref || '').match(/stash@\{(\d+)\}/);
+      return { index: m ? parseInt(m[1], 10) : -1, message: message || '' };
+    })
+    .filter(s => s.index >= 0 && (
+      s.message.includes(`[GitGood auto] on ${branch}`) ||
+      s.message.includes(`[GitSouls auto] on ${branch}`)
+    ))
+    .sort((a, b) => b.index - a.index);
+  let dropped = 0;
+  for (const s of stale) {
+    try { await g.raw(['stash', 'drop', `stash@{${s.index}}`]); dropped++; } catch (e) { /* ignore */ }
+  }
+  return { dropped };
+}));
+
 // Find stashes whose message contains a given marker (used for branch-bound auto-stashes).
 // git's stash list shows "On <branch>: <user message>" so we substring-match.
 // Returns array of { index, ref, message, hash, date }.
@@ -995,6 +1023,29 @@ ipcMain.handle('repo:checkoutSafe', wrap(async (_, { branch, autoStashAll, disca
     if (dirty) {
       const fromBranch = status.current || 'detached';
       const stashMsg = `[GitGood auto] on ${fromBranch}`;
+      // Avoid duplicate auto-stashes: if an auto-stash bound to this same branch
+      // already exists (e.g. the user previously chose "Apply" which keeps the entry,
+      // or "Not Now"), drop it first so we never accumulate multiple copies of the
+      // same branch's auto-stash. Drop from the highest index downward so earlier
+      // indices stay valid while we remove.
+      try {
+        const SEP = '\x1f';
+        const listed = await g.raw(['stash', 'list', `--pretty=format:%gd${SEP}%s`]);
+        const stale = listed.split('\n').map(s => s.trim()).filter(Boolean)
+          .map(line => {
+            const [ref, message] = line.split(SEP);
+            const m = (ref || '').match(/stash@\{(\d+)\}/);
+            return { index: m ? parseInt(m[1], 10) : -1, message: message || '' };
+          })
+          .filter(s => s.index >= 0 && (
+            s.message.includes(`[GitGood auto] on ${fromBranch}`) ||
+            s.message.includes(`[GitSouls auto] on ${fromBranch}`)
+          ))
+          .sort((a, b) => b.index - a.index);
+        for (const s of stale) {
+          try { await g.raw(['stash', 'drop', `stash@{${s.index}}`]); } catch (e) { /* ignore */ }
+        }
+      } catch (e) { /* non-fatal: proceed to stash anyway */ }
       await g.stash(['push', '-u', '-m', stashMsg]);
     }
     await g.checkout(branch);

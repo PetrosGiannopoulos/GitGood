@@ -68,6 +68,7 @@ const api = {
   stashPop: (i) => ipcRenderer.invoke('repo:stashPop', i),
   stashApply: (i) => ipcRenderer.invoke('repo:stashApply', i),
   stashDrop: (i) => ipcRenderer.invoke('repo:stashDrop', i),
+  dropAutoStashFor: (branch) => ipcRenderer.invoke('repo:dropAutoStashFor', branch),
   stashFiles: (i) => ipcRenderer.invoke('repo:stashFiles', i),
   stashApplyFiles: (opts) => ipcRenderer.invoke('repo:stashApplyFiles', opts),
   stashFindByPrefix: (prefix) => ipcRenderer.invoke('repo:stashFindByPrefix', prefix),

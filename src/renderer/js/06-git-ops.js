@@ -274,6 +274,9 @@ async function promptCheckoutWithDirty(targetBranch, remoteSetup) {
       // then run our remote checkout (-b localName remoteBranch).
       if (mode === 'stash') {
         const stashMsg = autoStashMarkerFor(fromBranch);
+        // Drop any existing auto-stash bound to this branch first so repeated
+        // checkouts don't accumulate duplicate stashes.
+        try { await gs.dropAutoStashFor(fromBranch); } catch (e) { /* non-fatal */ }
         const sr = await withLoading('Stashing', () => gs.stash({ message: stashMsg, includeUntracked: true }));
         if (!sr.ok) { showToast('Stash failed: ' + sr.error, 'error', 6000); return; }
       } else if (mode === 'discard') {
