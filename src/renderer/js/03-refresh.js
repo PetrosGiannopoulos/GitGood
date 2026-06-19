@@ -341,7 +341,9 @@ function renderBranches() {
         // Extract local branch name from origin/main
         const localName = b.replace(/^[^/]+\//, '');
         showContextMenu([
-          { label: 'Checkout as local', icon: '⑂', action: () => checkoutRemoteBranch(b, localName) }
+          { label: 'Checkout as local', icon: '⑂', action: () => checkoutRemoteBranch(b, localName) },
+          'sep',
+          { label: 'Delete remote branch', icon: '✗', danger: true, action: () => deleteRemoteBranch(b) }
         ], e.pageX, e.pageY);
       };
       remoteList.appendChild(li);

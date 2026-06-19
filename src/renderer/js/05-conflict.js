@@ -46,24 +46,9 @@ function renderConflictBanner() {
 (() => {
   const viewBtn = $('#conflict-banner-view');
   if (viewBtn) viewBtn.onclick = () => {
-    const files = (state.conflicts && state.conflicts.files) || [];
-    // Find the first file that's still in conflict and is resolvable interactively
-    const firstText = files.find(f => {
-      const conflicted = /^U$/.test(f.indexStatus) || /^U$/.test(f.workingDir);
-      return conflicted && !f.isBinary && !f.deletedInOurs && !f.deletedInTheirs;
-    });
-    if (firstText) {
-      openConflictResolver(firstText.path);
-      return;
-    }
-    // No text conflict to resolve — fall back to switching to Changes tab so the user
-    // can use Keep File / Delete File / Use Ours / Use Theirs on the non-text conflicts.
-    const tab = document.querySelector('.tab[data-tab="changes"]');
-    if (tab) tab.click();
-    setTimeout(() => {
-      const first = document.querySelector('.conflict-file-item');
-      if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 100);
+    // Always open the resolver — it now hosts ALL conflict kinds (text, binary, modify/
+    // delete) with the file list on the left, so the click never silently no-ops.
+    openConflictResolver();
   };
 
   const continueBtn = $('#conflict-banner-continue');
@@ -116,13 +101,8 @@ function _renderConflictsSection() {
   // Remove any existing section first
   const existing = document.querySelector('.conflicts-section');
   if (existing) existing.remove();
-
   if (!files.length) return;
 
-  // Filter: files still appearing as conflicted in status (U in either column,
-  // or files reported by ls-files --unmerged at all — they are by definition unmerged)
-  // We use a permissive filter so that conflicts always surface, even if the status
-  // letters are unexpected (e.g. AA, DU, UA).
   const conflictedFiles = files.filter(f =>
     /^[UAD]$/.test(f.indexStatus || '') ||
     /^[UAD]$/.test(f.workingDir || '') ||
@@ -130,319 +110,341 @@ function _renderConflictsSection() {
   );
   if (!conflictedFiles.length) return;
 
-  // Insert at the top of the changes-files column (before the search wrap area's siblings)
   const stagedList = document.querySelector('#staged-files');
-  if (!stagedList) {
-    console.warn('[renderConflictsSection] #staged-files not in DOM');
-    return;
-  }
+  if (!stagedList) return;
   const filesCol = stagedList.closest('.changes-files');
-  if (!filesCol) {
-    console.warn('[renderConflictsSection] .changes-files not in DOM');
-    return;
-  }
+  if (!filesCol) return;
 
+  // The full conflict list now lives inside the resolver modal. Here in the Changes tab
+  // we only show a compact entry-point so the user can jump into the resolver.
   const section = document.createElement('div');
   section.className = 'conflicts-section';
   section.innerHTML = `
-    <div class="conflicts-header">
-      <span>⚔ Conflicts (${conflictedFiles.length})</span>
-      <button class="conflict-mini-btn" id="conflicts-resolve-all">⚜ Open Resolver</button>
+    <div class="conflicts-banner">
+      <span class="conflicts-banner-text">⚔ ${conflictedFiles.length} conflict${conflictedFiles.length === 1 ? '' : 's'} need resolution</span>
+      <button class="conflict-mini-btn" id="conflicts-open-resolver">⚜ Open Resolver</button>
     </div>
-    <ul class="conflict-file-list" id="conflict-file-list"></ul>
   `;
-
-  // Insert right after the search wrap and selection bar (i.e., before the first .changes-section)
   const firstChangesSec = filesCol.querySelector('.changes-section');
   if (firstChangesSec) filesCol.insertBefore(section, firstChangesSec);
   else filesCol.appendChild(section);
 
-  const list = section.querySelector('#conflict-file-list');
-  conflictedFiles.forEach(f => {
-    let kindLabel = 'both modified';
-    if (f.deletedInOurs && !f.deletedInTheirs) kindLabel = 'deleted by us · modified by them';
-    else if (f.deletedInTheirs && !f.deletedInOurs) kindLabel = 'modified by us · deleted by them';
-    else if (!f.base && f.ours && f.theirs) kindLabel = 'both added';
-    if (f.isBinary) kindLabel += ' · binary';
-
-    const li = document.createElement('li');
-    li.className = 'conflict-file-item';
-
-    // Three action sets depending on conflict kind
-    let actionsHtml = '';
-    if (f.deletedInOurs || f.deletedInTheirs) {
-      actionsHtml = `
-        <button class="conflict-mini-btn" data-action="keep" title="Keep the file (whichever side has it)">Keep File</button>
-        <button class="conflict-mini-btn" data-action="delete" title="Delete the file">Delete File</button>
-      `;
-    } else if (f.isBinary) {
-      actionsHtml = `
-        <button class="conflict-mini-btn" data-action="ours" title="Take our version">Use Ours</button>
-        <button class="conflict-mini-btn" data-action="theirs" title="Take their version">Use Theirs</button>
-      `;
-    } else {
-      actionsHtml = `
-        <button class="conflict-mini-btn" data-action="ours" title="Replace with our version">Use Ours</button>
-        <button class="conflict-mini-btn" data-action="theirs" title="Replace with their version">Use Theirs</button>
-        <button class="conflict-mini-btn primary" data-action="resolve" title="Open in three-way resolver">⚜ Resolve…</button>
-      `;
-    }
-
-    li.innerHTML = `
-      <div class="conflict-file-icon">⚔</div>
-      <div class="conflict-file-info">
-        <div class="conflict-file-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</div>
-        <div class="conflict-file-meta">${escapeHtml(kindLabel)}</div>
-      </div>
-      <div class="conflict-file-actions">${actionsHtml}</div>
-    `;
-
-    li.querySelectorAll('button[data-action]').forEach(btn => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        const action = btn.dataset.action;
-        if (action === 'ours' || action === 'theirs') {
-          const r = await withLoading(`Resolving with ${action}`, () => gs.conflictResolveSide({ filePath: f.path, side: action }));
-          if (handleResult(r, `Resolved with ${action}`)) await refreshAll();
-        } else if (action === 'keep') {
-          const r = await withLoading('Keeping file', () => gs.conflictKeepFile(f.path));
-          if (handleResult(r, 'File kept')) await refreshAll();
-        } else if (action === 'delete') {
-          const sure = await modal.confirm({
-            title: 'Delete File',
-            message: `Delete "${f.path}" as part of this conflict resolution? This stages the deletion.`,
-            danger: true, confirmText: 'Delete'
-          });
-          if (!sure) return;
-          const r = await withLoading('Deleting file', () => gs.conflictDeleteFile(f.path));
-          if (handleResult(r, 'File deleted')) await refreshAll();
-        } else if (action === 'resolve') {
-          openConflictResolver(f.path);
-        }
-      };
-    });
-
-    // Click on the row itself (not buttons) opens the resolver for text files
-    li.onclick = (e) => {
-      if (e.target.closest('button')) return;
-      if (!f.isBinary && !f.deletedInOurs && !f.deletedInTheirs) {
-        openConflictResolver(f.path);
-      }
-    };
-
-    list.appendChild(li);
-  });
-
-  // "Open Resolver" header button — opens first conflicted text file
-  const resolveAllBtn = section.querySelector('#conflicts-resolve-all');
-  if (resolveAllBtn) resolveAllBtn.onclick = () => {
-    const first = conflictedFiles.find(f => !f.isBinary && !f.deletedInOurs && !f.deletedInTheirs);
-    if (first) openConflictResolver(first.path);
-    else showToast('No text conflicts to resolve interactively', 'info');
-  };
+  const openBtn = section.querySelector('#conflicts-open-resolver');
+  if (openBtn) openBtn.onclick = () => openConflictResolver();
 }
 
 // ============================================
 // CONFLICT RESOLVER MODAL
 // ============================================
-async function openConflictResolver(filePath) {
-  // Fetch parsed hunks and the three versions
-  const parsedR = await withLoading('Loading conflict', () => gs.parseConflictFile(filePath));
-  if (!parsedR.ok) {
-    showToast('Could not parse: ' + parsedR.error, 'error', 6000);
+// =============================================================================
+// CONFLICT RESOLVER — persistent file list (left) + per-file editor (right).
+// Open with a file path (or omit to auto-pick the first). The dialog stays open across
+// resolutions: resolving a file removes it from the list and auto-loads the next.
+// =============================================================================
+
+// Helpers used by the editor (declared at module scope so they don't get rebuilt on each
+// file load).
+function _conflictResolutionLines(hunk, type) {
+  if (type === 'ours') return hunk.ours || [];
+  if (type === 'theirs') return hunk.theirs || [];
+  if (type === 'ours-theirs') return [...(hunk.ours || []), ...(hunk.theirs || [])];
+  if (type === 'theirs-ours') return [...(hunk.theirs || []), ...(hunk.ours || [])];
+  return [];
+}
+
+// Refresh the resolver's left-side file list from current state, keeping the modal open.
+function _refreshResolverFileList(container, currentPath, onPick) {
+  const files = ((state.conflicts && state.conflicts.files) || []).filter(f =>
+    /^[UAD]$/.test(f.indexStatus || '') ||
+    /^[UAD]$/.test(f.workingDir || '') ||
+    !f.indexStatus || !f.workingDir
+  );
+  container.innerHTML = '';
+  if (!files.length) {
+    container.innerHTML = '<li class="cr-files-empty">✓ All conflicts resolved</li>';
+    return files;
+  }
+  files.forEach(f => {
+    let kindLabel = 'both modified';
+    let kindClass = 'both';
+    if (f.deletedInOurs && !f.deletedInTheirs) { kindLabel = 'del by us · mod by them'; kindClass = 'del-ours'; }
+    else if (f.deletedInTheirs && !f.deletedInOurs) { kindLabel = 'mod by us · del by them'; kindClass = 'del-theirs'; }
+    else if (!f.base && f.ours && f.theirs) { kindLabel = 'both added'; kindClass = 'both-added'; }
+    else if (f.isBinary) { kindLabel = 'binary'; kindClass = 'binary'; }
+    const li = document.createElement('li');
+    li.className = 'cr-file-item' + (f.path === currentPath ? ' active' : '');
+    li.innerHTML = `
+      <div class="cr-file-icon">⚔</div>
+      <div class="cr-file-body">
+        <div class="cr-file-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</div>
+        <div class="cr-file-kind cr-kind-${kindClass}">${kindLabel}</div>
+      </div>`;
+    li.onclick = () => onPick(f);
+    container.appendChild(li);
+  });
+  return files;
+}
+
+// The resolver is a single modal that stays open across files. We track the currently-
+// loaded file's path so post-resolution we can advance to the next.
+let _resolverOpen = false;
+let _resolverCurrentPath = null;
+
+async function openConflictResolver(initialPath) {
+  // If already open, just switch to the requested file in the same dialog.
+  if (_resolverOpen) {
+    if (initialPath && initialPath !== _resolverCurrentPath) await _resolverLoadFile(initialPath);
     return;
   }
-  const { hunks, eol } = parsedR.data;
-  const fileEol = eol || '\n';
 
-  // Per-hunk resolution: index → { type: 'ours' | 'theirs' | 'ours-theirs' | 'theirs-ours' | 'custom', custom: string[] }
-  // Initialize: nothing resolved yet
-  const resolutions = new Map();
+  // Pick the first conflict if no path was given.
+  const allConflicts = ((state.conflicts && state.conflicts.files) || []).filter(f =>
+    /^[UAD]$/.test(f.indexStatus || '') || /^[UAD]$/.test(f.workingDir || '') || !f.indexStatus || !f.workingDir
+  );
+  if (!allConflicts.length) { showToast('No conflicts to resolve', 'info'); return; }
+  let startPath = initialPath || allConflicts[0].path;
 
+  // Build the shell: title + two-pane body (file list | editor) + footer (Done).
   const body = document.createElement('div');
-  body.className = 'conflict-resolver';
+  body.className = 'conflict-resolver-shell';
   body.innerHTML = `
-    <div class="conflict-resolver-toolbar">
-      <span class="text-red">⚔</span>
-      <span class="text-mono">${escapeHtml(filePath)}</span>
-      <span class="conflict-resolver-progress" id="cr-progress"></span>
+    <div class="cr-files-pane">
+      <div class="cr-files-header">Conflicting files</div>
+      <ul class="cr-files-list" id="cr-files-list"></ul>
     </div>
-    <div class="conflict-resolver-body" id="cr-body"></div>
+    <div class="cr-editor-pane" id="cr-editor-pane">
+      <div class="cr-editor-loading">Loading…</div>
+    </div>
   `;
 
-  const bodyEl = body.querySelector('#cr-body');
-  const conflictHunkIndices = [];
+  const filesListEl = body.querySelector('#cr-files-list');
+  const editorPaneEl = body.querySelector('#cr-editor-pane');
 
-  hunks.forEach((h, idx) => {
-    if (h.type === 'common') {
-      const div = document.createElement('div');
-      div.className = 'cr-hunk-common';
-      div.innerHTML = h.lines.map(l => `<div class="cr-hunk-common-line"><span class="cr-ln"></span><span>${escapeHtml(l) || '&nbsp;'}</span></div>`).join('');
-      bodyEl.appendChild(div);
-    } else {
-      conflictHunkIndices.push(idx);
-      const div = document.createElement('div');
-      div.className = 'cr-hunk-conflict';
-      div.dataset.hunkIdx = idx;
-      div.innerHTML = `
-        <div class="cr-hunk-actions">
-          <span class="cr-label">Conflict #${conflictHunkIndices.length}</span>
-          <button class="cr-action" data-pick="ours">Take Ours</button>
-          <button class="cr-action" data-pick="theirs">Take Theirs</button>
-          <button class="cr-action" data-pick="ours-theirs">Both (Ours, Theirs)</button>
-          <button class="cr-action" data-pick="theirs-ours">Both (Theirs, Ours)</button>
-          <button class="cr-action" data-pick="custom">✎ Edit</button>
-        </div>
-        <div class="cr-sides">
-          <div class="cr-side ours">
-            <div class="cr-side-header">⚔ Ours · ${escapeHtml(h.oursLabel || 'HEAD')}</div>
-            ${(h.ours || []).map(l => `<div class="cr-side-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('')}
-          </div>
-          <div class="cr-side theirs">
-            <div class="cr-side-header">⚔ Theirs · ${escapeHtml(h.theirsLabel || 'incoming')}</div>
-            ${(h.theirs || []).map(l => `<div class="cr-side-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('')}
-          </div>
-        </div>
-        <div class="cr-resolution" data-resolution style="display:none">
-          <div class="cr-resolution-header">✓ Resolution</div>
-          <div class="cr-resolution-content"></div>
-        </div>
-      `;
+  // Footer button — closes the resolver. Continuing/aborting the operation stays on the
+  // top banner (deliberate: those are operation-level, not per-file).
+  const doneBtn = document.createElement('button');
+  doneBtn.className = 'btn-medieval primary';
+  doneBtn.textContent = 'Done';
+  doneBtn.onclick = () => { _resolverOpen = false; _resolverCurrentPath = null; modal.hide(); };
 
-      div.querySelectorAll('button[data-pick]').forEach(btn => {
-        btn.onclick = () => {
-          const pick = btn.dataset.pick;
-          if (pick === 'custom') {
-            // Replace resolution area with a textarea pre-filled with current resolution or ours
-            const existing = resolutions.get(idx);
-            const initial = existing && existing.custom
-              ? existing.custom.join('\n')
-              : computeResolutionLines(h, existing ? existing.type : 'ours').join('\n');
-            const resArea = div.querySelector('[data-resolution]');
-            resArea.style.display = 'block';
-            const contentDiv = resArea.querySelector('.cr-resolution-content');
-            contentDiv.innerHTML = `<textarea class="cr-editor">${escapeHtml(initial)}</textarea>`;
-            const ta = contentDiv.querySelector('textarea');
-            ta.focus();
-            ta.oninput = () => {
-              resolutions.set(idx, { type: 'custom', custom: ta.value.split('\n') });
-              renderProgress();
-            };
-            // Set initial state
-            resolutions.set(idx, { type: 'custom', custom: ta.value.split('\n') });
-            div.classList.add('resolved');
-            // Update button states
-            div.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === btn));
-          } else {
-            resolutions.set(idx, { type: pick });
-            div.classList.add('resolved');
-            div.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === btn));
-            // Show resolution preview
-            const resArea = div.querySelector('[data-resolution]');
-            resArea.style.display = 'block';
-            const contentDiv = resArea.querySelector('.cr-resolution-content');
-            const lines = computeResolutionLines(h, pick);
-            contentDiv.innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
-          }
-          renderProgress();
-        };
-      });
+  // Refresh the file list, with click → load that file.
+  const onPick = (f) => _resolverLoadFile(f.path);
+  _refreshResolverFileList(filesListEl, startPath, onPick);
 
-      bodyEl.appendChild(div);
+  // Loader for a single file's editor (replaces the right pane content).
+  async function _resolverLoadFile(filePath) {
+    _resolverCurrentPath = filePath;
+    // Re-highlight selected file
+    _refreshResolverFileList(filesListEl, filePath, onPick);
+
+    const conflictEntry = ((state.conflicts && state.conflicts.files) || []).find(f => f.path === filePath);
+    const isBinary = !!(conflictEntry && conflictEntry.isBinary);
+    const isModDel = !!(conflictEntry && (conflictEntry.deletedInOurs || conflictEntry.deletedInTheirs));
+
+    editorPaneEl.innerHTML = `<div class="cr-editor-loading">Loading ${escapeHtml(filePath)}…</div>`;
+
+    // Non-text conflicts (binary, modify/delete) → action panel instead of hunk editor.
+    if (isBinary || isModDel) {
+      editorPaneEl.innerHTML = '';
+      const panel = document.createElement('div');
+      panel.className = 'cr-nontext-panel';
+      let blurb;
+      if (conflictEntry.deletedInOurs && !conflictEntry.deletedInTheirs) {
+        blurb = `<strong>${escapeHtml(filePath)}</strong> was deleted on your side but modified on the incoming side. Keep the incoming version, or confirm the deletion.`;
+      } else if (conflictEntry.deletedInTheirs && !conflictEntry.deletedInOurs) {
+        blurb = `<strong>${escapeHtml(filePath)}</strong> was modified on your side but deleted on the incoming side. Keep your modified version, or delete it as the incoming side did.`;
+      } else if (isBinary) {
+        blurb = `<strong>${escapeHtml(filePath)}</strong> is a binary file with conflicting versions. Pick one side — it can't be merged line-by-line.`;
+      }
+      panel.innerHTML = `
+        <div class="cr-nontext-header">${escapeHtml(filePath)}</div>
+        <p class="cr-nontext-text">${blurb}</p>
+        <div class="cr-nontext-actions"></div>`;
+      editorPaneEl.appendChild(panel);
+      const actions = panel.querySelector('.cr-nontext-actions');
+
+      const mkBtn = (label, cls, action) => {
+        const b = document.createElement('button');
+        b.className = 'btn-medieval ' + (cls || '');
+        b.textContent = label;
+        b.onclick = async () => { await action(); await _afterFileResolved(filePath); };
+        actions.appendChild(b);
+      };
+
+      if (conflictEntry.deletedInOurs && !conflictEntry.deletedInTheirs) {
+        mkBtn('⚿ Keep incoming version', 'primary', async () => {
+          const r = await withLoading('Keeping file', () => gs.conflictKeepFile(filePath));
+          if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+        });
+        mkBtn('✗ Confirm deletion', 'danger', async () => {
+          const r = await withLoading('Deleting', () => gs.conflictDeleteFile(filePath));
+          if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+        });
+      } else if (conflictEntry.deletedInTheirs && !conflictEntry.deletedInOurs) {
+        mkBtn('⚿ Keep my version', 'primary', async () => {
+          const r = await withLoading('Keeping file', () => gs.conflictKeepFile(filePath));
+          if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+        });
+        mkBtn('✗ Delete (as incoming)', 'danger', async () => {
+          const r = await withLoading('Deleting', () => gs.conflictDeleteFile(filePath));
+          if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+        });
+      } else if (isBinary) {
+        mkBtn('⚔ Use Ours', 'primary', async () => {
+          const r = await withLoading('Using ours', () => gs.conflictUseOurs(filePath));
+          if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+        });
+        mkBtn('⚔ Use Theirs', '', async () => {
+          const r = await withLoading('Using theirs', () => gs.conflictUseTheirs(filePath));
+          if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+        });
+      }
+      return;
     }
-  });
 
-  function computeResolutionLines(hunk, type) {
-    if (type === 'ours') return hunk.ours || [];
-    if (type === 'theirs') return hunk.theirs || [];
-    if (type === 'ours-theirs') return [...(hunk.ours || []), ...(hunk.theirs || [])];
-    if (type === 'theirs-ours') return [...(hunk.theirs || []), ...(hunk.ours || [])];
-    return [];
-  }
+    // Text conflict — parse and render the hunk editor.
+    const parsedR = await gs.parseConflictFile(filePath);
+    if (!parsedR.ok) {
+      editorPaneEl.innerHTML = `<div class="cr-editor-error">Could not parse ${escapeHtml(filePath)}: ${escapeHtml(parsedR.error)}</div>`;
+      return;
+    }
+    const { hunks, eol } = parsedR.data;
+    const fileEol = eol || '\n';
 
-  function renderProgress() {
-    const total = conflictHunkIndices.length;
-    const done = conflictHunkIndices.filter(i => resolutions.has(i)).length;
-    const progress = body.querySelector('#cr-progress');
-    if (progress) progress.innerHTML = `Resolved <strong>${done}</strong> / ${total} hunks`;
-    if (saveBtn) {
+    const resolutions = new Map();
+
+    editorPaneEl.innerHTML = `
+      <div class="conflict-resolver-toolbar">
+        <span class="text-red">⚔</span>
+        <span class="text-mono cr-current-path">${escapeHtml(filePath)}</span>
+        <span class="conflict-resolver-progress" id="cr-progress"></span>
+        <span class="cr-toolbar-spacer"></span>
+        <button class="mini-btn" id="cr-all-ours" title="Take ours for every hunk">All Ours</button>
+        <button class="mini-btn" id="cr-all-theirs" title="Take theirs for every hunk">All Theirs</button>
+        <button class="mini-btn primary" id="cr-save" disabled>✓ Save &amp; Mark Resolved</button>
+      </div>
+      <div class="conflict-resolver-body" id="cr-body"></div>
+    `;
+    const bodyEl = editorPaneEl.querySelector('#cr-body');
+    const progressEl = editorPaneEl.querySelector('#cr-progress');
+    const saveBtn = editorPaneEl.querySelector('#cr-save');
+    const allOursBtn = editorPaneEl.querySelector('#cr-all-ours');
+    const allTheirsBtn = editorPaneEl.querySelector('#cr-all-theirs');
+
+    const conflictHunkIndices = [];
+
+    hunks.forEach((h, idx) => {
+      if (h.type === 'common') {
+        const div = document.createElement('div');
+        div.className = 'cr-hunk-common';
+        div.innerHTML = h.lines.map(l => `<div class="cr-hunk-common-line"><span class="cr-ln"></span><span>${escapeHtml(l) || '&nbsp;'}</span></div>`).join('');
+        bodyEl.appendChild(div);
+      } else {
+        conflictHunkIndices.push(idx);
+        const div = document.createElement('div');
+        div.className = 'cr-hunk-conflict';
+        div.dataset.hunkIdx = idx;
+        div.innerHTML = `
+          <div class="cr-hunk-actions">
+            <span class="cr-label">Conflict #${conflictHunkIndices.length}</span>
+            <button class="cr-action" data-pick="ours">Take Ours</button>
+            <button class="cr-action" data-pick="theirs">Take Theirs</button>
+            <button class="cr-action" data-pick="ours-theirs">Both (Ours, Theirs)</button>
+            <button class="cr-action" data-pick="theirs-ours">Both (Theirs, Ours)</button>
+            <button class="cr-action" data-pick="custom">✎ Edit</button>
+          </div>
+          <div class="cr-sides">
+            <div class="cr-side ours">
+              <div class="cr-side-header">⚔ Ours · ${escapeHtml(h.oursLabel || 'HEAD')}</div>
+              ${(h.ours || []).map(l => `<div class="cr-side-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('')}
+            </div>
+            <div class="cr-side theirs">
+              <div class="cr-side-header">⚔ Theirs · ${escapeHtml(h.theirsLabel || 'incoming')}</div>
+              ${(h.theirs || []).map(l => `<div class="cr-side-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('')}
+            </div>
+          </div>
+          <div class="cr-resolution" data-resolution style="display:none">
+            <div class="cr-resolution-header">✓ Resolution</div>
+            <div class="cr-resolution-content"></div>
+          </div>
+        `;
+
+        div.querySelectorAll('button[data-pick]').forEach(btn => {
+          btn.onclick = () => {
+            const pick = btn.dataset.pick;
+            if (pick === 'custom') {
+              const existing = resolutions.get(idx);
+              const initial = existing && existing.custom
+                ? existing.custom.join('\n')
+                : _conflictResolutionLines(h, existing ? existing.type : 'ours').join('\n');
+              const resArea = div.querySelector('[data-resolution]');
+              resArea.style.display = 'block';
+              const contentDiv = resArea.querySelector('.cr-resolution-content');
+              contentDiv.innerHTML = `<textarea class="cr-editor">${escapeHtml(initial)}</textarea>`;
+              const ta = contentDiv.querySelector('textarea');
+              ta.focus();
+              ta.oninput = () => {
+                resolutions.set(idx, { type: 'custom', custom: ta.value.split('\n') });
+                renderProgress();
+              };
+              resolutions.set(idx, { type: 'custom', custom: ta.value.split('\n') });
+              div.classList.add('resolved');
+              div.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === btn));
+            } else {
+              resolutions.set(idx, { type: pick });
+              div.classList.add('resolved');
+              div.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === btn));
+              const resArea = div.querySelector('[data-resolution]');
+              resArea.style.display = 'block';
+              const contentDiv = resArea.querySelector('.cr-resolution-content');
+              const lines = _conflictResolutionLines(h, pick);
+              contentDiv.innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
+            }
+            renderProgress();
+          };
+        });
+        bodyEl.appendChild(div);
+      }
+    });
+
+    function renderProgress() {
+      const total = conflictHunkIndices.length;
+      const done = conflictHunkIndices.filter(i => resolutions.has(i)).length;
+      progressEl.innerHTML = `Resolved <strong>${done}</strong> / ${total} hunks`;
       saveBtn.disabled = done < total;
       saveBtn.title = done < total ? `${total - done} hunk(s) remain` : 'Save and mark as resolved';
     }
-  }
+    renderProgress();
 
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'btn-medieval';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.onclick = () => modal.hide();
-
-  const allOursBtn = document.createElement('button');
-  allOursBtn.className = 'btn-medieval';
-  allOursBtn.textContent = 'All Ours';
-  allOursBtn.title = 'Take ours for every remaining conflict';
-  allOursBtn.onclick = () => {
-    conflictHunkIndices.forEach(i => {
-      if (!resolutions.has(i)) {
-        resolutions.set(i, { type: 'ours' });
-        const hunkDiv = body.querySelector(`[data-hunk-idx="${i}"]`);
-        if (hunkDiv) {
-          hunkDiv.classList.add('resolved');
-          const oursBtn = hunkDiv.querySelector('button[data-pick="ours"]');
-          if (oursBtn) {
-            hunkDiv.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === oursBtn));
-          }
-          const resArea = hunkDiv.querySelector('[data-resolution]');
-          if (resArea) {
-            resArea.style.display = 'block';
-            const lines = hunks[i].ours || [];
-            resArea.querySelector('.cr-resolution-content').innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
+    const applyAll = (type) => {
+      conflictHunkIndices.forEach(i => {
+        if (!resolutions.has(i)) {
+          resolutions.set(i, { type });
+          const hunkDiv = bodyEl.querySelector(`[data-hunk-idx="${i}"]`);
+          if (hunkDiv) {
+            hunkDiv.classList.add('resolved');
+            const pickBtn = hunkDiv.querySelector(`button[data-pick="${type}"]`);
+            if (pickBtn) hunkDiv.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === pickBtn));
+            const resArea = hunkDiv.querySelector('[data-resolution]');
+            if (resArea) {
+              resArea.style.display = 'block';
+              const lines = type === 'ours' ? (hunks[i].ours || []) : (hunks[i].theirs || []);
+              resArea.querySelector('.cr-resolution-content').innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
+            }
           }
         }
-      }
-    });
-    renderProgress();
-  };
+      });
+      renderProgress();
+    };
+    allOursBtn.onclick = () => applyAll('ours');
+    allTheirsBtn.onclick = () => applyAll('theirs');
 
-  const allTheirsBtn = document.createElement('button');
-  allTheirsBtn.className = 'btn-medieval';
-  allTheirsBtn.textContent = 'All Theirs';
-  allTheirsBtn.onclick = () => {
-    conflictHunkIndices.forEach(i => {
-      if (!resolutions.has(i)) {
-        resolutions.set(i, { type: 'theirs' });
-        const hunkDiv = body.querySelector(`[data-hunk-idx="${i}"]`);
-        if (hunkDiv) {
-          hunkDiv.classList.add('resolved');
-          const theirsBtn = hunkDiv.querySelector('button[data-pick="theirs"]');
-          if (theirsBtn) {
-            hunkDiv.querySelectorAll('button[data-pick]').forEach(b => b.classList.toggle('active', b === theirsBtn));
-          }
-          const resArea = hunkDiv.querySelector('[data-resolution]');
-          if (resArea) {
-            resArea.style.display = 'block';
-            const lines = hunks[i].theirs || [];
-            resArea.querySelector('.cr-resolution-content').innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
-          }
-        }
-      }
-    });
-    renderProgress();
-  };
-
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'btn-medieval primary';
-  saveBtn.innerHTML = '<span class="btn-icon">✓</span> Save & Mark Resolved';
-  saveBtn.disabled = true;
-  saveBtn.onclick = async () => {
-    // Build the final file content by walking hunks and substituting resolutions
-    const out = [];
-    hunks.forEach((h, idx) => {
-      if (h.type === 'common') {
-        out.push(...h.lines);
-      } else {
+    saveBtn.onclick = async () => {
+      const out = [];
+      hunks.forEach((h, idx) => {
+        if (h.type === 'common') { out.push(...h.lines); return; }
         const r = resolutions.get(idx);
-        if (!r) {
-          // Should not happen since save is disabled until all resolved, but be safe
+        if (!r) { // shouldn't reach (save disabled), but be safe
           out.push(`<<<<<<< ${h.oursLabel || 'HEAD'}`);
           out.push(...(h.ours || []));
           out.push('=======');
@@ -451,29 +453,53 @@ async function openConflictResolver(filePath) {
         } else if (r.type === 'custom') {
           out.push(...(r.custom || []));
         } else {
-          out.push(...computeResolutionLines(h, r.type));
+          out.push(..._conflictResolutionLines(h, r.type));
         }
-      }
-    });
-    const content = out.join(fileEol);
-    modal.hide();
+      });
+      const content = out.join(fileEol);
+      const writeR = await gs.writeFile({ path: filePath, content });
+      if (!writeR.ok) { showToast('Write failed: ' + writeR.error, 'error', 6000); return; }
+      const markR = await gs.conflictMarkResolved(filePath);
+      if (!markR.ok) { showToast('Mark failed: ' + markR.error, 'error', 6000); return; }
+      await _afterFileResolved(filePath);
+    };
+  }
 
-    // Write the resolved file, then stage it
-    const writeR = await gs.writeFile({ path: filePath, content });
-    if (!writeR.ok) { showToast('Write failed: ' + writeR.error, 'error', 6000); return; }
-    const markR = await gs.conflictMarkResolved(filePath);
-    if (!handleResult(markR, `Resolved: ${filePath}`)) return;
+  // Called after any file is resolved: refresh global conflict state, update the file
+  // list (removing the just-resolved entry), and auto-advance to the next file or show a
+  // success state if none remain.
+  async function _afterFileResolved(filePath) {
+    showToast(`Resolved: ${filePath}`, 'success', 2500);
     await refreshAll();
-  };
+    const remaining = _refreshResolverFileList(filesListEl, null, onPick);
+    if (!remaining.length) {
+      editorPaneEl.innerHTML = `
+        <div class="cr-all-done">
+          <div class="cr-all-done-icon">✓</div>
+          <h3>All conflicts resolved</h3>
+          <p class="text-muted">You can now <strong>Continue</strong> the operation from the top banner to commit the merge result, or <strong>Done</strong> to close this dialog.</p>
+        </div>`;
+      _resolverCurrentPath = null;
+    } else {
+      await _resolverLoadFile(remaining[0].path);
+    }
+  }
 
-  renderProgress();
-
-  modal.show({
-    title: 'Resolve Conflict',
-    body,
-    footer: [cancelBtn, allOursBtn, allTheirsBtn, saveBtn]
-  });
+  // Start
+  _resolverOpen = true;
+  modal.show({ title: 'Resolve Conflicts', body, footer: [doneBtn] });
+  await _resolverLoadFile(startPath);
 }
+
+// When the modal closes externally, clear our open-state flag.
+(() => {
+  const overlay = document.getElementById('modal-overlay');
+  if (!overlay) return;
+  const obs = new MutationObserver(() => {
+    if (overlay.classList.contains('hidden')) { _resolverOpen = false; _resolverCurrentPath = null; }
+  });
+  obs.observe(overlay, { attributes: true, attributeFilter: ['class'] });
+})();
 
 
 // ============================================

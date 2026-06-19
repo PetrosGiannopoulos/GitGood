@@ -40,6 +40,7 @@ const api = {
 
   // Commit / sync
   commit: (msg) => ipcRenderer.invoke('repo:commit', msg),
+  commitPaths: (opts) => ipcRenderer.invoke('repo:commitPaths', opts),
   push: (opts) => ipcRenderer.invoke('repo:push', opts),
   pull: () => ipcRenderer.invoke('repo:pull'),
   fetch: () => ipcRenderer.invoke('repo:fetch'),
@@ -48,6 +49,7 @@ const api = {
   checkout: (b) => ipcRenderer.invoke('repo:checkout', b),
   createBranch: (opts) => ipcRenderer.invoke('repo:createBranch', opts),
   deleteBranch: (opts) => ipcRenderer.invoke('repo:deleteBranch', opts),
+  deleteRemoteBranch: (ref) => ipcRenderer.invoke('repo:deleteRemoteBranch', ref),
   merge: (opts) => ipcRenderer.invoke('repo:merge', opts),
   mergePreview: (b) => ipcRenderer.invoke('repo:mergePreview', b),
   mergeAbort: () => ipcRenderer.invoke('repo:mergeAbort'),
@@ -83,6 +85,8 @@ const api = {
   conflictMarkResolved: (filePath) => ipcRenderer.invoke('repo:conflictMarkResolved', filePath),
   conflictKeepFile: (filePath) => ipcRenderer.invoke('repo:conflictKeepFile', filePath),
   conflictDeleteFile: (filePath) => ipcRenderer.invoke('repo:conflictDeleteFile', filePath),
+  conflictUseOurs: (filePath) => ipcRenderer.invoke('repo:conflictUseOurs', filePath),
+  conflictUseTheirs: (filePath) => ipcRenderer.invoke('repo:conflictUseTheirs', filePath),
   conflictRestoreMarkers: (filePath) => ipcRenderer.invoke('repo:conflictRestoreMarkers', filePath),
   parseConflictFile: (filePath) => ipcRenderer.invoke('repo:parseConflictFile', filePath),
   writeFile: (opts) => ipcRenderer.invoke('repo:writeFile', opts),

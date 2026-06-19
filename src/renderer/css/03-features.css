@@ -1534,3 +1534,211 @@ body.resizing-panes * {
   user-select: none !important;
 }
 
+
+/* ============================================
+   PRE-MERGE "resolve uncommitted changes" dialog
+   ============================================ */
+.premerge-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0 6px;
+}
+.premerge-selectall {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--bone-white);
+  cursor: pointer;
+  user-select: none;
+}
+.premerge-count { font-size: 12px; color: var(--muted-text); font-family: var(--font-mono); }
+.premerge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 42vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.premerge-item { border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.premerge-item:last-child { border-bottom: none; }
+.premerge-row {
+  display: grid;
+  grid-template-columns: 22px 22px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.premerge-row:hover { background: var(--bg-panel); }
+.premerge-cb { cursor: pointer; }
+.premerge-status {
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  border-radius: 3px;
+  color: var(--head-pill-text, #fff);
+  background: var(--accent);
+}
+.premerge-status.s-M { background: color-mix(in srgb, var(--gold-accent) 75%, transparent); color: #1a1400; }
+.premerge-status.s-A { background: color-mix(in srgb, var(--added) 80%, transparent); color: #03210a; }
+.premerge-status.s-D { background: color-mix(in srgb, var(--crusader-red) 80%, transparent); color: #fff; }
+.premerge-status.s-U { background: color-mix(in srgb, var(--muted-text) 60%, transparent); color: #fff; }
+.premerge-status.s-R { background: color-mix(in srgb, var(--accent) 70%, transparent); }
+.premerge-path {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* ============================================
+   CONFLICT RESOLVER — file list (left) + editor (right)
+   ============================================ */
+.conflict-resolver-shell {
+  display: flex;
+  flex-direction: column;
+  width: min(1280px, 96vw);
+  min-height: 65vh;
+  max-height: 80vh;
+}
+/* The resolver benefits from extra horizontal room for the diff sides; widen the modal
+   only when it actually contains a resolver. Also zero modal-body padding so the file
+   list and editor span the full width edge-to-edge. */
+.modal:has(.conflict-resolver-shell) { max-width: min(1280px, 96vw); width: min(1280px, 96vw); }
+.modal-body:has(.conflict-resolver-shell) { padding: 0; }
+.cr-files-pane {
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  max-height: 32vh;
+}
+.cr-files-header {
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--gold-accent);
+  border-bottom: 1px solid var(--border);
+  background: var(--shadow-black);
+  flex-shrink: 0;
+}
+.cr-files-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.cr-file-item {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 9px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+.cr-file-item:hover { background: var(--bg-panel); }
+.cr-file-item.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-left: 3px solid var(--accent);
+  padding-left: 9px;
+}
+.cr-file-icon { color: var(--crusader-red); font-size: 13px; padding-top: 2px; }
+.cr-file-body { min-width: 0; }
+.cr-file-path {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--bone-white);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cr-file-kind {
+  font-size: 11px;
+  color: var(--muted-text);
+  margin-top: 2px;
+  font-style: italic;
+}
+.cr-kind-binary { color: color-mix(in srgb, var(--gold-accent) 80%, var(--muted-text)); }
+.cr-kind-del-ours, .cr-kind-del-theirs { color: color-mix(in srgb, var(--crusader-red) 70%, var(--muted-text)); }
+
+.cr-files-empty { padding: 16px; color: var(--muted-text); text-align: center; font-style: italic; }
+
+/* Right pane — editor or non-text panel */
+.cr-editor-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.cr-editor-loading, .cr-editor-error {
+  padding: 24px;
+  color: var(--muted-text);
+  font-style: italic;
+}
+.cr-editor-error { color: var(--crusader-red); }
+.cr-toolbar-spacer { flex: 1; }
+.conflict-resolver-toolbar { flex-shrink: 0; }
+.conflict-resolver-body { flex: 1; overflow-y: auto; min-height: 0; }
+
+/* Non-text (binary / modify-delete) resolution panel */
+.cr-nontext-panel {
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.cr-nontext-header {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--gold-accent);
+  word-break: break-all;
+}
+.cr-nontext-text { color: var(--text-dim); line-height: 1.6; font-size: 13px; }
+.cr-nontext-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* All-done state */
+.cr-all-done {
+  padding: 40px 28px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.cr-all-done-icon {
+  font-size: 48px;
+  color: var(--added);
+  margin-bottom: 8px;
+}
+.cr-all-done h3 {
+  font-family: var(--font-display, var(--font-body));
+  font-size: 20px;
+  color: var(--bone-white);
+  margin: 0 0 10px;
+}
+
+/* Compact Changes-tab entry-point banner */
+.conflicts-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--crusader-red) 14%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--crusader-red) 40%, transparent);
+}
+.conflicts-banner-text { color: var(--gold-accent); font-size: 13px; font-weight: 600; }

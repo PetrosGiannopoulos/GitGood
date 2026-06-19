@@ -605,6 +605,18 @@ ipcMain.handle('repo:commit', wrap(async (_, { message, description }) => {
   return result;
 }));
 
+// Commit only specific paths (stages them first, then commits just those paths). Used by
+// the pre-merge dialog so the user can commit a chosen subset of dirty files.
+ipcMain.handle('repo:commitPaths', wrap(async (_, { message, paths }) => {
+  const g = ensureGit();
+  if (!message || !message.trim()) throw new Error('Commit message required');
+  if (!Array.isArray(paths) || !paths.length) throw new Error('No files selected to commit');
+  await g.add(paths);
+  // Restrict the commit to exactly these paths.
+  const result = await g.commit(message, paths);
+  return result;
+}));
+
 ipcMain.handle('repo:push', wrap(async (_, opts) => {
   ensureGit();
   const pg = makeProgressGit(currentRepoPath);
@@ -667,6 +679,24 @@ ipcMain.handle('repo:deleteBranch', wrap(async (_, { name, force }) => {
   return true;
 }));
 
+// Delete a branch on the remote. `ref` is like "origin/feature" — we split it into the
+// remote name and branch, then run `git push <remote> --delete <branch>`. Also prunes
+// the local remote-tracking ref so the UI updates immediately.
+ipcMain.handle('repo:deleteRemoteBranch', wrap(async (_, ref) => {
+  const g = ensureGit();
+  if (!ref) throw new Error('Remote branch ref required');
+  const slash = ref.indexOf('/');
+  if (slash < 0) throw new Error('Expected "<remote>/<branch>", got: ' + ref);
+  const remote = ref.slice(0, slash);
+  const branch = ref.slice(slash + 1);
+  if (!branch) throw new Error('Could not parse branch from: ' + ref);
+  // Push a delete to the remote.
+  await g.push([remote, '--delete', branch]);
+  // Clean up the local remote-tracking ref (ignore if already gone).
+  try { await g.raw(['branch', '-dr', ref]); } catch (e) {}
+  return { remote, branch };
+}));
+
 ipcMain.handle('repo:merge', wrap(async (_, opts) => {
   const g = ensureGit();
   // opts can be a string (branch name, legacy) or an object: { branch, strategy, message }
@@ -695,6 +725,25 @@ ipcMain.handle('repo:merge', wrap(async (_, opts) => {
   try {
     const result = await g.raw(args);
 
+    // simple-git's raw() does NOT throw when `git merge` exits non-zero on conflicts —
+    // it returns the output text. The most reliable, locale-independent signal is the
+    // working tree itself: if any files are unmerged, the merge conflicted.
+    const postStatus = await g.status();
+    if ((postStatus.conflicted || []).length > 0) {
+      const conflicted = postStatus.conflicted;
+      const e = new Error(`Merge conflict — ${conflicted.length} file(s) need resolution:\n${conflicted.join('\n')}`);
+      e.conflicted = conflicted;
+      e.isConflict = true;
+      throw e;
+    }
+    // Also catch the text signal in case a conflict left the tree in an odd state.
+    if (/^CONFLICT|CONFLICT \(|Automatic merge failed|fix conflicts/im.test(result || '')) {
+      const e = new Error('Merge conflict — resolve the conflicts, stage the files, then commit.');
+      e.conflicted = [];
+      e.isConflict = true;
+      throw e;
+    }
+
     // For squash, the merge stages changes but doesn't commit — we auto-commit with the squash message
     if (strategy === 'squash') {
       const commitMsg = message || `Squashed merge of '${branch}'`;
@@ -707,11 +756,13 @@ ipcMain.handle('repo:merge', wrap(async (_, opts) => {
   } catch (err) {
     // Provide structured conflict info if applicable
     const msg = err.message || String(err);
-    if (/CONFLICT|Automatic merge failed|conflict/i.test(msg)) {
-      // Identify conflicted files
-      const status = await g.status();
-      const conflicted = status.conflicted || [];
-      const e = new Error(`Merge conflict — ${conflicted.length} file(s) need resolution:\n${conflicted.join('\n')}\n\nResolve the conflicts, stage the files, then commit. Or run "git merge --abort" to cancel.`);
+    if (err.isConflict || /CONFLICT|Automatic merge failed|conflict/i.test(msg)) {
+      // Identify conflicted files (may already be on err.conflicted)
+      let conflicted = err.conflicted;
+      if (!conflicted || !conflicted.length) {
+        try { conflicted = (await g.status()).conflicted || []; } catch (e) { conflicted = conflicted || []; }
+      }
+      const e = new Error(`Merge conflict — ${conflicted.length} file(s) need resolution:\n${conflicted.join('\n')}\n\nResolve the conflicts, stage the files, then commit. Or abort to cancel.`);
       e.conflicted = conflicted;
       throw e;
     }
@@ -1408,6 +1459,21 @@ ipcMain.handle('repo:conflictDeleteFile', wrap(async (_, filePath) => {
   const g = ensureGit();
   // git rm to remove from tree and stage the deletion
   await g.raw(['rm', '-f', '--', filePath]);
+  return true;
+}));
+
+// Resolve a conflicted file by taking exactly one side. Works for text and binary
+// conflicts. Internally: `git checkout --ours/--theirs -- <file>` then stage it.
+ipcMain.handle('repo:conflictUseOurs', wrap(async (_, filePath) => {
+  const g = ensureGit();
+  await g.raw(['checkout', '--ours', '--', filePath]);
+  await g.add(filePath);
+  return true;
+}));
+ipcMain.handle('repo:conflictUseTheirs', wrap(async (_, filePath) => {
+  const g = ensureGit();
+  await g.raw(['checkout', '--theirs', '--', filePath]);
+  await g.add(filePath);
   return true;
 }));
 

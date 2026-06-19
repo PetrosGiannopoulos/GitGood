@@ -382,6 +382,22 @@ async function deleteBranch(name, force) {
   }
 }
 
+// Delete a branch on the remote (e.g. "origin/feature"). This runs
+// `git push <remote> --delete <branch>` and removes the local tracking ref.
+async function deleteRemoteBranch(ref) {
+  const confirmed = await modal.confirm({
+    title: 'Delete Remote Branch',
+    message: `Delete "${ref}" from the remote? This removes the branch on the server for everyone — it cannot be undone from here.`,
+    danger: true,
+    confirmText: 'Delete on Remote'
+  });
+  if (!confirmed) return;
+  const r = await withLoading(`Deleting ${ref}`, () => gs.deleteRemoteBranch(ref));
+  if (handleResult(r, `Deleted ${ref} on remote`)) {
+    await refreshAll();
+  }
+}
+
 async function removeRemote(name) {
   const confirmed = await modal.confirm({
     title: 'Remove Remote',
@@ -602,26 +618,97 @@ $('#btn-pull').onclick = async () => {
 
 $('#btn-push').onclick = async () => {
   closeSyncMenu();
-  const r = await withLoading('Pushing', () => gs.push());
-  if (!r.ok && /no upstream|has no upstream branch|set-upstream/i.test(r.error || '')) {
-    // Offer set-upstream
-    const branch = state.status && state.status.current;
+  await doPush();
+};
+
+// Push with full handling for: no remote configured, a remote not named "origin",
+// and a branch with no upstream set.
+async function doPush() {
+  const remotes = state.remotes || [];
+  const branch = (state.status && state.status.current) || null;
+
+  // 1) No remote at all → offer to add one.
+  if (!remotes.length) {
+    const added = await promptAddRemote();
+    if (!added) return;
+    await refreshAll();
+  }
+
+  // Re-read remotes (may have just been added). Prefer "origin", else the first remote.
+  const list = state.remotes || [];
+  const remoteName = (list.find(r => r.name === 'origin') || list[0] || {}).name;
+  if (!remoteName) { showToast('No remote configured to push to.', 'error', 6000); return; }
+
+  // 2) Try a normal push first.
+  let r = await withLoading('Pushing', () => gs.push());
+
+  // 3) No upstream → offer to push and set upstream to the chosen remote.
+  if (!r.ok && /no upstream|has no upstream branch|set-upstream|no configured push destination/i.test(r.error || '')) {
     const confirmed = await modal.confirm({
-      title: 'No Upstream Branch',
-      message: `Branch "${branch}" has no upstream. Push and set upstream to "origin/${branch}"?`,
+      title: 'Set Upstream Branch',
+      message: `Branch "${branch}" isn't tracking a remote yet. Push it to "${remoteName}/${branch}" and set it as the upstream?`,
       confirmText: 'Push & Set Upstream'
     });
     if (!confirmed) return;
-    const r2 = await withLoading('Pushing', () => gs.push({ setUpstream: true, remote: 'origin', branch }));
-    if (handleResult(r2, 'Pushed and upstream set')) {
-      await refreshAll();
-    }
+    r = await withLoading('Pushing', () => gs.push({ setUpstream: true, remote: remoteName, branch }));
+    if (handleResult(r, `Pushed and set upstream to ${remoteName}/${branch}`)) await refreshAll();
     return;
   }
-  if (handleResult(r, 'Pushed to remote')) {
-    await refreshAll();
+
+  // 4) Remote missing/unreachable.
+  if (!r.ok && /does not appear to be a git repository|Could not read from remote|repository not found|unable to access/i.test(r.error || '')) {
+    const fix = await modal.confirm({
+      title: 'Remote Not Reachable',
+      message: `Couldn't reach the remote "${remoteName}". The remote may be misconfigured or you may not have access.\n\nWould you like to review/update the remote URL?`,
+      confirmText: 'Manage Remotes'
+    });
+    if (fix) openRemoteManager();
+    return;
   }
-};
+
+  if (handleResult(r, 'Pushed to remote')) await refreshAll();
+}
+
+// Prompt for a new remote (name + URL). Returns true if one was added.
+async function promptAddRemote(defaultName) {
+  return new Promise((resolve) => {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <p class="modal-text">This repository has no remote configured. Add one to push your work (e.g. a GitHub/GitLab URL).</p>
+      <div class="modal-field"><label>Remote name</label>
+        <input type="text" id="add-remote-name" value="${escapeHtml(defaultName || 'origin')}" placeholder="origin" /></div>
+      <div class="modal-field"><label>Remote URL</label>
+        <input type="text" id="add-remote-url" placeholder="git@github.com:user/repo.git  or  https://github.com/user/repo.git" /></div>
+    `;
+    const cancel = document.createElement('button');
+    cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+    cancel.onclick = () => { modal.hide(); resolve(false); };
+    const ok = document.createElement('button');
+    ok.className = 'btn-medieval primary'; ok.innerHTML = '<span class="btn-icon">➕</span> Add Remote';
+    ok.onclick = async () => {
+      const name = body.querySelector('#add-remote-name').value.trim() || 'origin';
+      const url = body.querySelector('#add-remote-url').value.trim();
+      if (!url) { showToast('Enter a remote URL', 'error'); return; }
+      const res = await gs.addRemote({ name, url });
+      if (!res.ok) { showToast('Could not add remote: ' + res.error, 'error', 6000); return; }
+      modal.hide();
+      showToast(`Added remote "${name}"`, 'success');
+      resolve(true);
+    };
+    modal.show({ title: 'Add Remote', body, footer: [cancel, ok] });
+  });
+}
+
+// Jump to the Branches tab where the remotes section lives.
+function openRemoteManager() {
+  const tab = document.querySelector('.tab[data-tab="branches"]');
+  if (tab) tab.click();
+  setTimeout(() => {
+    const sec = document.querySelector('.sidebar-section .sidebar-header');
+    const remotesPanel = document.getElementById('remote-list') || document.querySelector('.remotes-section');
+    if (remotesPanel) remotesPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 120);
+}
 
 $('#btn-refresh').onclick = async () => {
   await refreshAll();

@@ -720,7 +720,8 @@ function showRefContextMenu(refType, refName, x, y) {
       { label: `Checkout as local "${local}"`, icon: '⑂', action: () => checkoutRemoteBranch(refName, local) },
       { label: `Merge ${refName} into current (smart)`, icon: '⚒', action: () => showSmartMergeDialog(refName) },
       'sep',
-      { label: 'Copy ref name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } }
+      { label: 'Copy ref name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } },
+      { label: 'Delete remote branch', icon: '✗', danger: true, action: () => deleteRemoteBranch(refName) }
     ], x, y);
   } else if (refType === 'tag') {
     showContextMenu([
@@ -935,18 +936,18 @@ async function showSmartMergeDialog(branch) {
 
     <label class="branches-label" style="display:block;margin-bottom:6px">⚜ Strategy</label>
     <div class="merge-strategies" id="merge-strategy-cards">
-      <label class="merge-strategy${preview.canFastForward ? ' selected' : ''}${!preview.canFastForward ? ' disabled' : ''}">
-        <input type="radio" name="merge-strategy" value="ff-only" ${preview.canFastForward ? 'checked' : 'disabled'} />
+      <label class="merge-strategy${!preview.canFastForward ? ' disabled' : ''}">
+        <input type="radio" name="merge-strategy" value="ff-only" ${!preview.canFastForward ? 'disabled' : ''} />
         <div class="merge-strategy-body">
           <div class="merge-strategy-title">Fast-forward (clean)</div>
-          <div class="merge-strategy-desc">Just move the current branch pointer forward. ${preview.canFastForward ? 'Clean, no merge commit.' : 'Not available — branches have diverged.'}</div>
+          <div class="merge-strategy-desc">Just move the current branch pointer forward — no merge happens, so no conflicts can ever appear. ${preview.canFastForward ? 'Available because branches have not diverged.' : 'Not available — branches have diverged.'}</div>
         </div>
       </label>
-      <label class="merge-strategy${!preview.canFastForward ? ' selected' : ''}">
-        <input type="radio" name="merge-strategy" value="auto" ${!preview.canFastForward ? 'checked' : ''} />
+      <label class="merge-strategy selected">
+        <input type="radio" name="merge-strategy" value="auto" checked />
         <div class="merge-strategy-body">
-          <div class="merge-strategy-title">Default (auto)</div>
-          <div class="merge-strategy-desc">Fast-forward if possible, otherwise create a merge commit.</div>
+          <div class="merge-strategy-title">Default (auto, recommended)</div>
+          <div class="merge-strategy-desc">Fast-forward when possible, otherwise create a merge commit. Conflicts surface here if histories disagree.</div>
         </div>
       </label>
       <label class="merge-strategy">
@@ -1004,35 +1005,221 @@ async function showSmartMergeDialog(branch) {
     const messageInput = body.querySelector('#merge-msg');
     const message = (messageInput && messageInput.value.trim()) || undefined;
     modal.hide();
-    const r = await withLoading(`Merging ${branch}`, () => gs.merge({ branch, strategy, message }));
-    if (!r.ok) {
-      // Conflict — show a structured message
-      if (/conflict/i.test(r.error)) {
-        const closeBtn = document.createElement('button');
-        closeBtn.className = 'btn-medieval primary'; closeBtn.textContent = 'OK';
-        closeBtn.onclick = () => modal.hide();
-        const abortBtn = document.createElement('button');
-        abortBtn.className = 'btn-medieval danger'; abortBtn.textContent = 'Abort Merge';
-        abortBtn.onclick = async () => {
-          modal.hide();
-          const ar = await gs.mergeAbort();
-          if (handleResult(ar, 'Merge aborted')) await refreshAll();
-        };
-        modal.show({
-          title: 'Merge Conflict',
-          body: `<pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:12px;color:var(--text-dim);line-height:1.5;max-height:50vh;overflow:auto">${escapeHtml(r.error)}</pre>`,
-          footer: [abortBtn, closeBtn]
-        });
-        await refreshAll();
-      } else {
-        showToast(r.error, 'error', 8000);
-      }
-      return;
-    }
-    showToast(`Merged ${branch}`, 'success');
-    await refreshAll();
+    await runMerge(branch, strategy, message);
   };
   modal.show({ title: 'Smart Merge', body, footer: [cancelBtn, okBtn] });
+}
+
+// A conflict occurred — take the user straight into resolution. Switches to the Changes
+// tab (which shows the conflict banner + per-file resolve controls, including modify/
+// delete handling) and opens the 3-way resolver on the first text conflict if present.
+function openMergeResolution(branch) {
+  const conflicts = (state.conflicts && state.conflicts.files) || [];
+  // Make sure the Changes tab is visible so the conflict section + banner are in view.
+  const tab = document.querySelector('.tab[data-tab="changes"]');
+  if (tab) tab.click();
+
+  const firstText = conflicts.find(f => {
+    const c = /U/.test(f.indexStatus || '') || /U/.test(f.workingDir || '');
+    return c && !f.isBinary && !f.deletedInOurs && !f.deletedInTheirs;
+  });
+  if (firstText) {
+    // Open the 3-way resolver on the first editable conflict.
+    setTimeout(() => openConflictResolver(firstText.path), 60);
+  } else if (conflicts.length) {
+    // Only non-text conflicts (modify/delete, binary). The Changes-tab conflict section
+    // shows Keep/Delete/Use-ours/Use-theirs controls for these.
+    showToast(`Merge produced ${conflicts.length} conflict(s) needing a choice — resolve them in the Changes tab.`, 'info', 7000);
+  } else {
+    showToast('Merge conflict detected — see the Changes tab.', 'info', 6000);
+  }
+}
+
+// Run a merge, handling (a) genuine conflicts → resolver, and (b) a dirty working tree
+// that blocks the merge (uncommitted or untracked changes) → offer to stash & retry.
+async function runMerge(branch, strategy, message) {
+  // The branch being merged may have uncommitted work that the app auto-stashed when you
+  // last left it. Git merges only COMMITTED history, so that stashed work will NOT be
+  // included — warn instead of silently producing an "Already up to date" no-op.
+  try {
+    const bare = String(branch).replace(/^[^/]+\//, ''); // strip remote prefix if any
+    let asr = await gs.stashFindByPrefix(autoStashMarkerFor(branch));
+    let hidden = (asr.ok && asr.data) ? asr.data : [];
+    if (!hidden.length && bare !== branch) {
+      asr = await gs.stashFindByPrefix(autoStashMarkerFor(bare));
+      hidden = (asr.ok && asr.data) ? asr.data : [];
+    }
+    if (hidden.length) {
+      const proceed = await new Promise((resolve) => {
+        const cancel = document.createElement('button');
+        cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+        cancel.onclick = () => { modal.hide(); resolve(false); };
+        const go = document.createElement('button');
+        go.className = 'btn-medieval primary'; go.textContent = 'Merge Committed Work Anyway';
+        go.onclick = () => { modal.hide(); resolve(true); };
+        modal.show({
+          title: 'Branch Has Uncommitted Work',
+          body: `<p class="modal-text"><strong>${escapeHtml(branch)}</strong> has uncommitted changes that were auto-stashed when you switched away from it.</p>
+                 <p class="modal-text text-muted" style="font-size:12px;margin-top:8px">A merge only includes <strong>committed</strong> history — those stashed changes won't be merged in. To merge that work, first switch to <strong>${escapeHtml(branch)}</strong>, restore its stash, commit, then merge. Continue merging only what's committed?</p>`,
+          footer: [cancel, go]
+        });
+      });
+      if (!proceed) return;
+    }
+  } catch (e) { /* non-fatal — proceed with the merge */ }
+
+  const r = await withLoading(`Merging ${branch}`, () => gs.merge({ branch, strategy, message }));
+  if (r.ok) {
+    showToast(`Merged ${branch}`, 'success');
+    await refreshAll();
+    return;
+  }
+
+  const err = r.error || '';
+
+  // Genuine merge conflict → open the resolver immediately.
+  if (/conflict/i.test(err) || /CONFLICT/.test(err)) {
+    await refreshAll();
+    openMergeResolution(branch);
+    return;
+  }
+
+  // Fast-forward-only was requested but the branches have diverged, so git refuses. This
+  // is correct git behavior — but ff-only can never produce a conflict either, so the user
+  // probably wanted a real merge. Offer to retry with a strategy that actually merges.
+  const ffNotPossible = /Not possible to fast-forward|fast-forward.*not possible|Diverging branches can't be fast-forwarded|Already up to date|can't be fast-forwarded/i.test(err) ||
+    (strategy === 'ff-only' && /aborting|refusing/i.test(err));
+  if (strategy === 'ff-only' && ffNotPossible) {
+    const cancel = document.createElement('button');
+    cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+    cancel.onclick = () => modal.hide();
+    const auto = document.createElement('button');
+    auto.className = 'btn-medieval'; auto.textContent = 'Use Default (auto)';
+    auto.onclick = async () => { modal.hide(); await runMerge(branch, 'auto', message); };
+    const noff = document.createElement('button');
+    noff.className = 'btn-medieval primary'; noff.innerHTML = '<span class="btn-icon">⚒</span> Create Merge Commit';
+    noff.onclick = async () => { modal.hide(); await runMerge(branch, 'no-ff', message || `Merge ${branch}`); };
+    modal.show({
+      title: 'Fast-forward Not Possible',
+      body: `<p class="modal-text">Your branch and <strong>${escapeHtml(branch)}</strong> have diverged — both have new commits — so git can't fast-forward.</p>
+             <p class="modal-text text-muted" style="font-size:12px;margin-top:8px">Fast-forward only moves the branch pointer; it can never merge or produce conflicts. To combine the histories (and surface any conflicts), use a real merge strategy.</p>`,
+      footer: [cancel, auto, noff]
+    });
+    return;
+  }
+
+  // Git refused to start the merge because the working tree has uncommitted or untracked
+  // changes that the merge would overwrite. Show the relevant files in a scrollable,
+  // multi-select list and let the user commit or stash the selected ones, then retry.
+  const dirtyBlocked = /local changes to the following files would be overwritten|untracked working tree files would be overwritten|commit your changes or stash|Please commit your changes|cannot merge.*uncommitted|overwritten by merge/i.test(err);
+  if (dirtyBlocked) {
+    // Parse the exact blocking files from git's message (tab-indented lines).
+    const blocking = err.split('\n').map(l => l.trim()).filter(l =>
+      l && !/would be overwritten|please|aborting|commit your changes|move or remove|error:|^merge|^updating/i.test(l));
+    await showPreMergeFilesDialog(branch, strategy, message, blocking);
+    return;
+  }
+
+  // Any other error.
+  showToast(err, 'error', 8000);
+}
+
+// Pre-merge dialog: lists the uncommitted files that block the merge, with a scrollable
+// multi-select list (+ select-all). The user commits or stashes the SELECTED files, then
+// the merge is retried automatically. If unhandled blocking files remain, it reappears.
+async function showPreMergeFilesDialog(branch, strategy, message, blockingFiles) {
+  // Build the candidate file list. Prefer git's reported blocking files; fall back to the
+  // full set of working-tree changes from status.
+  let files = (blockingFiles || []).filter(Boolean);
+  const st = await gs.status();
+  const allDirty = (st.ok && st.data && st.data.files) ? st.data.files.map(f => f.path) : [];
+  if (!files.length) files = allDirty;
+  files = [...new Set(files)];
+  if (!files.length) { showToast('No uncommitted changes detected.', 'info'); return; }
+
+  // Map a path → status letter for the chip.
+  const statusByPath = {};
+  if (st.ok && st.data && st.data.files) {
+    st.data.files.forEach(f => { statusByPath[f.path] = (f.index && f.index.trim()) || (f.working_dir && f.working_dir.trim()) || f.status || 'M'; });
+  }
+  const untrackedSet = new Set((st.ok && st.data && st.data.not_added) ? st.data.not_added : []);
+  const letterFor = (p) => untrackedSet.has(p) ? 'U' : (statusByPath[p] || 'M');
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Git won't merge <strong>${escapeHtml(branch)}</strong> yet — these uncommitted changes would be overwritten. Select the files, then <strong>commit</strong> or <strong>stash</strong> them. The merge runs automatically afterwards.</p>
+    <div class="premerge-toolbar">
+      <label class="premerge-selectall"><input type="checkbox" id="premerge-all" checked /> Select all</label>
+      <span class="premerge-count" id="premerge-count"></span>
+    </div>
+    <ul class="premerge-list" id="premerge-list"></ul>
+    <div class="modal-field" id="premerge-msg-wrap" style="margin-top:12px">
+      <label>Commit message <span class="text-muted" style="font-weight:400">(only needed for “Commit selected”)</span></label>
+      <textarea id="premerge-msg" rows="2" style="width:100%;font-family:var(--font-mono);font-size:13px;resize:vertical" placeholder="Changes before merging ${escapeHtml(branch)}"></textarea>
+    </div>
+  `;
+
+  const listEl = body.querySelector('#premerge-list');
+  files.forEach(path => {
+    const li = document.createElement('li');
+    li.className = 'premerge-item';
+    li.innerHTML = `
+      <label class="premerge-row">
+        <input type="checkbox" class="premerge-cb" value="${escapeHtml(path)}" checked />
+        <span class="premerge-status s-${letterFor(path)}">${letterFor(path)}</span>
+        <span class="premerge-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
+      </label>`;
+    listEl.appendChild(li);
+  });
+
+  const allCb = body.querySelector('#premerge-all');
+  const countEl = body.querySelector('#premerge-count');
+  const cbs = () => Array.from(body.querySelectorAll('.premerge-cb'));
+  const selected = () => cbs().filter(c => c.checked).map(c => c.value);
+  const updateCount = () => {
+    const n = selected().length, total = cbs().length;
+    countEl.textContent = `${n} of ${total} selected`;
+    allCb.checked = n === total;
+    allCb.indeterminate = n > 0 && n < total;
+  };
+  allCb.onclick = () => { cbs().forEach(c => { c.checked = allCb.checked; }); updateCount(); };
+  cbs().forEach(c => c.onchange = updateCount);
+  updateCount();
+
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+  cancel.onclick = () => modal.hide();
+
+  const stashBtn = document.createElement('button');
+  stashBtn.className = 'btn-medieval';
+  stashBtn.innerHTML = '<span class="btn-icon">⚿</span> Stash selected';
+  stashBtn.onclick = async () => {
+    const paths = selected();
+    if (!paths.length) { showToast('Select at least one file', 'error'); return; }
+    modal.hide();
+    const sr = await withLoading('Stashing selected', () =>
+      gs.stash({ paths, includeUntracked: true, message: `[GitGood] before merging ${branch}` }));
+    if (!sr.ok) { showToast('Stash failed: ' + sr.error, 'error', 7000); return; }
+    await refreshAll();
+    await runMerge(branch, strategy, message);
+  };
+
+  const commitBtn = document.createElement('button');
+  commitBtn.className = 'btn-medieval primary';
+  commitBtn.innerHTML = '<span class="btn-icon">✓</span> Commit selected';
+  commitBtn.onclick = async () => {
+    const paths = selected();
+    if (!paths.length) { showToast('Select at least one file', 'error'); return; }
+    const msg = (body.querySelector('#premerge-msg').value || '').trim();
+    if (!msg) { showToast('Enter a commit message to commit', 'error'); body.querySelector('#premerge-msg').focus(); return; }
+    modal.hide();
+    const cr = await withLoading('Committing selected', () => gs.commitPaths({ message: msg, paths }));
+    if (!cr.ok) { showToast('Commit failed: ' + cr.error, 'error', 7000); return; }
+    await refreshAll();
+    await runMerge(branch, strategy, message);
+  };
+
+  modal.show({ title: 'Resolve Uncommitted Changes', body, footer: [cancel, stashBtn, commitBtn] });
 }
 
 // ============================================
@@ -1242,6 +1429,7 @@ function renderBranchesFullList() {
         <span class="branch-actions">
           <button class="mini-btn" data-action="checkout-remote">Checkout</button>
           <button class="mini-btn" data-action="merge">Merge</button>
+          <button class="mini-btn danger" data-action="delete-remote">Delete</button>
         </span>
       </li>
     `);
@@ -1272,6 +1460,7 @@ function renderBranchesFullList() {
         }
         else if (a === 'merge') showSmartMergeDialog(branch);
         else if (a === 'delete') deleteBranch(branch, false);
+        else if (a === 'delete-remote') deleteRemoteBranch(branch);
       };
     });
   });
