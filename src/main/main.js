@@ -397,7 +397,53 @@ ipcMain.handle('repo:status', wrap(async () => {
   try {
     headHash = (await g.revparse(['--short', 'HEAD'])).trim();
   } catch (e) { /* empty repo */ }
-  return { ...status, detached, headHash };
+
+  // When the current branch has NO upstream tracking ref yet (e.g. you committed but
+  // never ran `push -u` to set one), simple-git reports ahead=0/behind=0 — git has
+  // nothing to compare against. That's misleading: every commit on this branch is "to
+  // push" the next time you push. Fall back to counting commits reachable from HEAD,
+  // but only when a remote actually exists (otherwise there's nowhere to push).
+  let ahead = status.ahead || 0;
+  let behind = status.behind || 0;
+  let upstreamMissing = false;
+  if (!detached && !status.tracking) {
+    try {
+      const remotes = await g.getRemotes(true);
+      if (remotes && remotes.length) {
+        // Try to find a remote-tracking branch with the same short name on any remote
+        // (e.g. you fetched origin and origin/<branch> exists, but tracking isn't set).
+        // If we find one, compare against it directly. Otherwise fall back to total
+        // commits — every commit on this branch is unpushed.
+        let comparedToRef = null;
+        for (const r of remotes) {
+          const candidate = `${r.name}/${status.current}`;
+          try {
+            // rev-parse --verify --quiet returns the SHA on success, or exits 1 with
+            // empty output on failure. simple-git treats exit-1 as throw only when
+            // --quiet isn't set; with --quiet we may get a successful Promise resolve
+            // with an empty string. So treat empty output as "not present" too.
+            const ref = (await g.raw(['rev-parse', '--verify', '--quiet', `refs/remotes/${candidate}`])).trim();
+            if (ref) { comparedToRef = candidate; break; }
+          } catch (e) { /* not present on this remote */ }
+        }
+        if (comparedToRef) {
+          // git rev-list LEFT...RIGHT --left-right --count prints "<ahead>\t<behind>"
+          const out = (await g.raw(['rev-list', '--left-right', '--count', `HEAD...${comparedToRef}`])).trim();
+          const [a, b] = out.split(/\s+/).map(n => parseInt(n, 10) || 0);
+          ahead = a; behind = b;
+        } else {
+          // No corresponding remote ref — every local commit will be pushed.
+          try {
+            const c = (await g.raw(['rev-list', '--count', 'HEAD'])).trim();
+            ahead = parseInt(c, 10) || 0;
+          } catch (e) { /* empty branch */ }
+          upstreamMissing = true;
+        }
+      }
+    } catch (e) { /* leave ahead/behind as the original 0/0 */ }
+  }
+
+  return { ...status, detached, headHash, ahead, behind, upstreamMissing };
 }));
 
 ipcMain.handle('repo:branches', wrap(async () => {

@@ -270,22 +270,40 @@ const loadingOverlay = {
 // the window freezes (Windows shows the "not responding" spinner). We wait for a couple
 // of animation frames to let any pending rAF renders run and the browser paint, then for
 // an idle slice of the main thread, with a hard timeout so we never hang forever.
-function waitUntilIdle(maxWaitMs = 4000) {
+// Wait until the main thread is genuinely responsive — not just two animation frames.
+// Polls frame durations: when several consecutive frames render in under the "smooth"
+// threshold, the thread is idle and the UI is ready for input. This covers the case
+// where heavy renderers (large graph SVG, history list) continue churning AFTER the
+// initial data load resolves, so the overlay shouldn't hide while clicks would queue.
+function waitUntilIdle(maxWaitMs = 15000) {
   return new Promise(resolve => {
-    const start = Date.now();
-    const raf = (cb) => requestAnimationFrame(cb);
-    // Two frames: frame 1 lets queued rAF render callbacks fire, frame 2 fires after the
-    // browser has had a chance to lay out and paint the resulting DOM.
-    raf(() => raf(() => {
-      const finishIdle = () => resolve();
-      if (typeof requestIdleCallback === 'function') {
-        const remaining = Math.max(50, maxWaitMs - (Date.now() - start));
-        requestIdleCallback(finishIdle, { timeout: remaining });
-      } else {
-        // Fallback: a short settle delay after paint.
-        setTimeout(finishIdle, 80);
+    const start = performance.now();
+    const SMOOTH_FRAME_MS = 32;       // ≤ 2 frames at 60 Hz is considered smooth
+    const NEEDED_SMOOTH_FRAMES = 4;   // require 4 consecutive smooth frames
+    let smoothInARow = 0;
+    let lastFrameTs = performance.now();
+
+    const tick = (now) => {
+      const frameDur = now - lastFrameTs;
+      lastFrameTs = now;
+      if (frameDur <= SMOOTH_FRAME_MS) smoothInARow++;
+      else smoothInARow = 0;
+
+      const elapsed = now - start;
+      if (smoothInARow >= NEEDED_SMOOTH_FRAMES) {
+        // We have a responsive thread; also yield once via setTimeout(0) so any pending
+        // microtasks/promises queued by the last renders run before we hide the overlay.
+        setTimeout(resolve, 0);
+        return;
       }
-    }));
+      if (elapsed >= maxWaitMs) {
+        // Safety valve: don't hold the overlay forever on pathological repos.
+        resolve();
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   });
 }
 

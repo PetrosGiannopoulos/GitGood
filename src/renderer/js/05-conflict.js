@@ -953,24 +953,44 @@ function updateStatusBar() {
   $('#status-changes').textContent = `${changes} change${changes === 1 ? '' : 's'}`;
   $('#status-ahead-behind').textContent = `↑${s.ahead || 0} ↓${s.behind || 0}`;
 
-  // Toolbar badges: ahead/behind now live on the Push/Pull items inside the Sync menu.
+  const ahead = s.ahead || 0;
+  const behind = s.behind || 0;
+
+  // Toolbar — counts of commits to push / to pull, shown directly on the Sync button
+  // so they're visible without opening the dropdown.
+  const syncCountPush = $('#sync-count-push');
+  const syncCountPushN = document.getElementById('sync-count-push-n');
+  const syncCountPull = $('#sync-count-pull');
+  const syncCountPullN = document.getElementById('sync-count-pull-n');
+  if (syncCountPush) {
+    syncCountPush.style.display = ahead > 0 ? 'inline-flex' : 'none';
+    if (syncCountPushN) syncCountPushN.textContent = ahead;
+    syncCountPush.title = ahead > 0 ? `${ahead} commit${ahead === 1 ? '' : 's'} to push` : '';
+  }
+  if (syncCountPull) {
+    syncCountPull.style.display = behind > 0 ? 'inline-flex' : 'none';
+    if (syncCountPullN) syncCountPullN.textContent = behind;
+    syncCountPull.title = behind > 0 ? `${behind} commit${behind === 1 ? '' : 's'} to pull (last fetched)` : '';
+  }
+
+  // Same counts also displayed inside the dropdown next to Push/Pull items.
   const pushBadge = $('#push-badge');
   const pullBadge = $('#pull-badge');
   if (pushBadge) {
-    if (s.ahead > 0) { pushBadge.textContent = s.ahead; pushBadge.style.display = 'inline-block'; pushBadge.title = `${s.ahead} commit(s) to push`; }
+    if (ahead > 0) { pushBadge.textContent = ahead; pushBadge.style.display = 'inline-block'; pushBadge.title = `${ahead} commit(s) to push`; }
     else pushBadge.style.display = 'none';
   }
   if (pullBadge) {
-    if (s.behind > 0) { pullBadge.textContent = s.behind; pullBadge.style.display = 'inline-block'; pullBadge.title = `${s.behind} commit(s) to pull`; }
+    if (behind > 0) { pullBadge.textContent = behind; pullBadge.style.display = 'inline-block'; pullBadge.title = `${behind} commit(s) to pull`; }
     else pullBadge.style.display = 'none';
   }
-  // A small dot on the collapsed Sync button hints there's something to sync, so the
-  // counts are discoverable without opening the menu.
+  // The small dot is redundant now that counts are visible, but keep it for the case
+  // when both counts are >0 — it still gives a quick "needs sync" cue at a glance.
   const dot = $('#sync-dot');
   if (dot) {
-    const has = (s.ahead > 0) || (s.behind > 0);
-    dot.style.display = has ? 'inline-block' : 'none';
-    dot.title = has ? `↑${s.ahead || 0} to push · ↓${s.behind || 0} to pull` : '';
+    const has = (ahead > 0) || (behind > 0);
+    dot.style.display = 'none';   // counts now make this redundant
+    dot.title = has ? `↑${ahead} to push · ↓${behind} to pull` : '';
   }
 }
 

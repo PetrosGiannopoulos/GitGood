@@ -472,7 +472,7 @@ html[class*='theme-'] .commit-search:focus {
 .terminal-output .term-dim { color: var(--text-muted); }
 .terminal-output .term-err { color: var(--removed); }
 .terminal-output .term-cmd { color: var(--text); font-weight: 600; }
-.terminal-output .term-prompt-echo { color: var(--accent-bright); font-weight: 700; }
+.terminal-output .term-prompt-line { color: var(--accent-bright); font-weight: 700; }
 
 .terminal-inputrow {
   display: flex;
@@ -563,6 +563,31 @@ html[class*='theme-'] .commit-search:focus {
   color: var(--text-muted);
 }
 .tool-dropdown-item .badge { margin-left: auto; }
+
+/* Inline push/pull counts on the Sync button — visible without opening the dropdown,
+   so the user sees at a glance how many commits will be sent / received. */
+.sync-count {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  border-radius: 9px;
+  line-height: 1.5;
+  letter-spacing: 0.3px;
+}
+.sync-count-push {
+  background: color-mix(in srgb, var(--gold-accent) 30%, transparent);
+  color: var(--gold-accent);
+  border: 1px solid color-mix(in srgb, var(--gold-accent) 55%, transparent);
+}
+.sync-count-pull {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--bone-white);
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+}
 
 /* Small hint dot on the collapsed Sync button when there's anything to push/pull */
 .sync-dot {
