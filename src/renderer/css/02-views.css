@@ -246,7 +246,10 @@
 .search-clear:hover { color: var(--crusader-red-bright); border-color: var(--crusader-red); }
 
 .selection-bar {
-  display: none;
+  /* Always laid out so its height is reserved; toggled invisible (not removed) when no
+     multi-selection is active, so showing it never pushes the file lists down. */
+  display: flex;
+  visibility: hidden;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -262,7 +265,7 @@
   top: 0;
   z-index: 3;
 }
-.selection-bar.visible { display: flex; }
+.selection-bar.visible { visibility: visible; }
 .selection-bar .sel-count {
   color: var(--crusader-red-bright);
   font-family: var(--font-mono);

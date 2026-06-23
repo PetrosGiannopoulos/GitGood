@@ -22,6 +22,7 @@ const api = {
   branches: () => ipcRenderer.invoke('repo:branches'),
   log: (opts) => ipcRenderer.invoke('repo:log', opts),
   commitFiles: (opts) => ipcRenderer.invoke('repo:commitFiles', opts),
+  searchDiffContent: (opts) => ipcRenderer.invoke('repo:searchDiffContent', opts),
   remotes: () => ipcRenderer.invoke('repo:remotes'),
   stashList: () => ipcRenderer.invoke('repo:stashList'),
 
@@ -94,6 +95,7 @@ const api = {
   operationAbort: () => ipcRenderer.invoke('repo:operationAbort'),
   inspectHidden: () => ipcRenderer.invoke('repo:inspectHidden'),
   addGitkeep: (folder) => ipcRenderer.invoke('repo:addGitkeep', folder),
+  addToGitignore: (paths) => ipcRenderer.invoke('repo:addToGitignore', paths),
 
   // SSH key generator
   sshGenerateKey: (opts) => ipcRenderer.invoke('ssh:generateKey', opts),

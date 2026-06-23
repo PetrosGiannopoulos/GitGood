@@ -94,13 +94,57 @@ async function ensureCommitFilesMap() {
   return _commitFilesLoading;
 }
 
+// Pickaxe (diff-content) search results, cached per query. The 'content' filter mode asks
+// git which commits changed a given pattern (see repo:searchDiffContent); we cache the
+// resulting hash set per query so the render functions can stay synchronous. The cache is
+// cleared on refreshAll() since new commits can change the answer.
+const _contentMatchCache = new Map();   // trimmed query -> Set<hash>
+const _contentMatchLoading = new Map(); // trimmed query -> Promise<Set<hash>>
+
+// Ensure the diff-content match set for `query` is loaded and cached. Callers must await
+// this before rendering a 'content'-mode filter, otherwise commitMatchesFilter sees no set
+// and filters everything out. Concurrent callers for the same query share one request.
+async function ensureContentMatches(query) {
+  const q = (query || '').trim();
+  if (!q) return new Set();
+  if (_contentMatchCache.has(q)) return _contentMatchCache.get(q);
+  if (_contentMatchLoading.has(q)) return _contentMatchLoading.get(q);
+  const p = (async () => {
+    let set = new Set();
+    try {
+      const r = await gs.searchDiffContent({ query: q, limit: 2000 });
+      if (r && r.ok) set = new Set(r.data || []);
+    } catch (e) { /* leave empty on error (e.g. an invalid pattern) */ }
+    _contentMatchCache.set(q, set);
+    // Keep only the most recent handful of queries.
+    while (_contentMatchCache.size > 12) {
+      _contentMatchCache.delete(_contentMatchCache.keys().next().value);
+    }
+    _contentMatchLoading.delete(q);
+    return set;
+  })();
+  _contentMatchLoading.set(q, p);
+  return p;
+}
+
+function clearContentMatchCache() {
+  _contentMatchCache.clear();
+  _contentMatchLoading.clear();
+}
+
 // mode: 'message' (default) matches message/author/email/hash; 'files' matches changed
-// file paths; 'all' matches either. The files map is consulted only for files/all.
+// file paths; 'all' matches either; 'content' matches commits whose diff content changed
+// the query (git pickaxe -G, resolved by ensureContentMatches into a hash set).
 function commitMatchesFilter(commit, query, mode) {
   if (!query) return true;
+  mode = mode || 'message';
+  // Diff-content (pickaxe) mode: membership in the precomputed match set for this query.
+  if (mode === 'content') {
+    const set = _contentMatchCache.get(query.trim());
+    return set ? set.has(commit.hash) : false;
+  }
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
-  mode = mode || 'message';
 
   const msgHay = [
     commit.message,

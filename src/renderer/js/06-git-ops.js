@@ -943,10 +943,29 @@ $('#sel-discard').onclick = () => {
   const paths = getSelectedPaths('unstaged:');
   if (paths.length) discardFiles(paths);
 };
+const _selIgnoreBtn = $('#sel-ignore');
+if (_selIgnoreBtn) _selIgnoreBtn.onclick = () => {
+  // Ignore every selected path, regardless of staged/unstaged (a path can be in both).
+  const paths = getSelectedPaths();
+  if (paths.length) addPathsToGitignore(paths);
+};
 $('#sel-clear').onclick = () => {
   state.multiSelected.clear();
   renderChanges();
 };
+
+// Append the given working-tree paths to .gitignore (deduped), then refresh so newly
+// ignored untracked files drop out of the list and the .gitignore edit appears.
+async function addPathsToGitignore(paths) {
+  const unique = [...new Set((paths || []).filter(Boolean))];
+  if (!unique.length) return;
+  const r = await withLoading('Updating .gitignore', () => gs.addToGitignore(unique));
+  if (!r.ok) { showToast(r.error || 'Failed to update .gitignore', 'error', 6000); return; }
+  const added = (r.data && r.data.added) || [];
+  if (!added.length) showToast('Already in .gitignore', 'info');
+  else showToast(`Added ${added.length} ${added.length === 1 ? 'entry' : 'entries'} to .gitignore`, 'success');
+  await refreshAll();
+}
 
 // Section header "Stash All Unstaged" button
 const _stashUnstagedBtn = $('#stash-unstaged-btn');

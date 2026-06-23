@@ -277,6 +277,14 @@ const FILE_STATUS_LETTER = { added: 'A', modified: 'M', deleted: 'D', renamed: '
 // Render a commit's changes as a file list + a single-file diff pane into `panelEl`.
 // `opts` carries diffTruncated/diffBytes for the truncation notice, and `opts.hash`
 // (the commit) so files can be restored from it.
+// Per-commit file-browser view state, preserved across re-renders (e.g. the auto-refresh
+// on window focus) so a background refresh doesn't reset the file you're viewing, the
+// per-commit file filter, your checkbox selection, or the scroll position. Keyed by
+// panel id + commit hash; a commit's diff is immutable, so restoring by file path/index
+// is always valid. Capped (LRU-ish) so browsing many commits can't grow it unbounded.
+const _cfileBrowserState = new Map();
+const _CFILE_STATE_MAX = 60;
+
 function renderCommitFileBrowser(panelEl, diffText, opts) {
   opts = opts || {};
   if (!panelEl) return;
@@ -302,7 +310,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
         `<button class="cfile-restore-btn" type="button" disabled>↩ Restore selected</button>` +
       `</div>` +
       `<div class="cfile-searchbar">` +
-        `<input type="search" class="cfile-search" placeholder="Filter files…" title="Filter files in this commit" />` +
+        `<input type="search" class="cfile-search" placeholder="Filter by path or content…" title="Filter files in this commit by path or diff content" />` +
       `</div>` +
       `<div class="cfile-list">${listHtml}</div>` +
       `<div class="cfile-diff diff-content" id="cfile-diff"></div>` +
@@ -316,6 +324,25 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
   panelEl._cfileActive = 0;
   panelEl._cfileHash = opts.hash || null;
 
+  // Restore/track view state across re-renders (see _cfileBrowserState above). Re-insert
+  // the entry so it counts as most-recently-used, then evict the oldest beyond the cap.
+  const browserKey = (panelEl.id || 'cfile') + ' ' + (opts.hash || '');
+  const saved = _cfileBrowserState.get(browserKey);
+  const store = saved || {};
+  _cfileBrowserState.delete(browserKey);
+  _cfileBrowserState.set(browserKey, store);
+  while (_cfileBrowserState.size > _CFILE_STATE_MAX) {
+    _cfileBrowserState.delete(_cfileBrowserState.keys().next().value);
+  }
+  // Snapshot the current UI into the store. Called after every interaction so a later
+  // re-render (refresh) can put the pane back exactly as the user left it.
+  const persist = () => {
+    store.active = panelEl._cfileActive || 0;
+    store.filter = fileSearch ? fileSearch.value : '';
+    store.checked = checkedPaths();
+    store.scroll = diffEl ? diffEl.scrollTop : 0;
+  };
+
   const renderOne = (idx) => {
     const f = files[idx];
     if (!f || !diffEl) return;
@@ -326,6 +353,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
       diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
     }
     diffEl.scrollTop = 0; // new file → start at top
+    persist();
   };
 
   // --- checkbox / selection plumbing ---
@@ -350,7 +378,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
 
   list.addEventListener('click', (e) => {
     // Clicking the checkbox toggles selection without changing the previewed file.
-    if (e.target.closest('.cfile-check')) { syncSelectionUI(); return; }
+    if (e.target.closest('.cfile-check')) { syncSelectionUI(); persist(); return; }
     const item = e.target.closest('.cfile-item');
     if (!item) return;
     panelEl.querySelectorAll('.cfile-item').forEach(el => el.classList.toggle('active', el === item));
@@ -373,6 +401,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
   if (selAll) selAll.addEventListener('change', () => {
     panelEl.querySelectorAll('.cfile-check').forEach(c => { c.checked = selAll.checked; });
     syncSelectionUI();
+    persist();
   });
 
   if (restoreBtn) restoreBtn.addEventListener('click', () => {
@@ -382,30 +411,69 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
 
   // File filter — show only items whose path matches the query (all terms must match).
   const fileSearch = panelEl.querySelector('.cfile-search');
+  let applyFileFilter = () => {};
   if (fileSearch) {
     let ft = null;
-    const applyFileFilter = () => {
+    applyFileFilter = () => {
       const q = fileSearch.value.trim().toLowerCase();
       const terms = q.split(/\s+/).filter(Boolean);
       let visible = 0;
       panelEl.querySelectorAll('.cfile-item').forEach(item => {
         const idx = parseInt(item.dataset.cfile, 10);
-        const path = (files[idx] && files[idx].path || '').toLowerCase();
-        const show = !terms.length || terms.every(t => path.includes(t));
+        const f = files[idx] || {};
+        const path = (f.path || '').toLowerCase();
+        // Match the file path OR the file's diff content, so you can locate a file by a
+        // function/identifier inside its changes — not just by its name.
+        const body = (f.diff || '').toLowerCase();
+        const show = !terms.length || terms.every(t => path.includes(t) || body.includes(t));
         item.style.display = show ? '' : 'none';
         if (show) visible++;
       });
       fileSearch.classList.toggle('has-no-matches', !!q && visible === 0);
+      return visible;
     };
-    fileSearch.oninput = () => { clearTimeout(ft); ft = setTimeout(applyFileFilter, 120); };
+    fileSearch.oninput = () => { clearTimeout(ft); ft = setTimeout(() => { applyFileFilter(); persist(); }, 120); };
     fileSearch.onkeydown = (e) => {
-      if (e.key === 'Escape') { fileSearch.value = ''; applyFileFilter(); }
+      if (e.key === 'Escape') { fileSearch.value = ''; applyFileFilter(); persist(); }
     };
   }
 
-  // Show the first file by default.
-  renderOne(0);
+  // Restore the view state saved from a previous render of this same commit (file
+  // filter, checkbox selection, the active file, and the diff scroll position) so a
+  // background refresh — e.g. the auto-refresh on window focus — doesn't disrupt what
+  // you're looking at. Capture the saved scroll first: renderOne() calls persist(),
+  // which would otherwise overwrite store.scroll before we restore it.
+  let initialIdx = 0;
+  const savedScroll = (saved && typeof saved.scroll === 'number') ? saved.scroll : 0;
+  if (saved) {
+    if (fileSearch && saved.filter) { fileSearch.value = saved.filter; applyFileFilter(); }
+    if (saved.checked && saved.checked.length) {
+      const checkedSet = new Set(saved.checked);
+      panelEl.querySelectorAll('.cfile-check').forEach(cb => {
+        const f = files[parseInt(cb.dataset.cfileCheck, 10)];
+        if (f && checkedSet.has(f.path)) cb.checked = true;
+      });
+    }
+    if (typeof saved.active === 'number' && files[saved.active]) initialIdx = saved.active;
+  } else if (fileSearch && opts.fileFilter) {
+    // First time opening this commit while a diff-content filter is active: seed the
+    // per-commit file filter with the same query so the files that changed it surface
+    // immediately (and persist() will remember it from here on). If the query matched
+    // nothing literally — e.g. it was a regex with metacharacters that the substring
+    // filter can't reproduce — fall back to showing every file rather than an empty list.
+    fileSearch.value = opts.fileFilter;
+    if (!applyFileFilter()) { fileSearch.value = ''; applyFileFilter(); }
+  }
+
+  // Highlight and render the active file (restored, or the first one by default).
+  panelEl.querySelectorAll('.cfile-item').forEach(el =>
+    el.classList.toggle('active', parseInt(el.dataset.cfile, 10) === initialIdx));
+  renderOne(initialIdx);
+  if (savedScroll) diffEl.scrollTop = savedScroll;
   syncSelectionUI();
+
+  // Track the diff scroll position as the user scrolls so a later refresh restores it.
+  if (diffEl) diffEl.addEventListener('scroll', () => { store.scroll = diffEl.scrollTop; });
 }
 
 // Context menu for a file (or selected files) within a commit preview.

@@ -637,7 +637,10 @@ async function renderGraphDetail(commit) {
     renderCommitFileBrowser(diffEl, details.diff, {
       hash: requestedHash,
       diffTruncated: details.diffTruncated,
-      diffBytes: details.diffBytes
+      diffBytes: details.diffBytes,
+      // While a diff-content filter is active, seed the per-commit file filter with the
+      // same query so the files that actually changed it surface immediately.
+      fileFilter: (state.graphFilterMode === 'content' && (state.graphFilter || '').trim()) || ''
     });
   });
 }
@@ -1559,9 +1562,12 @@ function wireGraphTab() {
     if (graphMode) graphMode.value = state.graphFilterMode || 'message';
     const applyGraph = async () => {
       state.graphFilter = graphSearch.value;
-      // If filtering by files, make sure the commit→files map is loaded first.
+      // If filtering by files, make sure the commit→files map is loaded first; if filtering
+      // by diff content, make sure the pickaxe match set for this query is loaded first.
       if ((state.graphFilterMode === 'files' || state.graphFilterMode === 'all') && state.graphFilter.trim()) {
         await ensureCommitFilesMap();
+      } else if (state.graphFilterMode === 'content' && state.graphFilter.trim()) {
+        await ensureContentMatches(state.graphFilter);
       }
       relayoutGraph();
     };
@@ -1586,6 +1592,8 @@ function wireGraphTab() {
       state.historyFilter = historySearch.value;
       if ((state.historyFilterMode === 'files' || state.historyFilterMode === 'all') && state.historyFilter.trim()) {
         await ensureCommitFilesMap();
+      } else if (state.historyFilterMode === 'content' && state.historyFilter.trim()) {
+        await ensureContentMatches(state.historyFilter);
       }
       renderHistory();
     };

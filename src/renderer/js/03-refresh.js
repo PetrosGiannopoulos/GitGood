@@ -13,8 +13,10 @@ function updateRepoInfo() {
 
 async function refreshAll() {
   // New commits may have appeared — drop the cached commit→files map so a file-based
-  // search rebuilds it on next use.
+  // search rebuilds it on next use, and the diff-content (pickaxe) match sets so a
+  // content search re-runs against the updated history.
   _commitFilesMap = null;
+  clearContentMatchCache();
   // The hidden-info (empty folders / ignored) cache is repo-specific and time-based;
   // drop it on a full refresh so switching repos can't show the previous repo's data.
   hiddenInfoCache = null;
@@ -148,6 +150,14 @@ async function refreshLog() {
     return;
   }
   state.log = result.data;
+  // refreshAll() cleared the commit→files cache above. If a file-based history filter is
+  // active, reload it before rendering — otherwise commitMatchesFilter sees an empty map
+  // and filters everything out, leaving the history blank until the user re-types.
+  if ((state.historyFilterMode === 'files' || state.historyFilterMode === 'all') && (state.historyFilter || '').trim()) {
+    await ensureCommitFilesMap();
+  } else if (state.historyFilterMode === 'content' && (state.historyFilter || '').trim()) {
+    await ensureContentMatches(state.historyFilter);
+  }
   renderHistory();
 }
 
@@ -167,6 +177,15 @@ async function refreshGraph() {
   const { commits, head } = result.data;
   state.graphAllCommits = commits;
   state.graphHead = head;
+  // refreshAll() cleared the commit→files cache above. If a file-based graph filter is
+  // active, reload it before laying out — otherwise commitMatchesFilter sees an empty map
+  // and filters every commit out, so the graph renders empty ("No chronicles to display")
+  // and the detail pane clears until the user re-triggers the filter.
+  if ((state.graphFilterMode === 'files' || state.graphFilterMode === 'all') && (state.graphFilter || '').trim()) {
+    await ensureCommitFilesMap();
+  } else if (state.graphFilterMode === 'content' && (state.graphFilter || '').trim()) {
+    await ensureContentMatches(state.graphFilter);
+  }
   relayoutGraph();
 }
 
@@ -598,7 +617,10 @@ function renderHistoryDetail(commit, details) {
     renderCommitFileBrowser(diffEl, details.diff, {
       hash: commit.hash,
       diffTruncated: details.diffTruncated,
-      diffBytes: details.diffBytes
+      diffBytes: details.diffBytes,
+      // While a diff-content filter is active, seed the per-commit file filter with the
+      // same query so the files that actually changed it surface immediately.
+      fileFilter: (state.historyFilterMode === 'content' && (state.historyFilter || '').trim()) || ''
     });
   });
 }

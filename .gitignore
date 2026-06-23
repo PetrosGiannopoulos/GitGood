@@ -61,3 +61,4 @@ desktop.ini
 *.temp
 coverage/
 .cache/
+/CLAUDE.md

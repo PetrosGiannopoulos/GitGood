@@ -853,6 +853,7 @@ function renderFileList(container, files, staged) {
       if (allStaged) items.push({ label: `Unstage (${selectedPaths.length})`, icon: '⇣', action: () => unstageFiles(selectedPaths) });
       if (allUnstaged) items.push({ label: `Stash (${selectedPaths.length})`, icon: '⚿', action: () => showStashMenu({ paths: selectedPaths }) });
       if (allUnstaged) items.push({ label: `Discard (${selectedPaths.length})`, icon: '✕', danger: true, action: () => discardFiles(selectedPaths) });
+      items.push({ label: `Add to .gitignore (${selectedPaths.length})`, icon: '⊘', action: () => addPathsToGitignore(selectedPaths) });
       if (items.length) items.push('sep');
       items.push({ label: 'Copy path' + (selectedPaths.length > 1 ? 's' : ''), icon: '⎘', action: () => {
         navigator.clipboard.writeText(selectedPaths.join('\n'));

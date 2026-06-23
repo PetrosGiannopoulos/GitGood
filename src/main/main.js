@@ -486,6 +486,29 @@ ipcMain.handle('repo:commitFiles', wrap(async (_, opts) => {
   return map;
 }));
 
+// Pickaxe search: returns the hashes of commits whose diff CONTENT changed the occurrences
+// of the given text — i.e. `git log -S<string>`. Powers the "Diff content" filter mode,
+// answering "which commits added or removed this function/text?". We use -S (not -G)
+// because -S is a LITERAL string match by default: it never treats the query as a regex,
+// so identifiers with punctuation like "myFunc(" match as-is. (-G always parses its
+// argument as a regex, and this platform's engine rejects a lone "(" even when escaped.)
+// Scoped to --all to match the graph; the caller intersects the result with its loaded
+// commits, so extra hashes are harmless.
+ipcMain.handle('repo:searchDiffContent', wrap(async (_, opts) => {
+  const query = ((opts && opts.query) || '').trim();
+  if (!query) return [];
+  const g = ensureGit();
+  const limit = (opts && opts.limit) || 2000;
+  // `-S<string>` glued into one arg; passed as an array element, so no shell parsing and
+  // a leading '-' in the query can't be mistaken for a separate flag.
+  const raw = await g.raw([
+    'log', '--all', `--max-count=${limit}`,
+    '--format=%H',
+    '-S' + query
+  ]);
+  return raw.split('\n').map(s => s.trim()).filter(Boolean);
+}));
+
 // Returns commits with parents and ref decorations — the data the visual graph needs
 ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
   const g = ensureGit();
@@ -1625,6 +1648,33 @@ ipcMain.handle('repo:addGitkeep', wrap(async (_, folderRelPath) => {
   fs.mkdirSync(path.dirname(full), { recursive: true });
   if (!fs.existsSync(full)) fs.writeFileSync(full, '', 'utf8');
   return { created: full };
+}));
+
+// Append one or more paths to the repo-root .gitignore. Each entry is anchored with a
+// leading slash (e.g. "/build/out.log") so it ignores exactly that path from the repo
+// root rather than any same-named file elsewhere. Paths already present (in either the
+// anchored or bare form) are skipped, and the existing newline style is preserved.
+ipcMain.handle('repo:addToGitignore', wrap(async (_, paths) => {
+  const list = (Array.isArray(paths) ? paths : [paths]).filter(Boolean);
+  if (!list.length) throw new Error('No paths provided');
+  const giPath = path.join(currentRepoPath, '.gitignore');
+  let content = fs.existsSync(giPath) ? fs.readFileSync(giPath, 'utf8') : '';
+  const eol = /\r\n/.test(content) ? '\r\n' : '\n';
+  const existing = new Set(content.split(/\r?\n/).map(l => l.trim()).filter(Boolean));
+  const toAdd = [];
+  for (const p of list) {
+    const anchored = '/' + String(p).replace(/\\/g, '/').replace(/^\/+/, '');
+    if (existing.has(anchored) || existing.has(anchored.slice(1))) continue;
+    existing.add(anchored);
+    toAdd.push(anchored);
+  }
+  if (!toAdd.length) return { added: [], already: list.length };
+  // Ensure the file ends with a newline before we append the new block.
+  let out = content;
+  if (out.length && !/\n$/.test(out)) out += eol;
+  out += toAdd.join(eol) + eol;
+  fs.writeFileSync(giPath, out, 'utf8');
+  return { added: toAdd };
 }));
 // Returns { hunks: [{ type, lines }] } where type is 'common' | 'conflict'.
 // A 'conflict' hunk has { ours: [lines], theirs: [lines], base: [lines | null] }
