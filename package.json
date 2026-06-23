@@ -1,6 +1,6 @@
 {
   "name": "gitgood",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "description": "GitGood - A medieval-themed Git GUI client forged in the fires of the crusade",
   "main": "src/main/main.js",
   "author": "GitGood",
