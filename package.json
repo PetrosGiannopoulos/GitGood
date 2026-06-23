@@ -23,7 +23,7 @@
     "appId": "com.gitgood.app",
     "productName": "GitGood",
     "directories": {
-      "output": "dist"
+      "output": "dist/dist"
     },
     "files": [
       "src/**/*",
