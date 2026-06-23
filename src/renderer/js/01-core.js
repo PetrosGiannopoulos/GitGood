@@ -31,7 +31,7 @@ const state = {
   currentTab: 'graph',
   // Multi-selection state (keyed "staged:path" or "unstaged:path" to handle a path in both lists)
   multiSelected: new Set(),
-  lastClickedKey: null,        // For shift-click range selection
+  lastClickedKey: null,        // Anchor row for shift-click range selection (Windows-style)
   // Cached file lists from the last render — needed for shift-click ranges and bulk actions
   stagedFiles: [],
   unstagedFiles: [],

@@ -189,13 +189,20 @@
   gap: 8px;
 }
 
+/* The filter and the selection bar ride together in one sticky header, so neither scrolls
+   away with the file lists (and they don't fight over the same sticky top: 0 slot). */
+.changes-toolbar-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background: var(--bg);
+}
+
 .changes-search-wrap {
   padding: 8px 10px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  z-index: 2;
+  position: relative; /* containing block for the ⌕ icon; stickiness now lives on the wrapper */
   display: flex;
   gap: 6px;
   align-items: center;
@@ -261,9 +268,6 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--bone-white);
-  position: sticky;
-  top: 0;
-  z-index: 3;
 }
 .selection-bar.visible { visibility: visible; }
 .selection-bar .sel-count {
@@ -591,13 +595,70 @@
 
 /* Commit panel */
 .commit-panel {
+  position: relative;            /* anchor for the collapse/expand buttons */
   background: linear-gradient(180deg, var(--panel-black) 0%, var(--shadow-black) 100%);
   border-left: 1px solid var(--border);
+  overflow: hidden;              /* clip the body when collapsed to a thin rail */
+  min-width: 0;
+}
+
+.commit-panel-body {
+  height: 100%;
   padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
+}
+
+/* Small "collapse to the right" handle, shown only while the panel is expanded. */
+.commit-collapse-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--muted-text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.commit-collapse-btn:hover { color: var(--crusader-red-bright); border-color: var(--crusader-red); }
+
+/* Vertical expand rail, shown only while the panel is collapsed. Fills the thin column. */
+.commit-expand-btn { display: none; }
+[data-panel="changes"].commit-collapsed .commit-panel-body { display: none; }
+[data-panel="changes"].commit-collapsed .commit-collapse-btn { display: none; }
+[data-panel="changes"].commit-collapsed .commit-expand-btn {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--crusader-red-bright);
+  cursor: pointer;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+[data-panel="changes"].commit-collapsed .commit-expand-btn:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* The collapsed rail's own resizer can't be dragged (there's nothing to size). */
+[data-panel="changes"].commit-collapsed .pane-resizer[data-resizer="changes-right"] {
+  pointer-events: none;
 }
 
 .commit-header {

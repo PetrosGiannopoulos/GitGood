@@ -460,19 +460,21 @@
         <div class="tab-panel" data-panel="changes">
           <div class="changes-layout">
             <div class="changes-files">
-              <div class="changes-search-wrap">
-                <input type="text" id="changes-search" class="changes-search" placeholder="Filter files..." />
-                <button class="search-clear" id="changes-search-clear" title="Clear">✕</button>
-              </div>
-              <div class="selection-bar" id="selection-bar">
-                <span><span class="sel-count" id="sel-count">0</span> selected</span>
-                <div class="sel-actions">
-                  <button class="mini-btn" id="sel-stage">⇡ Stage</button>
-                  <button class="mini-btn" id="sel-unstage">⇣ Unstage</button>
-                  <button class="mini-btn" id="sel-stash">⚿ Stash</button>
-                  <button class="mini-btn" id="sel-discard">✕ Discard</button>
-                  <button class="mini-btn" id="sel-ignore">⊘ Ignore</button>
-                  <button class="mini-btn" id="sel-clear">Clear</button>
+              <div class="changes-toolbar-sticky">
+                <div class="changes-search-wrap">
+                  <input type="text" id="changes-search" class="changes-search" placeholder="Filter files..." />
+                  <button class="search-clear" id="changes-search-clear" title="Clear">✕</button>
+                </div>
+                <div class="selection-bar" id="selection-bar">
+                  <span><span class="sel-count" id="sel-count">0</span> selected</span>
+                  <div class="sel-actions">
+                    <button class="mini-btn" id="sel-stage">⇡ Stage</button>
+                    <button class="mini-btn" id="sel-unstage">⇣ Unstage</button>
+                    <button class="mini-btn" id="sel-stash">⚿ Stash</button>
+                    <button class="mini-btn" id="sel-discard">✕ Discard</button>
+                    <button class="mini-btn" id="sel-ignore">⊘ Ignore</button>
+                    <button class="mini-btn" id="sel-clear">Clear</button>
+                  </div>
                 </div>
               </div>
               <div class="changes-section">
@@ -515,12 +517,16 @@
 
             <div class="pane-resizer" data-resizer="changes-right" data-target="data-panel:changes" data-cols="280px 1fr 320px" data-edge="2" title="Drag to resize"></div>
             <div class="commit-panel">
-              <div class="commit-header">⚜ Inscribe Thy Deed ⚜</div>
-              <input type="text" id="commit-summary" class="commit-input" placeholder="Summary (required)" maxlength="80" />
-              <textarea id="commit-description" class="commit-textarea" placeholder="Description (optional)"></textarea>
-              <button class="btn-medieval primary commit-btn" id="commit-btn">
-                <span class="btn-icon">✠</span> Commit
-              </button>
+              <button class="commit-collapse-btn" id="commit-collapse-btn" title="Collapse commit panel (widen diff)">›</button>
+              <button class="commit-expand-btn" id="commit-expand-btn" title="Expand commit panel">‹ Inscribe Thy Deed</button>
+              <div class="commit-panel-body">
+                <div class="commit-header">⚜ Inscribe Thy Deed ⚜</div>
+                <input type="text" id="commit-summary" class="commit-input" placeholder="Summary (required)" maxlength="80" />
+                <textarea id="commit-description" class="commit-textarea" placeholder="Description (optional)"></textarea>
+                <button class="btn-medieval primary commit-btn" id="commit-btn">
+                  <span class="btn-icon">✠</span> Commit
+                </button>
+              </div>
             </div>
           </div>
         </div>

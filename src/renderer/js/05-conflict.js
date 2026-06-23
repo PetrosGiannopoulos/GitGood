@@ -814,24 +814,41 @@ function renderFileList(container, files, staged) {
         return;
       }
 
-      // Checkbox click = pure toggle, no view-diff
       const isCheckbox = e.target.classList.contains('file-checkbox');
 
-      // Modifier keys: Ctrl/Cmd to toggle, Shift for range
-      if (e.shiftKey && state.lastClickedKey) {
-        selectRange(state.lastClickedKey, key);
-      } else if (e.ctrlKey || e.metaKey || isCheckbox) {
+      // Selection model mirrors Windows Explorer:
+      //  • Shift+click       → select the contiguous range from the anchor to this row,
+      //                        REPLACING the current selection (the anchor stays put).
+      //  • Ctrl+Shift+click  → ADD that range to the current selection (anchor stays put).
+      //  • Ctrl/Cmd+click or checkbox → toggle just this row; it becomes the new anchor.
+      //  • Plain click       → single-select this row (and show its diff); anchor = row.
+      const shift = e.shiftKey;
+      const ctrl = e.ctrlKey || e.metaKey;
+
+      if (shift && state.lastClickedKey) {
+        const range = rangeKeys(state.lastClickedKey, key);
+        if (ctrl) {
+          for (const k of range) state.multiSelected.add(k);   // Ctrl+Shift: extend
+        } else {
+          state.multiSelected = new Set(range);                // Shift: replace
+        }
+        // The anchor deliberately does NOT move on a shift-click.
+      } else if (ctrl || isCheckbox) {
+        // Toggle just this row (a plain click already put the prior selection in the set,
+        // so a previously-selected file is preserved — Windows keeps it).
         toggleMultiSelect(key);
+        state.lastClickedKey = key;
       } else {
-        // Plain click: clear multi-select, select single file
+        // Plain click: this row becomes the whole selection — clear the rest, mark just
+        // this one (so its checkbox shows checked, like Windows) and show its diff.
         state.multiSelected.clear();
+        state.multiSelected.add(key);
         state.lastClickedKey = key;
         selectFile(f.path, staged);
-        return;
+        // Fall through to the re-render so the checkbox/highlight reflect the selection.
       }
 
-      state.lastClickedKey = key;
-      // Re-render so the row visuals update
+      // Re-render so the row visuals update.
       renderFileList(container, files, staged);
       updateSelectionBar();
     };
@@ -839,9 +856,11 @@ function renderFileList(container, files, staged) {
     li.oncontextmenu = (e) => {
       e.preventDefault();
       // If the right-clicked item isn't in the multi-selection, treat it as a single
+      // selection and make it the anchor, so a later shift-click extends from this row.
       if (!state.multiSelected.has(key)) {
         state.multiSelected.clear();
         state.multiSelected.add(key);
+        state.lastClickedKey = key;
       }
       const selectedKeys = [...state.multiSelected];
       const selectedPaths = selectedKeys.map(k => k.split(':').slice(1).join(':'));
@@ -862,7 +881,7 @@ function renderFileList(container, files, staged) {
       if (selectedKeys.length > 1) {
         items.push('sep');
         items.push({ label: 'Clear selection', icon: '✕', action: () => {
-          state.multiSelected.clear();
+          clearMultiSelection();
           renderChanges();
         }});
       }
@@ -878,8 +897,17 @@ function toggleMultiSelect(key) {
   else state.multiSelected.add(key);
 }
 
-function selectRange(fromKey, toKey) {
-  // Build the visible ordered list of keys (staged first, then unstaged) considering filter
+// Fully reset multi-selection, including the shift-range anchor, so a later shift-click
+// starts fresh.
+function clearMultiSelection() {
+  state.multiSelected.clear();
+  state.lastClickedKey = null;
+}
+
+// Return the contiguous list of selection keys from `fromKey` to `toKey` in the visible
+// (filter-aware) order — staged files first, then unstaged. Used for Shift-range selection;
+// order-independent, so it handles the anchor being above or below the clicked row.
+function rangeKeys(fromKey, toKey) {
   const q = state.searchQuery.trim().toLowerCase();
   const matches = (f) => !q || f.path.toLowerCase().includes(q);
   const orderedKeys = [
@@ -888,12 +916,9 @@ function selectRange(fromKey, toKey) {
   ];
   const a = orderedKeys.indexOf(fromKey);
   const b = orderedKeys.indexOf(toKey);
-  if (a < 0 || b < 0) {
-    state.multiSelected.add(toKey);
-    return;
-  }
+  if (a < 0 || b < 0) return [toKey];
   const [lo, hi] = a <= b ? [a, b] : [b, a];
-  for (let i = lo; i <= hi; i++) state.multiSelected.add(orderedKeys[i]);
+  return orderedKeys.slice(lo, hi + 1);
 }
 
 async function selectFile(path, staged) {

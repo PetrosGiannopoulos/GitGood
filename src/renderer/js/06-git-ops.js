@@ -3,7 +3,7 @@
 async function stageFiles(files) {
   const r = await gs.stage(files);
   if (handleResult(r)) {
-    state.multiSelected.clear();
+    clearMultiSelection();
     await refreshStatus();
   }
 }
@@ -11,7 +11,7 @@ async function stageFiles(files) {
 async function unstageFiles(files) {
   const r = await gs.unstage(files);
   if (handleResult(r)) {
-    state.multiSelected.clear();
+    clearMultiSelection();
     await refreshStatus();
   }
 }
@@ -55,7 +55,7 @@ async function discardFiles(files) {
   if (!confirmed) return;
   const r = await gs.discard(list);
   if (handleResult(r, list.length === 1 ? 'Done' : `Done — ${list.length} files`)) {
-    state.multiSelected.clear();
+    clearMultiSelection();
     await refreshStatus();
   }
 }
@@ -859,7 +859,7 @@ function showStashMenu(opts) {
       includeUntracked
     }));
     if (handleResult(r, paths ? `Stashed ${paths.length} file${paths.length === 1 ? '' : 's'}` : 'Stashed')) {
-      state.multiSelected.clear();
+      clearMultiSelection();
       await refreshAll();
     }
   };
@@ -950,7 +950,7 @@ if (_selIgnoreBtn) _selIgnoreBtn.onclick = () => {
   if (paths.length) addPathsToGitignore(paths);
 };
 $('#sel-clear').onclick = () => {
-  state.multiSelected.clear();
+  clearMultiSelection();
   renderChanges();
 };
 

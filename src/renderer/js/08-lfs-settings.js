@@ -1277,3 +1277,62 @@ function computeTrackList(target, resizerEl) {
   };
 })();
 
+// ============================================
+// COMMIT PANEL COLLAPSE (Changes tab)
+// ============================================
+// Fold the commit pane (Inscribe Thy Deed / summary / description / commit) into a thin
+// rail on the far right so the diff gets the width. The collapsed state and the expanded
+// width persist across sessions. We drive the grid's last track directly (and keep the
+// diff column flexible at 1fr) rather than fighting the resizer's per-handle persistence:
+// on load we only override the layout when collapsed; when expanded the resizer widths win.
+(() => {
+  const COLLAPSE_KEY = 'gitgood:commit-collapsed';
+  const WIDTH_KEY = 'gitgood:commit-width';
+  const RAIL_W = 30;       // collapsed rail width (px) — holds the vertical expand button
+  const DEFAULT_W = 320;   // fallback expanded width (matches the authored grid)
+
+  const grid = document.querySelector('[data-panel="changes"]');
+  if (!grid) return;
+
+  // Grid tracks: 0 files · 1 left-resizer · 2 diff(1fr) · 3 right-resizer · 4 commit.
+  const FILES = 0, COMMIT = 4;
+  function tracksPx() {
+    return getComputedStyle(grid).gridTemplateColumns.split(/\s+/).map(parseFloat);
+  }
+  // Rebuild the template, preserving the current files width and keeping the diff flexible.
+  function applyColumns(commitWidth) {
+    const t = tracksPx();
+    const filesW = Math.round(t[FILES] || 280);
+    grid.style.gridTemplateColumns = `${filesW}px 5px 1fr 5px ${Math.round(commitWidth)}px`;
+  }
+
+  const isCollapsed = () => { try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch (e) { return false; } };
+  const savedWidth = () => { try { const w = parseFloat(localStorage.getItem(WIDTH_KEY)); return w > RAIL_W ? w : DEFAULT_W; } catch (e) { return DEFAULT_W; } };
+
+  function setCollapsed(collapsed) {
+    grid.classList.toggle('commit-collapsed', collapsed);
+    applyColumns(collapsed ? RAIL_W : savedWidth());
+  }
+
+  function collapse() {
+    const w = Math.round(tracksPx()[COMMIT] || DEFAULT_W);
+    if (w > RAIL_W + 10) { try { localStorage.setItem(WIDTH_KEY, String(w)); } catch (e) {} }
+    try { localStorage.setItem(COLLAPSE_KEY, '1'); } catch (e) {}
+    setCollapsed(true);
+  }
+  function expand() {
+    try { localStorage.setItem(COLLAPSE_KEY, '0'); } catch (e) {}
+    setCollapsed(false);
+  }
+
+  const collapseBtn = document.getElementById('commit-collapse-btn');
+  const expandBtn = document.getElementById('commit-expand-btn');
+  if (collapseBtn) collapseBtn.onclick = collapse;
+  if (expandBtn) expandBtn.onclick = expand;
+  window.toggleCommitPanel = () => (isCollapsed() ? expand() : collapse());
+
+  // Apply the persisted collapsed state after the resizers have applied their widths
+  // (they run on a ~100ms timeout). When expanded we leave the resizer layout untouched.
+  setTimeout(() => { if (isCollapsed()) setCollapsed(true); }, 160);
+})();
+
