@@ -752,6 +752,13 @@
   overflow: hidden;
   transition: background 0.1s;
 }
+/* Rows are absolutely positioned at their row offset so the list can be virtualized —
+   only the rows in view exist in the DOM, but the spacer reserves the full height. */
+.graph-rows .graph-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
 .graph-row:hover { background: var(--bg-panel); }
 .graph-row.selected {
   background: color-mix(in srgb, var(--accent) 14%, transparent);

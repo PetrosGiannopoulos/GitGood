@@ -526,10 +526,35 @@
   stroke: var(--gold-accent);
   stroke-width: 2;
 }
-.graph-row:hover .commit-dot { r: 6; }
+/* Row → dot hover sync (#4). The dot lives in a sibling SVG column, so the hover is
+   mirrored from JS via .row-hover rather than a descendant :hover selector. */
+.graph-svg circle.commit-dot.row-hover {
+  r: 7;
+  filter: drop-shadow(0 0 5px var(--gold-accent));
+}
 .graph-row.selected .commit-dot {
   filter: drop-shadow(0 0 6px var(--crusader-red-bright));
 }
+
+/* The graph is focusable for keyboard nav (#8); don't draw a full-panel focus ring. */
+#graph-container:focus,
+#graph-container:focus-visible { outline: none; }
+
+/* Search-match highlight in graph rows (#5). */
+.graph-row mark.graph-match {
+  background: color-mix(in srgb, var(--gold-accent) 55%, transparent);
+  color: var(--bone-white);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Ancestry highlight (#3): when a commit is selected, fade everything outside its
+   lineage and let the related dots/edges/rows (marked .rel) stand out. */
+#graph-container.graph-highlight-active .graph-edge:not(.rel) { opacity: 0.13; }
+#graph-container.graph-highlight-active circle.commit-dot:not(.rel) { opacity: 0.22; }
+#graph-container.graph-highlight-active .graph-row:not(.rel) { opacity: 0.4; }
+#graph-container.graph-highlight-active .graph-edge.rel { stroke-width: 3; }
+.graph-svg .graph-edge { transition: opacity 0.12s ease, stroke-width 0.12s ease; }
 
 /* Foldable commit dots: subtle cue that they can be right-clicked to fold */
 .graph-svg circle.commit-dot[data-foldable="1"] {

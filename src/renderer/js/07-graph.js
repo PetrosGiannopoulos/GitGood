@@ -10,7 +10,7 @@
 // (curves) at the single row boundary where it actually shifts columns. This is
 // what keeps lines tracking their dots instead of swooping across the whole graph.
 //
-// Returns: { positions: Map<hash,{row,lane}>, edges: [{fromLane,toLane,fromRow,toRow,colorLane,type}], laneCount }
+// Returns: { positions: Map<hash,{row,lane,colorIdx}>, edges: [{fromLane,toLane,fromRow,toRow,colorLane,colorIdx,owner,type}], laneCount }
 function layoutGraph(commits) {
   const positions = new Map();
   const edges = [];
@@ -20,9 +20,25 @@ function layoutGraph(commits) {
   let lanes = [];
   let maxLaneCount = 0;
 
-  // Stable color assignment: once a lane gets a color index it keeps it until freed.
-  // We color by the lane index directly (laneColor handles wrap-around), which is
-  // simple and stable enough for our purposes.
+  // Per-lane color assignment (#10). Coloring by lane index alone makes lane N and lane
+  // N+PALETTE share a color even when both are visible at once. Instead each lane is
+  // GREEDILY given the lowest color index not currently used by another *active* lane, so
+  // simultaneously-visible branches stay distinct as long as there are ≤ PALETTE of them.
+  // A lane keeps its color for its whole lifetime (until freed), so a branch line is one
+  // consistent color top-to-bottom. laneColorIdx[i] = color index, or -1 when lane i free.
+  const PALETTE = LANE_COLORS.length;
+  let laneColorIdx = [];
+  const assignColor = (laneIdx) => {
+    const used = new Set();
+    for (let i = 0; i < lanes.length; i++) {
+      if (i !== laneIdx && lanes[i] !== null && laneColorIdx[i] >= 0) used.add(laneColorIdx[i]);
+    }
+    let ci = 0;
+    while (ci < PALETTE && used.has(ci)) ci++;
+    if (ci >= PALETTE) ci = laneIdx % PALETTE; // more concurrent lanes than colors — spread
+    laneColorIdx[laneIdx] = ci;
+    return ci;
+  };
 
   const findLane = (hash) => {
     for (let i = 0; i < lanes.length; i++) if (lanes[i] === hash) return i;
@@ -31,6 +47,7 @@ function layoutGraph(commits) {
   const allocLane = () => {
     for (let i = 0; i < lanes.length; i++) if (lanes[i] === null) return i;
     lanes.push(null);
+    laneColorIdx.push(-1);
     return lanes.length - 1;
   };
 
@@ -40,8 +57,14 @@ function layoutGraph(commits) {
 
     // 1. Which lane is this commit on? The lane that was routing toward it.
     let myLane = findLane(c.hash);
-    if (myLane === -1) myLane = allocLane();
-    positions.set(c.hash, { row, lane: myLane });
+    if (myLane === -1) {
+      // A brand-new branch tip (nothing routed to it yet) — give it a lane and a color.
+      myLane = allocLane();
+      lanes[myLane] = c.hash; // mark active so assignColor counts it among live lanes
+      assignColor(myLane);
+    }
+    const myColorIdx = laneColorIdx[myLane];
+    positions.set(c.hash, { row, lane: myLane, colorIdx: myColorIdx });
 
     // 2. Collect every lane currently routing toward THIS commit (besides myLane).
     //    Those lanes converge into myLane at this row (merge of branch lines).
@@ -57,14 +80,15 @@ function layoutGraph(commits) {
     //    - converging lanes are freed (they joined myLane here).
     //    - extra parents (merge) claim lanes routing toward them.
 
-    // Free converging lanes (they merged into myLane at this row)
-    for (const i of convergingLanes) lanes[i] = null;
+    // Free converging lanes (they merged into myLane at this row) and release their colors.
+    for (const i of convergingLanes) { lanes[i] = null; laneColorIdx[i] = -1; }
 
     // Assign myLane to follow the first parent
     if (parents.length > 0) {
       lanes[myLane] = parents[0];
     } else {
       lanes[myLane] = null; // root commit; lane ends
+      laneColorIdx[myLane] = -1;
     }
 
     // Extra parents (merge commits): route each toward its parent in some lane.
@@ -75,6 +99,7 @@ function layoutGraph(commits) {
       if (pl === -1) {
         pl = allocLane();
         lanes[pl] = par;
+        assignColor(pl); // new side-branch lane → its own distinct color
       }
       mergeParentLanes.push({ parent: par, lane: pl });
     }
@@ -112,10 +137,11 @@ function layoutGraph(commits) {
 
   // ----- Pass 2: carry segments -----
   // For every commit, its first-parent line descends from this commit's row to the
-  // parent's row, occupying myLane's column the whole way (until the parent, which
-  // may shift columns at the very last segment). We emit one segment PER ROW so long
-  // vertical runs are straight and only the final segment bends toward the parent's
-  // column if it differs.
+  // parent's row, occupying myLane's column the whole way (until the parent, which may
+  // shift columns at the very last row). A long straight run is emitted as ONE multi-row
+  // segment (#2) — only the final boundary, where the line may bend into the parent's
+  // column, is a separate one-row segment. This keeps the SVG node count proportional to
+  // the number of branch turns rather than the number of rows.
   for (let row = 0; row < commits.length; row++) {
     const c = commits[row];
     const pos = positions.get(c.hash);
@@ -126,39 +152,24 @@ function layoutGraph(commits) {
     const firstParent = parents[0];
     const fpPos = positions.get(firstParent);
     if (!fpPos) {
-      // First parent is outside the loaded window. Draw the line continuing straight
-      // down past the bottom edge so it reads as "history continues below" rather than
-      // stopping mid-air at the commit's dot. Each row below this commit is owned by
-      // another commit (which draws its own vertical), so we only need the segment(s)
-      // from this commit's row down to the bottom, with the very last one fading off.
+      // First parent is outside the loaded window. Draw the line continuing straight down
+      // to the bottom edge so it reads as "history continues below". One solid run to the
+      // last row, then a dashed "continue-down" stub that fades off past the bottom.
       const lastRow = commits.length - 1;
-      for (let r = row; r <= lastRow; r++) {
-        const isLast = (r === lastRow);
-        edges.push({
-          fromLane: pos.lane,
-          toLane: pos.lane,
-          fromRow: r,
-          toRow: r + 1,
-          colorLane: pos.lane,
-          type: isLast ? 'continue-down' : 'carry'
-        });
+      if (lastRow > row) {
+        edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: lastRow, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry' });
       }
+      edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: lastRow, toRow: lastRow + 1, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'continue-down' });
       continue;
     }
 
-    // Emit one straight vertical segment per row from row → fpPos.row-1 in pos.lane,
-    // then a final segment from (pos.lane, fpPos.row-1) → (fpPos.lane, fpPos.row).
-    for (let r = row; r < fpPos.row; r++) {
-      const isLast = (r === fpPos.row - 1);
-      edges.push({
-        fromLane: pos.lane,
-        toLane: isLast ? fpPos.lane : pos.lane,
-        fromRow: r,
-        toRow: r + 1,
-        colorLane: pos.lane,
-        type: 'carry'
-      });
+    // Straight run from this row to just above the parent, then a final segment that bends
+    // into the parent's column (a no-op vertical when the lane doesn't change).
+    const bendRow = fpPos.row - 1;
+    if (bendRow > row) {
+      edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: bendRow, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry' });
     }
+    edges.push({ fromLane: pos.lane, toLane: fpPos.lane, fromRow: bendRow, toRow: fpPos.row, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry' });
   }
 
   // ----- Pass 2c: draw merge-parent (side branch) connections -----
@@ -178,32 +189,24 @@ function layoutGraph(commits) {
       const pp = positions.get(par);
       if (!pp) {
         // Parent outside window — short stub down off this commit.
-        edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: row + 1, colorLane: pos.lane, type: 'merge-out' });
+        edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: row + 1, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'merge-out' });
         continue;
       }
       if (pp.row > pos.row) {
-        // Parent is BELOW: bend out from the merge dot to the parent's lane, then go down.
-        // First segment bends from the merge lane toward the parent lane.
-        edges.push({ fromLane: pos.lane, toLane: pp.lane, fromRow: row, toRow: row + 1, colorLane: pp.lane, type: 'merge-out' });
-        // Fill straight down on the parent's lane to the parent row.
-        for (let r = row + 1; r < pp.row; r++) {
-          edges.push({ fromLane: pp.lane, toLane: pp.lane, fromRow: r, toRow: r + 1, colorLane: pp.lane, type: 'carry' });
+        // Parent is BELOW: bend out from the merge dot to the parent's lane, then run
+        // straight down to the parent row as a single coalesced segment (#2).
+        edges.push({ fromLane: pos.lane, toLane: pp.lane, fromRow: row, toRow: row + 1, colorLane: pp.lane, colorIdx: pp.colorIdx, owner: c.hash, type: 'merge-out' });
+        if (pp.row > row + 1) {
+          edges.push({ fromLane: pp.lane, toLane: pp.lane, fromRow: row + 1, toRow: pp.row, colorLane: pp.lane, colorIdx: pp.colorIdx, owner: c.hash, type: 'carry' });
         }
       } else if (pp.row < pos.row) {
-        // Parent is ABOVE: connect upward. Draw from the parent's row down to the merge,
-        // bending into the merge dot on the final segment. Use the parent's lane for the
-        // vertical run, then bend into the merge dot's lane at the row just above it.
-        for (let r = pp.row; r < row; r++) {
-          const isLast = (r === row - 1);
-          edges.push({
-            fromLane: pp.lane,
-            toLane: isLast ? pos.lane : pp.lane,
-            fromRow: r,
-            toRow: r + 1,
-            colorLane: pp.lane,
-            type: 'carry'
-          });
+        // Parent is ABOVE: run straight down the parent's lane from the parent row to just
+        // above the merge, then a final segment bending into the merge dot's lane (#2).
+        const bendRow = row - 1;
+        if (bendRow > pp.row) {
+          edges.push({ fromLane: pp.lane, toLane: pp.lane, fromRow: pp.row, toRow: bendRow, colorLane: pp.lane, colorIdx: pp.colorIdx, owner: c.hash, type: 'carry' });
         }
+        edges.push({ fromLane: pp.lane, toLane: pos.lane, fromRow: bendRow, toRow: row, colorLane: pp.lane, colorIdx: pp.colorIdx, owner: c.hash, type: 'carry' });
       }
     }
   }
@@ -277,6 +280,26 @@ function refreshThemeLaneColors() {
   } catch (e) { /* keep current palette */ }
 }
 
+// Build a case-insensitive regex that matches any of the search terms, for highlighting
+// filter matches (#5). Terms are escaped for HTML (so they match the escaped haystack) and
+// for regex meta-chars. Returns null when there's nothing to highlight.
+function buildHighlightRegex(terms) {
+  if (!terms || !terms.length) return null;
+  const parts = terms
+    .map(t => escapeHtml(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean);
+  if (!parts.length) return null;
+  return new RegExp('(' + parts.join('|') + ')', 'gi');
+}
+
+// HTML-escape `text` and wrap matches of `re` (from buildHighlightRegex) in <mark>. The
+// result is escaped HTML, safe to inject. `re` may be null (no active highlight).
+function highlightSearchTerms(text, re) {
+  const escaped = escapeHtml(text);
+  if (!re) return escaped;
+  return escaped.replace(re, '<mark class="graph-match">$1</mark>');
+}
+
 function renderGraph() {
   const container = $('#graph-container');
   if (!container) return;
@@ -297,80 +320,96 @@ function renderGraph() {
   const commitByHash = new Map();
   for (const c of commits) commitByHash.set(c.hash, c);
 
+  // Search-match highlighting (#5): when a text filter is active, mark the matched terms
+  // in the message/author. Only the 'message'/'all' modes match visible text — for the
+  // 'files'/'content' modes the match lives in data we don't show, so there's nothing to
+  // mark inline.
+  const _gq = (state.graphFilter || '').trim();
+  const _gMode = state.graphFilterMode || 'message';
+  const highlightRe = (_gq && (_gMode === 'message' || _gMode === 'all'))
+    ? buildHighlightRegex(_gq.split(/\s+/).filter(Boolean))
+    : null;
+
   const totalHeight = commits.length * GRAPH_ROW_H;
   const svgWidth = GRAPH_LANE_X0 + laneCount * GRAPH_LANE_W + 8;
 
-  // Build SVG paths for edges (string array, joined at the end).
-  // All edges span at most one row, so curves are small and local — a lane
-  // only bends at the single boundary where it changes column.
-  const edgeSvgParts = new Array(edges.length);
+  // Precompute each edge's vertical row span so the window filter (below) is a cheap
+  // numeric compare. 'continue-down' fades off the bottom edge, so treat its span as
+  // reaching the last row.
+  const edgeLo = new Array(edges.length);
+  const edgeHi = new Array(edges.length);
   for (let i = 0; i < edges.length; i++) {
     const e = edges[i];
+    edgeLo[i] = Math.min(e.fromRow, e.toRow);
+    edgeHi[i] = e.type === 'continue-down' ? commits.length : Math.max(e.fromRow, e.toRow);
+  }
+
+  // `relatedSet` (declared here, set by applyAncestryHighlight) is the lineage of the
+  // selected commit; the builders below add a `rel` class to elements in it (#3).
+  let relatedSet = null;
+
+  // Build the SVG string for one edge. A straight run is a single <line> spanning all its
+  // rows (#2); a column change is a short cubic.
+  const buildEdge = (e) => {
     const x1 = GRAPH_LANE_X0 + e.fromLane * GRAPH_LANE_W;
     const x2 = GRAPH_LANE_X0 + e.toLane * GRAPH_LANE_W;
-    const color = laneColor(e.colorLane != null ? e.colorLane : e.fromLane);
-
+    const colorKey = e.colorIdx != null ? e.colorIdx : (e.colorLane != null ? e.colorLane : e.fromLane);
+    const color = laneColor(colorKey);
+    const owner = e.owner ? ` data-owner="${e.owner}"` : '';
+    const relCls = (relatedSet && e.owner && relatedSet.has(e.owner)) ? ' rel' : '';
     if (e.type === 'continue-down') {
-      // Line continues toward a parent that isn't loaded — run it from the dot
-      // straight down to the bottom edge of the SVG, fading out via a dashed stroke
-      // that signals "history continues below".
       const yStart = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
-      const yEnd = totalHeight; // the very bottom edge
-      edgeSvgParts[i] = `<line x1="${x1}" y1="${yStart}" x2="${x1}" y2="${yEnd}" stroke="${color}" stroke-width="2" stroke-dasharray="3 3" opacity="0.55"/>`;
-      continue;
+      return `<line class="graph-edge${relCls}"${owner} x1="${x1}" y1="${yStart}" x2="${x1}" y2="${totalHeight}" stroke="${color}" stroke-width="2" stroke-dasharray="3 3" opacity="0.55"/>`;
     }
-
-    // 'carry' and 'merge-out' both span fromRow → toRow (one row apart)
     const y1 = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
     const y2 = e.toRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
     if (x1 === x2) {
-      edgeSvgParts[i] = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`;
-    } else {
-      const midY = y1 + (y2 - y1) / 2;
-      edgeSvgParts[i] = `<path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"/>`;
+      return `<line class="graph-edge${relCls}"${owner} x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`;
     }
-  }
+    const midY = y1 + (y2 - y1) / 2;
+    return `<path class="graph-edge${relCls}"${owner} d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"/>`;
+  };
 
-  // Build SVG circles for commits and the row list HTML
-  const dotsSvg = new Array(commits.length);
-  const rowsHtml = new Array(commits.length);
-  for (let i = 0; i < commits.length; i++) {
-    const c = commits[i];
-    const pos = positions.get(c.hash);
-    if (!pos) { dotsSvg[i] = ''; rowsHtml[i] = ''; continue; }
+  // Is `c` collapsible? (ANY parent present and sitting below it — there's a chain to fold.)
+  const isCollapsibleCommit = (c, pos) => {
+    if (collapsedSet && collapsedSet.has(c.hash)) return true;
+    for (const ph of (c.parents || [])) {
+      const pp = positions.get(ph);
+      if (pp && pp.row > pos.row) return true;
+    }
+    return false;
+  };
+
+  // Build the SVG circle for one commit's dot.
+  const buildDot = (c, pos) => {
     const cx = GRAPH_LANE_X0 + pos.lane * GRAPH_LANE_W;
     const cy = pos.row * GRAPH_ROW_H + GRAPH_ROW_H / 2;
-    const color = laneColor(pos.lane);
+    const color = laneColor(pos.colorIdx != null ? pos.colorIdx : pos.lane);
     const isMerge = (c.parents || []).length > 1;
     const isHead = c.hash === head;
     const isCollapsed = collapsedSet && collapsedSet.has(c.hash);
-
-    // A commit is collapsible if ANY parent is present in the view and sits below it
-    // (there's a chain we can fold). Checking all parents — not just the first — means
-    // merge commits fold even when their first parent is drawn above.
-    let collapsible = isCollapsed;
-    if (!collapsible) {
-      for (const ph of (c.parents || [])) {
-        const pp = positions.get(ph);
-        if (pp && pp.row > pos.row) { collapsible = true; break; }
-      }
-    }
-
+    const collapsible = isCollapsibleCommit(c, pos);
+    const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
     const cls = 'commit-dot'
       + (isMerge ? ' merge' : '')
       + (isHead ? ' head' : '')
-      + (isCollapsed ? ' collapsed' : '');
+      + (isCollapsed ? ' collapsed' : '')
+      + relCls;
     const r = isMerge ? 6 : 5;
-    // Left-click selects the commit & shows its diff; right-click folds/unfolds its
-    // branch line (handled in the context-menu logic). We tag whether folding applies.
     let dot = `<circle class="${cls}" cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="${isHead ? '#efe6d4' : '#0a0606'}" stroke-width="${isHead ? 2 : 1.5}" data-hash="${c.hash}" data-foldable="${collapsible ? '1' : ''}">`;
     if (collapsible) {
       dot += `<title style="pointer-events:none">${isCollapsed ? 'Right-click to expand this branch line' : 'Right-click to collapse this branch line'}</title>`;
     }
-    dot += `</circle>`;
-    dotsSvg[i] = dot;
+    return dot + `</circle>`;
+  };
 
-    // Refs: build the pill HTML
+  // Build the row HTML for one commit. Rows are absolutely positioned at their row offset
+  // so only the visible ones need to exist in the DOM (#1).
+  const buildRow = (c, pos) => {
+    const isHead = c.hash === head;
+    const isCollapsed = collapsedSet && collapsedSet.has(c.hash);
+    const collapsible = isCollapsibleCommit(c, pos);
+
     let refPills = '';
     if (c.refs && c.refs.length) {
       for (const r of c.refs) {
@@ -386,21 +425,24 @@ function renderGraph() {
 
     const shortHash = (c.hash || '').slice(0, 7);
     const dateStr = c.date ? relativeTime(c.date) : '';
+    // Absolute timestamp shown on hover over the relative date (#6).
+    const dateTitle = c.date ? new Date(c.date).toLocaleString() : '';
     const selectedCls = state.selectedGraphHash === c.hash ? ' selected' : '';
     const headCls = isHead ? ' head' : '';
-    // A clear, easy-to-click fold toggle at the start of the row for foldable commits.
+    const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
     const foldToggle = collapsible
       ? `<button class="graph-fold-btn${isCollapsed ? ' collapsed' : ''}" data-fold="${c.hash}" title="${isCollapsed ? 'Expand branch line' : 'Collapse branch line'}" tabindex="-1">${isCollapsed ? '▸' : '▾'}</button>`
       : `<span class="graph-fold-spacer"></span>`;
-    rowsHtml[i] =
-      `<div class="graph-row${selectedCls}${headCls}" data-hash="${c.hash}" style="height:${GRAPH_ROW_H}px">` +
+    const msgHtml = highlightSearchTerms(c.message || '', highlightRe);
+    const authorHtml = highlightSearchTerms(c.author_name || '', highlightRe);
+    return `<div class="graph-row${selectedCls}${headCls}${relCls}" data-hash="${c.hash}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">` +
         foldToggle +
-        `<span class="graph-row-msg">${refPills}${escapeHtml(c.message)}</span>` +
-        `<span class="graph-row-author">${escapeHtml(c.author_name || '')}</span>` +
-        `<span class="graph-row-date">${escapeHtml(dateStr)}</span>` +
+        `<span class="graph-row-msg" title="${escapeHtml(c.message || '')}">${refPills}${msgHtml}</span>` +
+        `<span class="graph-row-author">${authorHtml}</span>` +
+        `<span class="graph-row-date" title="${escapeHtml(dateTitle)}">${escapeHtml(dateStr)}</span>` +
         `<span class="graph-row-hash">${escapeHtml(shortHash)}</span>` +
       `</div>`;
-  }
+  };
 
   // When collapsed, append a clickable summary row showing how many commits are hidden.
   const hiddenRowHtml = (hiddenCount && hiddenCount > 0)
@@ -410,19 +452,103 @@ function renderGraph() {
       `</div>`
     : '';
 
+  // Skeleton only: a full-height SVG + a full-height rows spacer, both populated per-window.
+  // The element heights reserve the full scroll range so the scrollbar is accurate even
+  // though only the visible rows exist in the DOM.
   container.innerHTML =
     `<div class="graph-svg-wrap" style="grid-template-columns: ${svgWidth}px 1fr">` +
       `<svg class="graph-svg" width="${svgWidth}" height="${totalHeight}" viewBox="0 0 ${svgWidth} ${totalHeight}">` +
-        `<g class="graph-edges">${edgeSvgParts.join('')}</g>` +
-        `<g class="graph-dots">${dotsSvg.join('')}</g>` +
+        `<g class="graph-edges"></g>` +
+        `<g class="graph-dots"></g>` +
       `</svg>` +
-      `<div class="graph-rows" style="height:${totalHeight}px">${rowsHtml.join('')}</div>` +
+      `<div class="graph-rows" style="height:${totalHeight}px"></div>` +
     `</div>` +
     hiddenRowHtml;
+  container.classList.remove('graph-highlight-active');
+
+  const edgesG = container.querySelector('.graph-edges');
+  const dotsG = container.querySelector('.graph-dots');
+  const rowsEl = container.querySelector('.graph-rows');
+
+  // ----- Row windowing (#1) -----
+  // Render only the rows in the viewport (plus a buffer), and the dots/edges that touch
+  // that row span. Called on first paint, on scroll, on resize, and whenever the highlight
+  // or selection changes. Keeps the live DOM bounded no matter how many commits are loaded.
+  const BUFFER_ROWS = 8;
+  let winStart = -1, winEnd = -1;
+  const renderWindow = (force) => {
+    const viewH = container.clientHeight || 600;
+    const scrollTop = container.scrollTop;
+    let start = Math.floor(scrollTop / GRAPH_ROW_H) - BUFFER_ROWS;
+    let end = Math.ceil((scrollTop + viewH) / GRAPH_ROW_H) + BUFFER_ROWS;
+    if (start < 0) start = 0;
+    if (end > commits.length - 1) end = commits.length - 1;
+    if (!force && start === winStart && end === winEnd) return;
+    winStart = start; winEnd = end;
+
+    const rowParts = [];
+    const dotParts = [];
+    for (let i = start; i <= end; i++) {
+      const c = commits[i];
+      const pos = positions.get(c.hash);
+      if (!pos) continue;
+      dotParts.push(buildDot(c, pos));
+      rowParts.push(buildRow(c, pos));
+    }
+    dotsG.innerHTML = dotParts.join('');
+    rowsEl.innerHTML = rowParts.join('');
+
+    const edgeParts = [];
+    for (let i = 0; i < edges.length; i++) {
+      if (edgeHi[i] >= start && edgeLo[i] <= end) edgeParts.push(buildEdge(edges[i]));
+    }
+    edgesG.innerHTML = edgeParts.join('');
+
+    container.classList.toggle('graph-highlight-active', !!relatedSet);
+  };
 
   // ----- Event delegation ----- (one listener per kind on the container)
   // Cache for click handler — we look up commits via the map, no per-row .find()
   container._graphCommitsByHash = commitByHash;
+
+  // Child→parent adjacency, so we can highlight a commit's full lineage (#3).
+  const childrenByHash = new Map();
+  for (const c of commits) {
+    for (const p of (c.parents || [])) {
+      let arr = childrenByHash.get(p);
+      if (!arr) { arr = []; childrenByHash.set(p, arr); }
+      arr.push(c.hash);
+    }
+  }
+
+  // The set of commits related to `hash`: itself + every ancestor (walk parents) +
+  // every descendant (walk children), restricted to commits currently laid out.
+  const computeRelated = (hash) => {
+    const related = new Set([hash]);
+    const up = [hash];
+    while (up.length) {
+      const c = commitByHash.get(up.pop());
+      if (!c) continue;
+      for (const p of (c.parents || [])) {
+        if (commitByHash.has(p) && !related.has(p)) { related.add(p); up.push(p); }
+      }
+    }
+    const down = [hash];
+    while (down.length) {
+      for (const ch of (childrenByHash.get(down.pop()) || [])) {
+        if (!related.has(ch)) { related.add(ch); down.push(ch); }
+      }
+    }
+    return related;
+  };
+
+  // Ancestry highlight (#3): recompute the lineage set for `hash` (or clear it) and repaint
+  // the visible window so the `rel`/dim marks apply to the virtualized rows on screen. The
+  // builders read `relatedSet`, so marks are also re-applied as new rows scroll into view.
+  const applyAncestryHighlight = (hash) => {
+    relatedSet = (hash && commitByHash.has(hash)) ? computeRelated(hash) : null;
+    renderWindow(true);
+  };
 
   // Replace previously-attached delegated handlers (if any) to avoid stacking
   if (container._graphHandlers) {
@@ -434,7 +560,39 @@ function renderGraph() {
     container.removeEventListener('dragover', container._graphHandlers.dragover);
     container.removeEventListener('dragleave', container._graphHandlers.dragleave);
     container.removeEventListener('drop', container._graphHandlers.drop);
+    if (container._graphHandlers.mouseover) container.removeEventListener('mouseover', container._graphHandlers.mouseover);
+    if (container._graphHandlers.mouseout) container.removeEventListener('mouseout', container._graphHandlers.mouseout);
+    if (container._graphHandlers.keydown) container.removeEventListener('keydown', container._graphHandlers.keydown);
+    if (container._graphHandlers.scroll) container.removeEventListener('scroll', container._graphHandlers.scroll);
   }
+  // Tear down the previous layout's resize observer / pending scroll frame before rewiring.
+  if (container._graphResizeObs) { container._graphResizeObs.disconnect(); container._graphResizeObs = null; }
+  if (container._graphScrollRaf) { cancelAnimationFrame(container._graphScrollRaf); container._graphScrollRaf = 0; }
+
+  // Bring row `idx` into view by adjusting scrollTop directly. Works even when the target
+  // row isn't currently in the DOM (virtualized), unlike Element.scrollIntoView.
+  const scrollRowIntoView = (idx) => {
+    const top = idx * GRAPH_ROW_H;
+    const bottom = top + GRAPH_ROW_H;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+    if (top < viewTop) container.scrollTop = top;
+    else if (bottom > viewBottom) container.scrollTop = bottom - container.clientHeight;
+  };
+
+  // Select a commit by hash: update state, optionally scroll it into view, then repaint the
+  // window (which applies the `.selected` row class + lineage highlight) and show its diff.
+  const selectCommit = (hash, opts) => {
+    if (!hash) return;
+    state.selectedGraphHash = hash;
+    if (opts && opts.scroll) {
+      const p = positions.get(hash);
+      if (p) scrollRowIntoView(p.row);
+    }
+    applyAncestryHighlight(hash);
+    const commit = container._graphCommitsByHash.get(hash);
+    if (commit) renderGraphDetail(commit);
+  };
 
   const onClick = (e) => {
     // Click on the "hidden commits" summary row expands the global collapse.
@@ -457,13 +615,27 @@ function renderGraph() {
     const row = e.target.closest('.graph-row');
     const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash);
     if (!hash) return;
-    state.selectedGraphHash = hash;
-    const prev = container.querySelector('.graph-row.selected');
-    const targetRow = container.querySelector(`.graph-row[data-hash="${hash}"]`);
-    if (prev && prev !== targetRow) prev.classList.remove('selected');
-    if (targetRow) targetRow.classList.add('selected');
-    const commit = container._graphCommitsByHash.get(hash);
-    if (commit) renderGraphDetail(commit);
+    // Focus the container (without scrolling) so arrow-key navigation works after a click.
+    container.focus({ preventScroll: true });
+    selectCommit(hash);
+  };
+
+  // Keyboard navigation (#8): ↑/↓ move the selection through the visible commits, Home/End
+  // jump to the newest/oldest, Enter re-opens the selected commit's detail. Works when the
+  // graph container has focus (it's given tabindex below).
+  const onKeyDown = (e) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter'].includes(e.key)) return;
+    const list = (state.graph && state.graph.commits) || [];
+    if (!list.length) return;
+    e.preventDefault();
+    let idx = list.findIndex(c => c.hash === state.selectedGraphHash);
+    if (e.key === 'ArrowDown') idx = idx < 0 ? 0 : Math.min(list.length - 1, idx + 1);
+    else if (e.key === 'ArrowUp') idx = idx < 0 ? 0 : Math.max(0, idx - 1);
+    else if (e.key === 'Home') idx = 0;
+    else if (e.key === 'End') idx = list.length - 1;
+    else if (e.key === 'Enter') { if (idx < 0) idx = 0; }
+    const target = list[idx];
+    if (target) selectCommit(target.hash, { scroll: true });
   };
 
   // Double-click a commit row or dot to fold/unfold its branch line (reliable,
@@ -555,6 +727,26 @@ function renderGraph() {
     await handleBranchDrop(branch, targetHash);
   };
 
+  // Row ↔ dot hover sync (#4): the text rows and the SVG dots live in separate grid
+  // columns, so a plain CSS `:hover` can't reach across. Mirror the hover here by
+  // toggling a class on the matching circle when the pointer enters/leaves a row.
+  const dotForHash = (hash) =>
+    hash ? container.querySelector(`.graph-svg circle.commit-dot[data-hash="${CSS.escape(hash)}"]`) : null;
+  const onMouseOver = (e) => {
+    const row = e.target.closest('.graph-row');
+    if (!row || !row.dataset.hash) return;
+    const dot = dotForHash(row.dataset.hash);
+    if (dot) dot.classList.add('row-hover');
+  };
+  const onMouseOut = (e) => {
+    const row = e.target.closest('.graph-row');
+    if (!row || !row.dataset.hash) return;
+    // Ignore moves between the row's own children — only clear when truly leaving it.
+    if (row.contains(e.relatedTarget)) return;
+    const dot = dotForHash(row.dataset.hash);
+    if (dot) dot.classList.remove('row-hover');
+  };
+
   container.addEventListener('click', onClick);
   container.addEventListener('dblclick', onDblClick);
   container.addEventListener('contextmenu', onContext);
@@ -563,12 +755,38 @@ function renderGraph() {
   container.addEventListener('dragover', onDragOver);
   container.addEventListener('dragleave', onDragLeave);
   container.addEventListener('drop', onDrop);
-  container._graphHandlers = { click: onClick, dblclick: onDblClick, context: onContext, dragstart: onDragStart, dragend: onDragEnd, dragover: onDragOver, dragleave: onDragLeave, drop: onDrop };
+  container.addEventListener('mouseover', onMouseOver);
+  container.addEventListener('mouseout', onMouseOut);
+  // Make the graph focusable so it can receive arrow-key navigation (#8).
+  if (!container.hasAttribute('tabindex')) container.tabIndex = 0;
+  container.addEventListener('keydown', onKeyDown);
 
-  // If selection is still valid, show its detail; else clear
+  // Repaint the window on scroll, throttled to one paint per animation frame (#1).
+  const onScroll = () => {
+    if (container._graphScrollRaf) return;
+    container._graphScrollRaf = requestAnimationFrame(() => {
+      container._graphScrollRaf = 0;
+      renderWindow(false);
+    });
+  };
+  container.addEventListener('scroll', onScroll, { passive: true });
+
+  container._graphHandlers = { click: onClick, dblclick: onDblClick, context: onContext, dragstart: onDragStart, dragend: onDragEnd, dragover: onDragOver, dragleave: onDragLeave, drop: onDrop, mouseover: onMouseOver, mouseout: onMouseOut, keydown: onKeyDown, scroll: onScroll };
+
+  // The viewport height affects how many rows are visible — repaint when the pane resizes.
+  if (typeof ResizeObserver !== 'undefined') {
+    container._graphResizeObs = new ResizeObserver(() => renderWindow(true));
+    container._graphResizeObs.observe(container);
+  }
+
+  // First paint of the visible window.
+  renderWindow(true);
+
+  // If selection is still valid, show its detail and re-apply its lineage highlight (which
+  // repaints the window with the marks); else clear.
   if (state.selectedGraphHash) {
     const sel = commitByHash.get(state.selectedGraphHash);
-    if (sel) renderGraphDetail(sel);
+    if (sel) { renderGraphDetail(sel); applyAncestryHighlight(state.selectedGraphHash); }
     else { state.selectedGraphHash = null; renderGraphDetail(null); }
   }
 }
@@ -1545,6 +1763,30 @@ function wireGraphTab() {
   const refresh = $('#graph-refresh');
   if (refresh) refresh.onclick = () => refreshGraph();
 
+  // Load more (#9): bump the limit by a page and refetch. graphLog uses `--all --topo-order`
+  // (a global ordering), so true offset-pagination isn't well-defined — refetching a larger
+  // window is the correct, simple approach and reuses the existing layout pipeline.
+  const loadMore = $('#graph-load-more');
+  if (loadMore) loadMore.onclick = async () => {
+    if (state.graphAtEnd) return;
+    const STEP = 300;
+    const HARD_CAP = 5000;
+    let v = (state.graphLimit || 300) + STEP;
+    if (v > HARD_CAP) {
+      const ok = await modal.confirm({
+        title: 'Large Chronicle',
+        message: `Loading more than ${HARD_CAP.toLocaleString()} commits may slow the app or cause it to lock up. Continue?`,
+        danger: true,
+        confirmText: 'Continue'
+      });
+      if (!ok) return;
+    }
+    state.graphLimit = v;
+    const limitInput = $('#graph-limit');
+    if (limitInput) limitInput.value = v;
+    refreshGraph();
+  };
+
   const collapseBtn = $('#graph-collapse-toggle');
   if (collapseBtn) collapseBtn.onclick = () => {
     state.graphCollapsed = !state.graphCollapsed;
@@ -1620,6 +1862,22 @@ function updateGraphCollapseButton() {
     btn.innerHTML = '⊟ Collapse';
     btn.title = `Collapse the middle of long history, showing only the newest ${GRAPH_COLLAPSE_VISIBLE} commits`;
     btn.classList.remove('active');
+  }
+}
+
+// Reflect whether more history can be loaded on the "Load more" button (#9). When the last
+// fetch returned fewer commits than requested, the whole history is loaded — disable it.
+function updateLoadMoreButton() {
+  const btn = document.getElementById('graph-load-more');
+  if (!btn) return;
+  if (state.graphAtEnd) {
+    btn.disabled = true;
+    btn.innerHTML = '↧ All loaded';
+    btn.title = 'The entire history is already loaded';
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = '↧ Load more';
+    btn.title = 'Load another batch of older commits';
   }
 }
 

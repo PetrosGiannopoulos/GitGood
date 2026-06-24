@@ -165,8 +165,9 @@ async function refreshLog() {
 const GRAPH_COLLAPSE_VISIBLE = 5;
 
 async function refreshGraph() {
+  const requestedLimit = state.graphLimit || 300;
   state.graphLoading = true;
-  const result = await gs.graphLog({ limit: state.graphLimit || 300 });
+  const result = await gs.graphLog({ limit: requestedLimit });
   state.graphLoading = false;
   if (!result.ok) {
     state.graphAllCommits = [];
@@ -177,6 +178,9 @@ async function refreshGraph() {
   const { commits, head } = result.data;
   state.graphAllCommits = commits;
   state.graphHead = head;
+  // Fewer commits than asked for ⇒ the whole history fits in the window (#9).
+  state.graphAtEnd = commits.length < requestedLimit;
+  if (typeof updateLoadMoreButton === 'function') updateLoadMoreButton();
   // refreshAll() cleared the commit→files cache above. If a file-based graph filter is
   // active, reload it before laying out — otherwise commitMatchesFilter sees an empty map
   // and filters every commit out, so the graph renders empty ("No chronicles to display")
