@@ -99,9 +99,7 @@ body::before {
    WELCOME SCREEN
    ============================================ */
 #welcome-screen {
-  background:
-    radial-gradient(ellipse at top, #1a0808 0%, var(--ink-black) 50%),
-    var(--ink-black);
+  background: #050203;
   align-items: stretch;
   justify-content: flex-start;
   overflow: hidden;
@@ -134,23 +132,41 @@ body::before {
   overflow: hidden;
 }
 
-.welcome-cross {
+/* ============================================
+   THE BLACK TOWER — welcome backdrop
+   A full-bleed painted plate of the dead tower
+   under a storm. A slow, seamless Ken-Burns drift
+   keeps it alive; a scrim darkens the right side so
+   the title/actions stay legible over the art.
+   ============================================ */
+
+/* The painted plate, covering the whole screen. A barely-there
+   zoom/drift gives life without ever leaving the frame. */
+.monolith-photo {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 800px;
-  height: 800px;
-  transform: translate(-50%, -50%);
-  background:
-    linear-gradient(transparent 48%, color-mix(in srgb, var(--accent) 8%, transparent) 48%, color-mix(in srgb, var(--accent) 8%, transparent) 52%, transparent 52%),
-    linear-gradient(90deg, transparent 48%, color-mix(in srgb, var(--accent) 8%, transparent) 48%, color-mix(in srgb, var(--accent) 8%, transparent) 52%, transparent 52%);
-  filter: blur(2px);
-  animation: pulse-cross 8s ease-in-out infinite;
+  inset: -3%;                /* slight bleed so the drift never shows an edge */
+  background: url('../assets/tower.png') center / cover no-repeat;
+  filter: contrast(1.05) saturate(1.02) brightness(1.0);
+  animation: tower-drift 40s ease-in-out infinite;
+  transform-origin: 42% 55%; /* zoom toward the tower */
+}
+@keyframes tower-drift {
+  0%, 100% { transform: scale(1.03) translate(0, 0); }
+  50%      { transform: scale(1.08) translate(-1.2%, -0.8%); }
 }
 
-@keyframes pulse-cross {
-  0%, 100% { opacity: 0.6; transform: translate(-50%, -50%) scale(1); }
-  50% { opacity: 0.9; transform: translate(-50%, -50%) scale(1.05); }
+/* Atmospheric scrim: a soft vignette plus a darker wash on the right,
+   behind the title and action buttons, for legibility. */
+.monolith-glow {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, transparent 38%, rgba(4,5,8,0.55) 88%),
+    radial-gradient(120% 100% at 45% 46%, transparent 56%, rgba(0,0,0,0.5) 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .monolith-photo { animation: none; transform: scale(1.03); }
 }
 
 .welcome-content {
