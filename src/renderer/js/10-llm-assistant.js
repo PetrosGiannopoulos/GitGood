@@ -194,7 +194,7 @@ async function disableAssistant() {
 const LLM_EXAMPLES = [
   'Who made the most recent change, and in which commit?',
   'Summarize what changed in the last 5 commits.',
-  'Which commit last touched the graph code?',
+  'How many lines are in preload.js and what does it do?',
   'What has this branch been working on lately?'
 ];
 

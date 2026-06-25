@@ -2724,11 +2724,12 @@ async function gatherGitContext(g, limit, compact) {
   return ctx;
 }
 
-function buildLlmPrompt(meta, retrieved, question) {
+function buildLlmPrompt(meta, retrieved, fileCtx, question) {
   const lines = [
     'You are a helpful assistant embedded in a Git desktop app called GitGood.',
     'Answer the user\'s question about this repository using ONLY the context provided below.',
     'When you reference a commit, include its short hash. Cite authors, files, and dates where relevant.',
+    'File contents below are shown with leading line numbers; use them for exact line counts and quoting.',
     'If the answer is not present in the provided context, say so plainly instead of guessing.',
     'Be concise. Never invent commits, files, authors, or dates.',
     '',
@@ -2736,6 +2737,14 @@ function buildLlmPrompt(meta, retrieved, question) {
     meta || '(no history available)',
     '=== END OVERVIEW ==='
   ];
+  if (fileCtx && fileCtx.trim()) {
+    lines.push(
+      '',
+      '=== FILE CONTENTS (current working tree) ===',
+      fileCtx,
+      '=== END FILE CONTENTS ==='
+    );
+  }
   if (retrieved && retrieved.trim()) {
     lines.push(
       '',
@@ -2746,6 +2755,77 @@ function buildLlmPrompt(meta, retrieved, question) {
   }
   lines.push('', 'Question: ' + question, 'Answer:');
   return lines.join('\n');
+}
+
+// Deterministically gather actual file contents/line counts for the question. Embeddings
+// cannot count lines or reproduce exact text — only a real read can — so when the user
+// names a file, or asks about line counts/sizes/contents, we read the working tree directly.
+async function gatherFileContext(g, repoPath, question) {
+  let tracked = [];
+  try { tracked = (await g.raw(['ls-files'])).split('\n').map(s => s.trim()).filter(Boolean); }
+  catch (e) { return null; }
+  if (!tracked.length) return null;
+
+  const qLower = question.toLowerCase();
+  const wantsStats = /\b(how many|number of|count|line|lines|loc|length|size|content|contents|what'?s in|show me|list)\b/.test(qLower);
+
+  const readFile = (f) => {
+    try {
+      const abs = path.join(repoPath, f);
+      if (fs.existsSync(abs)) return fs.readFileSync(abs, 'utf8');
+    } catch (e) {}
+    return null;
+  };
+  const isBinary = (s) => s.indexOf('\u0000') >= 0;
+
+  // Files explicitly named in the question (full path, or basename with an extension).
+  const named = [];
+  for (const f of tracked) {
+    const base = f.split('/').pop();
+    const hasExt = base.includes('.');
+    if (qLower.includes(f.toLowerCase()) || (hasExt && base.length >= 4 && qLower.includes(base.toLowerCase()))) {
+      named.push(f);
+    }
+  }
+
+  const blocks = [];
+  const MAX_LINES = 500, MAX_CHARS = 16000;
+
+  // Inject line-numbered content + exact total line count for up to 3 named files.
+  for (const f of named.slice(0, 3)) {
+    const content = readFile(f);
+    if (content == null) continue;
+    if (isBinary(content)) { blocks.push(`File: ${f} — binary, not shown.`); continue; }
+    const allLines = content.split('\n');
+    let body = allLines.slice(0, MAX_LINES).map((l, i) => `${i + 1}\t${l}`).join('\n');
+    if (body.length > MAX_CHARS) body = body.slice(0, MAX_CHARS) + '\n…(truncated)…';
+    blocks.push(`File: ${f}\nTotal lines: ${allLines.length}\n--- content${allLines.length > MAX_LINES ? ` (first ${MAX_LINES} lines)` : ''} ---\n${body}`);
+  }
+
+  // If the question is about counts/sizes/contents generally, add a file map with per-file
+  // line counts and the project total. Deterministic and exact (capped for big repos).
+  if (wantsStats && blocks.length < 3) {
+    const stats = [];
+    let total = 0, counted = 0;
+    const LIMIT = 500;
+    for (const f of tracked) {
+      if (counted >= LIMIT) break;
+      const content = readFile(f);
+      if (content == null || isBinary(content)) continue;
+      const n = content.length ? content.split('\n').length : 0;
+      total += n; counted++;
+      stats.push(`${n}\t${f}`);
+    }
+    if (stats.length) {
+      const more = tracked.length > counted ? ` (+${tracked.length - counted} more files not counted)` : '';
+      blocks.push(`Tracked text files — line count then path:\n${stats.join('\n')}\n\nProject total: ${total} lines across ${counted} files${more}.`);
+    }
+  }
+
+  if (!blocks.length) return null;
+  let ctx = blocks.join('\n\n');
+  if (ctx.length > 16000) ctx = ctx.slice(0, 16000) + '\n…(file context truncated)…';
+  return ctx;
 }
 
 // ---- Retrieval index (local embeddings) ----------------------------------------
@@ -2885,7 +2965,9 @@ async function retrieveContext(repoPath, embedModel, question, topK) {
   scored.sort((a, b) => b.s - a.s);
   const top = scored.slice(0, Math.max(1, topK || 8)).filter(x => x.s > 0);
   if (!top.length) return null;
-  return top.map(({ c }) => `--- ${c.file} @ ${c.hash.slice(0, 10)} (${c.author}, ${c.date}) — "${c.subject}" ---\n${c.text}`).join('\n\n');
+  let out = top.map(({ c }) => `--- ${c.file} @ ${c.hash.slice(0, 10)} (${c.author}, ${c.date}) — "${c.subject}" ---\n${c.text}`).join('\n\n');
+  if (out.length > 12000) out = out.slice(0, 12000) + '\n…(retrieved context truncated)…';
+  return out;
 }
 
 // Is Ollama reachable, and is the requested model already pulled?
@@ -2945,8 +3027,12 @@ ipcMain.handle('llm:ask', wrap(async (_, opts) => {
     try { retrieved = await retrieveContext(currentRepoPath, embedModel || LLM_DEFAULT_EMBED_MODEL, q, topK || 8); }
     catch (e) { /* no index yet, or embed model missing — fall back to overview only */ }
   }
-  const meta = await gatherGitContext(g, Math.min(Math.max(parseInt(historyLimit, 10) || 120, 10), 500), !!retrieved);
-  const prompt = buildLlmPrompt(meta, retrieved, q);
+  // Actual file contents / exact line counts when the question is about files (deterministic).
+  let fileCtx = null;
+  try { fileCtx = await gatherFileContext(g, currentRepoPath, q); } catch (e) {}
+
+  const meta = await gatherGitContext(g, Math.min(Math.max(parseInt(historyLimit, 10) || 120, 10), 500), !!(retrieved || fileCtx));
+  const prompt = buildLlmPrompt(meta, retrieved, fileCtx, q);
 
   let answer = '';
   let streamErr = null;
@@ -2955,7 +3041,10 @@ ipcMain.handle('llm:ask', wrap(async (_, opts) => {
     await ollamaStream('/api/generate', {
       model: model || LLM_DEFAULT_MODEL,
       prompt, stream: true,
-      options: { temperature: 0.2 }
+      // Ollama defaults num_ctx to ~2048, which silently truncates the context we build.
+      // Raise it so the file contents / retrieved diffs actually reach the model, with
+      // headroom left for the generated answer.
+      options: { temperature: 0.2, num_ctx: 12288 }
     }, (chunk) => {
       if (chunk.error) { streamErr = chunk.error; return; }
       if (chunk.response) { answer += chunk.response; emitLlmToken({ text: chunk.response }); }
