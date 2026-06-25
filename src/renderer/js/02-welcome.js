@@ -31,7 +31,7 @@ async function loadRecentRepos() {
       e.stopPropagation();
       showContextMenu([
         { label: 'Open', icon: '📜', action: () => openRepoByPath(p) },
-        { label: 'Copy path', icon: '⎘', action: () => { navigator.clipboard.writeText(p); showToast('Path copied', 'success'); } },
+        { label: 'Copy path', icon: '⎘', action: () => copyText(p, 'Path copied') },
         'sep',
         { label: 'Remove from list', icon: '✗', danger: true, action: () => removeRecentRepo(p) },
         { label: 'Clear all recent', icon: '⌫', danger: true, action: () => clearRecentRepos() }
@@ -378,21 +378,11 @@ async function showSshKeyGenerator() {
   // Copy buttons
   $('#skg-copy-pub').onclick = async () => {
     if (!lastKey) return;
-    try {
-      await navigator.clipboard.writeText(lastKey.publicLine);
-      showToast('Public key copied', 'success');
-    } catch (e) {
-      showToast('Copy failed', 'error');
-    }
+    await copyText(lastKey.publicLine, 'Public key copied');
   };
   $('#skg-copy-priv').onclick = async () => {
     if (!lastKey) return;
-    try {
-      await navigator.clipboard.writeText(lastKey.privatePem);
-      showToast('Private key copied — handle with care', 'success', 4000);
-    } catch (e) {
-      showToast('Copy failed', 'error');
-    }
+    await copyText(lastKey.privatePem, 'Private key copied — handle with care');
   };
 
   // Save buttons

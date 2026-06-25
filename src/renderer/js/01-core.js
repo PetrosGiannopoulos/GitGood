@@ -178,6 +178,26 @@ function showToast(message, type = 'info', timeout = 3500) {
   }, timeout);
 }
 
+// Copy text to the clipboard. Prefers Electron's native clipboard (via IPC) because
+// navigator.clipboard.writeText is denied when invoked from a context-menu click —
+// the document isn't focused at that moment, so Chromium blocks the Async Clipboard
+// API. Falls back to the web API if the IPC route is somehow unavailable.
+async function copyText(text, successMsg = 'Copied') {
+  const value = text == null ? '' : String(text);
+  try {
+    const r = await gs.copyText(value);
+    if (r && r.ok) { if (successMsg) showToast(successMsg, 'success'); return true; }
+  } catch (e) { /* fall through to web API */ }
+  try {
+    await navigator.clipboard.writeText(value);
+    if (successMsg) showToast(successMsg, 'success');
+    return true;
+  } catch (e) {
+    showToast('Copy failed: ' + (e.message || e), 'error');
+    return false;
+  }
+}
+
 // ============================================
 // STATUS-BAR PROGRESS WIDGET
 // ============================================

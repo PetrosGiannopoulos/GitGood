@@ -871,8 +871,8 @@ function showCommitContextMenu(hash, x, y) {
   const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(hash);
   const foldable = isCollapsed || commitIsFoldable(hash);
   const items = [
-    { label: 'Copy hash', icon: '⎘', action: () => { navigator.clipboard.writeText(hash); showToast('Hash copied', 'success'); } },
-    { label: 'Copy short hash', icon: '⎘', action: () => { navigator.clipboard.writeText(shortHash); showToast('Short hash copied', 'success'); } },
+    { label: 'Copy hash', icon: '⎘', action: () => copyText(hash, 'Hash copied') },
+    { label: 'Copy short hash', icon: '⎘', action: () => copyText(shortHash, 'Short hash copied') },
     'sep',
     { label: `Checkout ${shortHash}`, icon: '⑂', action: () => checkoutCommit(hash) },
     { label: 'Create branch here…', icon: '+', action: () => showCreateBranchDialog(hash) },
@@ -941,13 +941,13 @@ function showRefContextMenu(refType, refName, x, y) {
       { label: `Checkout as local "${local}"`, icon: '⑂', action: () => checkoutRemoteBranch(refName, local) },
       { label: `Merge ${refName} into current (smart)`, icon: '⚒', action: () => showSmartMergeDialog(refName) },
       'sep',
-      { label: 'Copy ref name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } },
+      { label: 'Copy ref name', icon: '⎘', action: () => copyText(refName, 'Copied') },
       { label: 'Delete remote branch', icon: '✗', danger: true, action: () => deleteRemoteBranch(refName) }
     ], x, y);
   } else if (refType === 'tag') {
     showContextMenu([
       { label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutCommit(refName) },
-      { label: 'Copy tag name', icon: '⎘', action: () => { navigator.clipboard.writeText(refName); showToast('Copied', 'success'); } },
+      { label: 'Copy tag name', icon: '⎘', action: () => copyText(refName, 'Copied') },
       'sep',
       { label: 'Delete tag', icon: '✗', danger: true, action: () => doDeleteTag(refName) }
     ], x, y);

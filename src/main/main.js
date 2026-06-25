@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -288,6 +288,14 @@ ipcMain.handle('app:clearRecentRepos', () => {
 
 ipcMain.handle('app:getHome', () => {
   return { ok: true, data: os.homedir() };
+});
+
+// Copy text via the native clipboard. The renderer's navigator.clipboard is denied
+// when called from a context-menu handler (document not focused), so we route through
+// the main process where Electron's clipboard module always works.
+ipcMain.handle('app:copyText', (_, text) => {
+  clipboard.writeText(text == null ? '' : String(text));
+  return { ok: true };
 });
 
 ipcMain.handle('repo:open', wrap(async (_, repoPath) => {
@@ -2432,6 +2440,11 @@ const DEFAULT_APP_SETTINGS = {
   fontScale: 1.0,                     // UI font scale multiplier
   monoFont: 'default',                // monospace font family (Nerd Font name or 'default')
   uiFont: 'default',                  // interface font family (Nerd Font name or 'default')
+  llmAssistant: false,                // local AI git assistant — OFF by default; needs Ollama + a pulled model
+  llmModel: 'llama3.2:3b',            // Ollama chat model used by the assistant
+  llmEmbedModel: 'nomic-embed-text',  // Ollama embedding model used to index the repo for retrieval
+  llmRetrieval: true,                 // feed retrieved diffs/content into answers (needs a built index)
+  llmIndexMaxCommits: 300,            // how many recent commits to index for retrieval
 };
 
 function getAppSettings() {
@@ -2578,4 +2591,424 @@ ipcMain.handle('settings:setGitConfigBatch', wrap(async (_, updates) => {
     }
   }
   return results;
+}));
+
+// ============================================
+// LOCAL AI ASSISTANT (Ollama) — optional, OFF by default
+// ============================================
+// This talks ONLY to a local Ollama server on 127.0.0.1:11434. Inference is fully
+// offline. The single time anything touches the network is the one-time model
+// download ("pull"), which is gated behind an explicit opt-in + confirmation in the
+// UI. The model never executes anything — it only ever returns text that we render
+// as a chat answer. The whole feature is inert unless the user turns it on.
+
+const OLLAMA_HOST = '127.0.0.1';
+const OLLAMA_PORT = 11434;
+const LLM_DEFAULT_MODEL = 'llama3.2:3b';
+const LLM_MAX_CONTEXT_CHARS = 14000;   // keep prompts bounded so small models stay responsive
+
+// Tracks the in-flight streaming request so llm:cancel can abort it.
+let llmActiveReq = null;
+let llmCanceled = false;   // set by llm:cancel so an aborted stream isn't reported as an error
+
+function emitLlmProgress(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('llm:progress', payload); } catch (e) {}
+  }
+}
+function emitLlmToken(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('llm:token', payload); } catch (e) {}
+  }
+}
+
+// One-shot JSON request to the local Ollama HTTP API (no external deps).
+function ollamaRequest(method, pathName, body, { timeout = 8000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const http = require('http');
+    const payload = body ? Buffer.from(JSON.stringify(body)) : null;
+    const req = http.request({
+      host: OLLAMA_HOST, port: OLLAMA_PORT, path: pathName, method,
+      headers: payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeout, () => req.destroy(new Error('Ollama request timed out')));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// Streaming POST to Ollama. Ollama replies with newline-delimited JSON objects;
+// onChunk is called once per parsed object. `register` receives the request so the
+// caller can keep a handle for cancellation.
+function ollamaStream(pathName, body, onChunk, { register, timeout = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    const http = require('http');
+    const payload = Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      host: OLLAMA_HOST, port: OLLAMA_PORT, path: pathName, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': payload.length }
+    }, (res) => {
+      let buf = '';
+      const consume = (final) => {
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (line) { try { onChunk(JSON.parse(line)); } catch (e) {} }
+        }
+        if (final && buf.trim()) { try { onChunk(JSON.parse(buf.trim())); } catch (e) {} buf = ''; }
+      };
+      res.on('data', (c) => { buf += c.toString(); consume(false); });
+      res.on('end', () => { consume(true); resolve(); });
+    });
+    req.on('error', reject);
+    if (timeout) req.setTimeout(timeout, () => req.destroy(new Error('Ollama request timed out')));
+    if (register) register(req);
+    req.write(payload);
+    req.end();
+  });
+}
+
+// Gather a readable snapshot of the repository for the model to reason over.
+// Deliberately read-only: branch/status, remotes, and recent history. When `compact`
+// is set (retrieval is supplying the heavy content), we keep this short — just orientation
+// plus recent subjects — so the prompt budget goes to the retrieved diffs.
+async function gatherGitContext(g, limit, compact) {
+  const parts = [];
+  try {
+    const status = await g.status();
+    parts.push(`Current branch: ${status.current || '(unknown)'}`);
+    if (status.tracking) {
+      parts.push(`Upstream: ${status.tracking} (ahead ${status.ahead || 0}, behind ${status.behind || 0})`);
+    }
+    const changed = [...new Set([
+      ...(status.staged || []), ...(status.modified || []),
+      ...(status.not_added || []), ...(status.deleted || []), ...(status.created || [])
+    ])];
+    if (changed.length) {
+      parts.push(`Uncommitted/working-tree changes in: ${changed.slice(0, 50).join(', ')}`);
+    } else {
+      parts.push('Working tree is clean.');
+    }
+  } catch (e) { /* empty repo or no HEAD */ }
+
+  try {
+    const remotes = await g.getRemotes(true);
+    if (remotes && remotes.length) {
+      parts.push('Remotes: ' + remotes.map(r => `${r.name} → ${r.refs && r.refs.fetch}`).join('; '));
+    }
+  } catch (e) {}
+
+  try {
+    if (compact) {
+      // Just the recent commit subjects, for orientation.
+      const log = await g.raw(['log', '-n', String(Math.min(limit, 25)), '--date=short',
+        '--pretty=format:%h %ad %an: %s']);
+      if (log && log.trim()) parts.push('Recent commits (newest first):\n' + log.trim());
+    } else {
+      // Full recent history with author/date/subject/body and a per-commit diffstat.
+      const log = await g.raw(['log', '-n', String(limit), '--date=short', '--stat',
+        '--pretty=format:%n=== commit %h ===%nAuthor: %an <%ae>%nDate: %ad%nSubject: %s%n%b']);
+      if (log && log.trim()) parts.push('Recent commit history (newest first):\n' + log.trim());
+    }
+  } catch (e) {}
+
+  let ctx = parts.join('\n\n');
+  const cap = compact ? 4000 : LLM_MAX_CONTEXT_CHARS;
+  if (ctx.length > cap) ctx = ctx.slice(0, cap) + '\n…(context truncated)…';
+  return ctx;
+}
+
+function buildLlmPrompt(meta, retrieved, question) {
+  const lines = [
+    'You are a helpful assistant embedded in a Git desktop app called GitGood.',
+    'Answer the user\'s question about this repository using ONLY the context provided below.',
+    'When you reference a commit, include its short hash. Cite authors, files, and dates where relevant.',
+    'If the answer is not present in the provided context, say so plainly instead of guessing.',
+    'Be concise. Never invent commits, files, authors, or dates.',
+    '',
+    '=== REPOSITORY OVERVIEW ===',
+    meta || '(no history available)',
+    '=== END OVERVIEW ==='
+  ];
+  if (retrieved && retrieved.trim()) {
+    lines.push(
+      '',
+      '=== RELEVANT CHANGES (retrieved from indexed commit diffs) ===',
+      retrieved,
+      '=== END RELEVANT CHANGES ==='
+    );
+  }
+  lines.push('', 'Question: ' + question, 'Answer:');
+  return lines.join('\n');
+}
+
+// ---- Retrieval index (local embeddings) ----------------------------------------
+// Per-repo vector index stored as JSON in userData. We embed commit diffs (one chunk
+// per changed file, large diffs split) plus each commit message with a LOCAL embedding
+// model via Ollama, then answer questions by cosine-similarity retrieval. No network,
+// no native deps — a plain in-memory scan is plenty for a few thousand chunks.
+
+const LLM_DEFAULT_EMBED_MODEL = 'nomic-embed-text';
+const LLM_CHUNK_CHARS = 3000;           // max characters per embedded chunk
+const LLM_MAX_CHUNKS_PER_COMMIT = 12;   // guard against giant commits exploding the index
+
+function llmIndexDir() {
+  const dir = path.join(app.getPath('userData'), 'llm-index');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+  return dir;
+}
+function llmIndexPathFor(repoPath) {
+  const h = require('crypto').createHash('sha1').update(repoPath).digest('hex').slice(0, 16);
+  return path.join(llmIndexDir(), h + '.json');
+}
+function loadLlmIndex(repoPath) {
+  try {
+    const p = llmIndexPathFor(repoPath);
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (e) {}
+  return null;
+}
+function saveLlmIndex(repoPath, index) {
+  try { fs.writeFileSync(llmIndexPathFor(repoPath), JSON.stringify(index)); } catch (e) {}
+}
+
+// Embed a single string with the local model. /api/embeddings is the broadly-supported
+// endpoint and returns { embedding: [...] }.
+async function ollamaEmbed(model, text) {
+  const res = await ollamaRequest('POST', '/api/embeddings', { model, prompt: text }, { timeout: 60000 });
+  if (res.status !== 200) throw new Error('Embedding request failed (HTTP ' + res.status + ')');
+  const parsed = JSON.parse(res.body || '{}');
+  if (!Array.isArray(parsed.embedding)) throw new Error(parsed.error || 'No embedding returned (is the embed model pulled?)');
+  return parsed.embedding;
+}
+
+function cosineSim(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// Split a `git show` diff into per-file chunks, splitting very large file diffs further.
+function splitDiffIntoChunks(diff) {
+  if (!diff) return [];
+  const out = [];
+  const parts = diff.split(/^diff --git /m).map(s => s.trim()).filter(Boolean);
+  for (const p of parts) {
+    const firstNl = p.indexOf('\n');
+    const head = firstNl >= 0 ? p.slice(0, firstNl) : p;
+    const m = head.match(/a\/(.+?) b\//);
+    const file = m ? m[1] : head.trim();
+    const text = 'diff --git ' + p;
+    if (text.length > LLM_CHUNK_CHARS) {
+      for (let i = 0; i < text.length; i += LLM_CHUNK_CHARS) {
+        out.push({ file, text: text.slice(i, i + LLM_CHUNK_CHARS) });
+        if (out.length >= LLM_MAX_CHUNKS_PER_COMMIT) break;
+      }
+    } else {
+      out.push({ file, text });
+    }
+    if (out.length >= LLM_MAX_CHUNKS_PER_COMMIT) break;
+  }
+  return out;
+}
+
+// Build (or incrementally update) the retrieval index for a repo.
+async function buildLlmIndexImpl(g, repoPath, opts) {
+  const embedModel = (opts && opts.embedModel) || LLM_DEFAULT_EMBED_MODEL;
+  const maxCommits = Math.min(Math.max(parseInt(opts && opts.maxCommits, 10) || 300, 1), 5000);
+  let index = (opts && opts.rebuild) ? null : loadLlmIndex(repoPath);
+  // If the embedding model changed, dimensions won't match — start fresh.
+  if (index && index.embedModel !== embedModel) index = null;
+  if (!index) index = { repoPath, embedModel, dim: 0, createdAt: Date.now(), indexedHashes: [], chunks: [] };
+  const already = new Set(index.indexedHashes);
+
+  const logRaw = await g.raw(['log', '-n', String(maxCommits), '--date=short',
+    '--pretty=format:%H%x1f%an%x1f%ad%x1f%s']);
+  const commits = logRaw.split('\n').filter(Boolean).map(line => {
+    const [hash, author, date, subject] = line.split('\x1f');
+    return { hash, author, date, subject };
+  });
+  const todo = commits.filter(c => !already.has(c.hash));
+
+  emitLlmProgress({ status: todo.length ? `Indexing ${todo.length} new commit(s)…` : 'Index is up to date', progress: 0, active: true });
+
+  let done = 0;
+  for (const c of todo) {
+    if (llmCanceled) break;
+    const header = `commit ${c.hash.slice(0, 10)} by ${c.author} on ${c.date}\nSubject: ${c.subject}`;
+    const toEmbed = [{ file: '(message)', text: header }];
+    try {
+      const diff = await g.raw(['show', c.hash, '--no-color', '--format=', '--unified=2']);
+      for (const fc of splitDiffIntoChunks(diff)) {
+        toEmbed.push({ file: fc.file, text: `${header}\nFile: ${fc.file}\n${fc.text}` });
+      }
+    } catch (e) { /* merge/binary/odd commit — message chunk still indexed */ }
+
+    for (const ch of toEmbed) {
+      if (llmCanceled) break;
+      try {
+        const vector = await ollamaEmbed(embedModel, ch.text.slice(0, LLM_CHUNK_CHARS));
+        if (!index.dim) index.dim = vector.length;
+        index.chunks.push({
+          hash: c.hash, file: ch.file, author: c.author, date: c.date,
+          subject: c.subject, text: ch.text.slice(0, LLM_CHUNK_CHARS), vector
+        });
+      } catch (e) {
+        // First failure usually means the embed model isn't pulled — surface it.
+        if (!index.dim && index.chunks.length === 0) throw e;
+      }
+    }
+    index.indexedHashes.push(c.hash);
+    done++;
+    emitLlmProgress({ status: `Indexing ${done}/${todo.length} commits`, progress: Math.round((done / todo.length) * 100), active: true });
+  }
+
+  index.updatedAt = Date.now();
+  saveLlmIndex(repoPath, index);
+  return { chunks: index.chunks.length, commits: index.indexedHashes.length, added: done, canceled: llmCanceled };
+}
+
+// Retrieve the most relevant indexed chunks for a question.
+async function retrieveContext(repoPath, embedModel, question, topK) {
+  const index = loadLlmIndex(repoPath);
+  if (!index || !index.chunks || !index.chunks.length) return null;
+  const qvec = await ollamaEmbed(embedModel || index.embedModel || LLM_DEFAULT_EMBED_MODEL, question);
+  const scored = index.chunks.map(c => ({ c, s: cosineSim(qvec, c.vector) }));
+  scored.sort((a, b) => b.s - a.s);
+  const top = scored.slice(0, Math.max(1, topK || 8)).filter(x => x.s > 0);
+  if (!top.length) return null;
+  return top.map(({ c }) => `--- ${c.file} @ ${c.hash.slice(0, 10)} (${c.author}, ${c.date}) — "${c.subject}" ---\n${c.text}`).join('\n\n');
+}
+
+// Is Ollama reachable, and is the requested model already pulled?
+ipcMain.handle('llm:info', wrap(async (_, model) => {
+  const want = model || LLM_DEFAULT_MODEL;
+  const info = { available: false, models: [], hasModel: false, model: want };
+  try {
+    const res = await ollamaRequest('GET', '/api/tags', null, { timeout: 4000 });
+    if (res.status !== 200) return info;
+    info.available = true;
+    const parsed = JSON.parse(res.body || '{}');
+    info.models = (parsed.models || []).map(m => m.name);
+    const base = want.split(':')[0];
+    info.hasModel = info.models.some(n => n === want || n.split(':')[0] === base);
+  } catch (e) {
+    // Ollama not installed or its server isn't running — leave available=false.
+  }
+  return info;
+}));
+
+// Download (pull) a model. This is the only step that uses the network; it streams
+// progress to the renderer via the llm:progress channel.
+ipcMain.handle('llm:pull', wrap(async (_, model) => {
+  const name = model || LLM_DEFAULT_MODEL;
+  let streamErr = null;
+  emitLlmProgress({ status: 'starting', progress: 0, active: true });
+  try {
+    await ollamaStream('/api/pull', { name, stream: true }, (chunk) => {
+      if (chunk.error) { streamErr = chunk.error; return; }
+      let progress = 0;
+      if (chunk.total && chunk.completed) progress = Math.round((chunk.completed / chunk.total) * 100);
+      emitLlmProgress({
+        status: chunk.status || '', progress,
+        total: chunk.total || 0, completed: chunk.completed || 0, active: true
+      });
+    }, { register: (req) => { llmActiveReq = req; } });
+  } finally {
+    llmActiveReq = null;
+    emitLlmProgress({ active: false, done: true });
+  }
+  if (streamErr) throw new Error(streamErr);
+  return { pulled: name };
+}));
+
+// Ask a question about the current repository. Streams the answer back token-by-token
+// over llm:token ({ text } per chunk, { done:true } at the end).
+ipcMain.handle('llm:ask', wrap(async (_, opts) => {
+  const { question, model, historyLimit, useRetrieval, embedModel, topK } = opts || {};
+  if (!question || !String(question).trim()) throw new Error('Question is empty.');
+  const q = String(question).trim();
+  const g = ensureGit();
+
+  // Retrieve relevant diffs/content first (if enabled and an index exists). When we have
+  // retrieved content, keep the overview compact so the prompt budget goes to real code.
+  let retrieved = null;
+  if (useRetrieval) {
+    try { retrieved = await retrieveContext(currentRepoPath, embedModel || LLM_DEFAULT_EMBED_MODEL, q, topK || 8); }
+    catch (e) { /* no index yet, or embed model missing — fall back to overview only */ }
+  }
+  const meta = await gatherGitContext(g, Math.min(Math.max(parseInt(historyLimit, 10) || 120, 10), 500), !!retrieved);
+  const prompt = buildLlmPrompt(meta, retrieved, q);
+
+  let answer = '';
+  let streamErr = null;
+  llmCanceled = false;
+  try {
+    await ollamaStream('/api/generate', {
+      model: model || LLM_DEFAULT_MODEL,
+      prompt, stream: true,
+      options: { temperature: 0.2 }
+    }, (chunk) => {
+      if (chunk.error) { streamErr = chunk.error; return; }
+      if (chunk.response) { answer += chunk.response; emitLlmToken({ text: chunk.response }); }
+    }, { register: (req) => { llmActiveReq = req; } });
+  } catch (e) {
+    // A user-initiated cancel destroys the socket — that's expected, not an error.
+    if (!llmCanceled) throw e;
+  } finally {
+    llmActiveReq = null;
+    emitLlmToken({ done: true });
+  }
+  if (streamErr) throw new Error(streamErr);
+  return { answer, canceled: llmCanceled, usedRetrieval: !!retrieved };
+}));
+
+// Abort an in-flight answer, download, or index build.
+ipcMain.handle('llm:cancel', wrap(async () => {
+  llmCanceled = true;
+  if (llmActiveReq) { try { llmActiveReq.destroy(); } catch (e) {} llmActiveReq = null; }
+  return { canceled: true };
+}));
+
+// Status of the retrieval index for the current repo.
+ipcMain.handle('llm:indexStatus', wrap(async () => {
+  if (!currentRepoPath) return { exists: false };
+  const index = loadLlmIndex(currentRepoPath);
+  if (!index) return { exists: false };
+  return {
+    exists: true,
+    chunks: (index.chunks || []).length,
+    commits: (index.indexedHashes || []).length,
+    embedModel: index.embedModel,
+    updatedAt: index.updatedAt || index.createdAt || null
+  };
+}));
+
+// Build or update the retrieval index. Streams progress over llm:progress.
+ipcMain.handle('llm:buildIndex', wrap(async (_, opts) => {
+  const g = ensureGit();
+  llmCanceled = false;
+  try {
+    return await buildLlmIndexImpl(g, currentRepoPath, opts || {});
+  } finally {
+    emitLlmProgress({ active: false, done: true });
+  }
+}));
+
+// Delete the retrieval index for the current repo.
+ipcMain.handle('llm:clearIndex', wrap(async () => {
+  if (!currentRepoPath) return { cleared: false };
+  try {
+    const p = llmIndexPathFor(currentRepoPath);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch (e) {}
+  return { cleared: true };
 }));

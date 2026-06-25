@@ -1767,3 +1767,86 @@ body.resizing-panes * {
   border-bottom: 1px solid color-mix(in srgb, var(--crusader-red) 40%, transparent);
 }
 .conflicts-banner-text { color: var(--gold-accent); font-size: 13px; font-weight: 600; }
+
+/* ============================================
+   LOCAL AI ASSISTANT (optional)
+   ============================================ */
+
+/* Widen the modal when it hosts the chat */
+.modal:has(.llm-chat) { width: min(820px, 94vw); }
+
+.llm-chat { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.llm-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
+.llm-msg { display: flex; flex-direction: column; gap: 4px; }
+.llm-msg-role {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-text);
+}
+.llm-msg.user .llm-msg-role { color: var(--crusader-red-bright, var(--crusader-red)); }
+.llm-msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  font-size: 13px;
+  color: var(--bone-white);
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 4px;
+  padding: 9px 11px;
+}
+.llm-msg.user .llm-msg-text {
+  background: color-mix(in srgb, var(--crusader-red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--crusader-red) 40%, transparent);
+}
+.llm-msg-text.streaming::after {
+  content: '▋';
+  animation: llm-blink 1s steps(2) infinite;
+  color: var(--gold-accent);
+}
+@keyframes llm-blink { 50% { opacity: 0; } }
+
+.llm-examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.llm-example {
+  font-size: 12px;
+  color: var(--bone-white);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 3px;
+  padding: 5px 9px;
+  cursor: pointer;
+  text-align: left;
+}
+.llm-example:hover { border-color: var(--crusader-red); background: var(--bg-raised); }
+
+.llm-chat-input { display: flex; gap: 8px; align-items: flex-end; }
+.llm-chat-input textarea { flex: 1; resize: vertical; min-height: 42px; }
+.llm-chat-input .btn-medieval { white-space: nowrap; }
+
+.llm-chat-foot { font-size: 11px; }
+
+/* Model download progress */
+.llm-progress-track {
+  height: 10px;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 10px 0 6px;
+}
+.llm-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--crusader-red), var(--gold-accent, var(--crusader-red)));
+  transition: width 0.2s ease;
+}
+.llm-progress-status { font-size: 11px; color: var(--muted-text); }

@@ -875,8 +875,7 @@ function renderFileList(container, files, staged) {
       items.push({ label: `Add to .gitignore (${selectedPaths.length})`, icon: '⊘', action: () => addPathsToGitignore(selectedPaths) });
       if (items.length) items.push('sep');
       items.push({ label: 'Copy path' + (selectedPaths.length > 1 ? 's' : ''), icon: '⎘', action: () => {
-        navigator.clipboard.writeText(selectedPaths.join('\n'));
-        showToast(`Copied ${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'}`, 'success');
+        copyText(selectedPaths.join('\n'), `Copied ${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'}`);
       }});
       if (selectedKeys.length > 1) {
         items.push('sep');

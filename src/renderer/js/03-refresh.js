@@ -424,7 +424,7 @@ function renderRemotes() {
       e.preventDefault();
       e.stopPropagation();
       showContextMenu([
-        { label: 'Copy URL', icon: '⎘', action: () => { navigator.clipboard.writeText(url); showToast('URL copied', 'success'); } },
+        { label: 'Copy URL', icon: '⎘', action: () => copyText(url, 'URL copied') },
         { label: 'Open in browser', icon: '↗', action: () => {
           let webUrl = url.replace(/^git@([^:]+):/, 'https://$1/').replace(/\.git$/, '');
           gs.openExternal(webUrl);
@@ -487,8 +487,8 @@ function renderHistory() {
       e.preventDefault();
       e.stopPropagation();
       showContextMenu([
-        { label: 'Copy hash', icon: '⎘', action: () => { navigator.clipboard.writeText(c.hash); showToast('Hash copied', 'success'); } },
-        { label: 'Copy short hash', icon: '⎘', action: () => { navigator.clipboard.writeText(c.hash.slice(0, 7)); showToast('Short hash copied', 'success'); } },
+        { label: 'Copy hash', icon: '⎘', action: () => copyText(c.hash, 'Hash copied') },
+        { label: 'Copy short hash', icon: '⎘', action: () => copyText(c.hash.slice(0, 7), 'Short hash copied') },
         'sep',
         { label: 'Checkout this commit', icon: '⑂', action: () => checkoutCommit(c.hash) },
         { label: 'Create branch here...', icon: '+', action: () => showCreateBranchDialog(c.hash) }

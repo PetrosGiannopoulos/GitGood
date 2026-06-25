@@ -586,6 +586,7 @@ async function showSettingsDialog() {
       <button class="settings-nav-item" data-tab="appearance"><span class="nav-icon">⚜</span> Appearance</button>
       <button class="settings-nav-item" data-tab="git"><span class="nav-icon">⚔</span> Git Identity</button>
       <button class="settings-nav-item" data-tab="defaults"><span class="nav-icon">✠</span> Defaults</button>
+      <button class="settings-nav-item" data-tab="assistant"><span class="nav-icon">⚜</span> AI Assistant</button>
       <button class="settings-nav-item" data-tab="about"><span class="nav-icon">⚜</span> About</button>
     </nav>
     <div class="settings-panel" id="settings-panel-content"></div>
@@ -872,6 +873,155 @@ async function showSettingsDialog() {
     panel.querySelector('#set-default-branch').oninput = (e) => { appChanges.defaultBranchName = e.target.value; };
   }
 
+  async function renderAssistant() {
+    const enabled = !!(state && state.llmEnabled);
+    const model = (state && state.llmModel) || 'llama3.2:3b';
+    const retrieval = !(state && state.llmRetrieval === false);
+
+    // Curated chat models. The current model is always represented (added if custom).
+    const choices = (typeof LLM_MODEL_CHOICES !== 'undefined' ? LLM_MODEL_CHOICES : []).slice();
+    if (!choices.some(c => c.id === model)) choices.push({ id: model, label: model + ' (custom)' });
+    const modelOptions = choices.map(c =>
+      `<option value="${escapeHtml(c.id)}"${c.id === model ? ' selected' : ''}>${escapeHtml(c.label)}</option>`
+    ).join('') + `<option value="__custom__">Custom tag…</option>`;
+
+    panel.innerHTML = `
+      <div class="settings-panel-title">Local AI Assistant</div>
+      <div class="settings-group">
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:10px">
+          An optional assistant that answers questions about your commits, history and changes.
+          It runs entirely on your computer through <strong>Ollama</strong> — nothing is sent to the internet,
+          and it can only read your repository and reply with text (it cannot run commands). Disabled by default.
+        </p>
+        <div class="settings-row">
+          <div class="label">Enable AI assistant<small>Turning this on checks for Ollama and downloads the chat model (one-time).</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-llm-enabled" ${enabled ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="label">Chat model<small>Coder models reason far better over actual code; bigger models need more RAM.</small></div>
+          <div class="control">
+            <select id="set-llm-model" ${enabled ? '' : 'disabled'}>${modelOptions}</select>
+          </div>
+        </div>
+        <div class="settings-row" id="set-llm-model-custom-row" style="display:none">
+          <div class="label">Custom model tag<small>Any tag available to your Ollama install (e.g. <code>mistral:7b</code>).</small></div>
+          <div class="control">
+            <input type="text" id="set-llm-model-custom" value="${escapeHtml(model)}" placeholder="owner/model:tag" />
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">Project knowledge (retrieval)</div>
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:10px">
+          Builds a local, searchable index of your commit diffs so the assistant can answer questions about
+          the <em>actual content</em> of changes — not just the log. Indexing uses a small local embedding model
+          (<span class="text-mono">${escapeHtml((state && state.llmEmbedModel) || 'nomic-embed-text')}</span>) and stays on your machine.
+        </p>
+        <div class="settings-row">
+          <div class="label">Use retrieval in answers<small>Feed the most relevant indexed diffs into each question.</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-llm-retrieval" ${retrieval ? 'checked' : ''} ${enabled ? '' : 'disabled'} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="label">Repository index<small id="llm-index-status">Checking…</small></div>
+          <div class="control">
+            <button class="mini-btn primary" id="llm-build-index" type="button" ${enabled ? '' : 'disabled'}>⟳ Build / Update</button>
+            <button class="mini-btn" id="llm-clear-index" type="button" ${enabled ? '' : 'disabled'}>✕ Clear</button>
+          </div>
+        </div>
+      </div>
+
+      <p class="modal-text text-muted" style="font-size:11px;margin-top:8px">
+        Don't have Ollama? <a href="#" id="llm-get-ollama" style="color:var(--accent-bright)">Get it here ↗</a> — install it, then enable the assistant.
+        Once enabled, open the <span class="text-mono">⚜</span> button in the toolbar to ask questions.
+      </p>
+    `;
+
+    const toggle = panel.querySelector('#set-llm-enabled');
+    const modelSel = panel.querySelector('#set-llm-model');
+    const customRow = panel.querySelector('#set-llm-model-custom-row');
+    const customInput = panel.querySelector('#set-llm-model-custom');
+    const retrievalToggle = panel.querySelector('#set-llm-retrieval');
+    const buildBtn = panel.querySelector('#llm-build-index');
+    const clearBtn = panel.querySelector('#llm-clear-index');
+    const statusEl = panel.querySelector('#llm-index-status');
+
+    const setControlsEnabled = (on) => {
+      modelSel.disabled = !on;
+      retrievalToggle.disabled = !on;
+      buildBtn.disabled = !on;
+      clearBtn.disabled = !on;
+      customInput.disabled = !on;
+    };
+
+    async function refreshIndexStatus() {
+      if (!(state.repo && state.repo.path)) { statusEl.textContent = 'Open a repository to index it.'; return; }
+      const r = await gs.llmIndexStatus();
+      if (r && r.ok && r.data && r.data.exists) {
+        const when = r.data.updatedAt ? new Date(r.data.updatedAt).toLocaleString() : 'unknown';
+        statusEl.textContent = `${r.data.chunks} chunks from ${r.data.commits} commits · updated ${when}`;
+      } else {
+        statusEl.textContent = 'Not indexed yet — click Build to enable content-aware answers.';
+      }
+    }
+    refreshIndexStatus();
+
+    toggle.onchange = async () => {
+      if (toggle.checked) {
+        await enableAssistant((state && state.llmModel) || 'llama3.2:3b');
+        toggle.checked = !!(state && state.llmEnabled);
+      } else {
+        await disableAssistant();
+      }
+      setControlsEnabled(!!(state && state.llmEnabled));
+    };
+
+    const persistModel = async (m) => {
+      m = (m || '').trim() || 'llama3.2:3b';
+      if (state) state.llmModel = m;
+      await gs.setAppSettings({ llmModel: m });
+    };
+    modelSel.onchange = async () => {
+      if (modelSel.value === '__custom__') {
+        customRow.style.display = '';
+        customInput.focus();
+        return;
+      }
+      customRow.style.display = 'none';
+      await persistModel(modelSel.value);
+    };
+    customInput.onchange = () => persistModel(customInput.value);
+
+    retrievalToggle.onchange = async () => {
+      if (state) state.llmRetrieval = retrievalToggle.checked;
+      await gs.setAppSettings({ llmRetrieval: retrievalToggle.checked });
+    };
+
+    buildBtn.onclick = async () => {
+      const ok = await buildRepoIndex();
+      if (ok) await refreshIndexStatus();
+    };
+    clearBtn.onclick = async () => {
+      const ok = await modal.confirm({ title: 'Clear index', message: 'Delete the retrieval index for this repository? You can rebuild it anytime.', confirmText: 'Clear', danger: true });
+      if (!ok) return;
+      const r = await gs.llmClearIndex();
+      if (r && r.ok) { showToast('Index cleared', 'success'); await refreshIndexStatus(); }
+    };
+
+    const getLink = panel.querySelector('#llm-get-ollama');
+    if (getLink) getLink.onclick = (e) => { e.preventDefault(); gs.openExternal('https://ollama.com/download'); };
+  }
+
   async function renderAbout() {
     const pathR = await gs.appSettingsPath();
     const settingsFile = (pathR && pathR.ok) ? pathR.data : '(unknown)';
@@ -920,7 +1070,7 @@ async function showSettingsDialog() {
   }
 
   // Tab switching
-  const renderers = { general: renderGeneral, appearance: renderAppearance, git: renderGitIdentity, defaults: renderDefaults, about: renderAbout };
+  const renderers = { general: renderGeneral, appearance: renderAppearance, git: renderGitIdentity, defaults: renderDefaults, assistant: renderAssistant, about: renderAbout };
   body.querySelectorAll('.settings-nav-item').forEach(item => {
     item.onclick = () => {
       body.querySelectorAll('.settings-nav-item').forEach(i => i.classList.toggle('active', i === item));
@@ -1001,7 +1151,12 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   defaultSshKeyPath: '',
   fontScale: 1.0,
   monoFont: 'default',
-  uiFont: 'default'
+  uiFont: 'default',
+  llmAssistant: false,
+  llmModel: 'llama3.2:3b',
+  llmEmbedModel: 'nomic-embed-text',
+  llmRetrieval: true,
+  llmIndexMaxCommits: 300
 };
 
 // Apply saved app settings (theme + font) at startup
@@ -1015,7 +1170,13 @@ async function applySavedAppSettings() {
       // Mirror a few into state for downstream code
       if (typeof state !== 'undefined') {
         if (r.data.graphLimit) state.graphLimit = r.data.graphLimit;
+        state.llmEnabled = !!r.data.llmAssistant;
+        state.llmModel = r.data.llmModel || 'llama3.2:3b';
+        state.llmEmbedModel = r.data.llmEmbedModel || 'nomic-embed-text';
+        state.llmRetrieval = r.data.llmRetrieval !== false;
+        state.llmIndexMaxCommits = r.data.llmIndexMaxCommits || 300;
       }
+      if (typeof updateAssistantButton === 'function') updateAssistantButton();
     }
   } catch (e) { /* harmless */ }
 }

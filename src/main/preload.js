@@ -9,6 +9,7 @@ const api = {
   removeRecentRepo: (p) => ipcRenderer.invoke('app:removeRecentRepo', p),
   clearRecentRepos: () => ipcRenderer.invoke('app:clearRecentRepos'),
   getHome: () => ipcRenderer.invoke('app:getHome'),
+  copyText: (text) => ipcRenderer.invoke('app:copyText', text),
 
   // Repo lifecycle
   openRepo: (p) => ipcRenderer.invoke('repo:open', p),
@@ -179,6 +180,25 @@ const api = {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('op:progress', handler);
     return () => ipcRenderer.removeListener('op:progress', handler);
+  },
+
+  // Local AI assistant (Ollama) — optional, off by default
+  llmInfo: (model) => ipcRenderer.invoke('llm:info', model),
+  llmPull: (model) => ipcRenderer.invoke('llm:pull', model),
+  llmAsk: (opts) => ipcRenderer.invoke('llm:ask', opts),
+  llmCancel: () => ipcRenderer.invoke('llm:cancel'),
+  llmIndexStatus: () => ipcRenderer.invoke('llm:indexStatus'),
+  llmBuildIndex: (opts) => ipcRenderer.invoke('llm:buildIndex', opts),
+  llmClearIndex: () => ipcRenderer.invoke('llm:clearIndex'),
+  onLlmProgress: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('llm:progress', handler);
+    return () => ipcRenderer.removeListener('llm:progress', handler);
+  },
+  onLlmToken: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('llm:token', handler);
+    return () => ipcRenderer.removeListener('llm:token', handler);
   }
 };
 
