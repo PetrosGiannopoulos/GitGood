@@ -280,6 +280,52 @@ function refreshThemeLaneColors() {
   } catch (e) { /* keep current palette */ }
 }
 
+// ----- Branches column width (#readability) -----
+// Refs (branches/tags/HEAD) render in their own column to the left of the commit message
+// (GitKraken style). The column auto-grows to fit the busiest commit, so its width must be
+// computed ONCE per layout (not per virtualized window) or it would jitter while scrolling.
+// We estimate each commit's ref-block width cheaply via canvas measureText (no DOM/reflow):
+// the pill text width plus a fixed per-pill chrome constant (padding + border + leading
+// icon glyph), summed with the inter-pill gap. The result is clamped so a commit with many
+// long branch names can't swallow the whole pane.
+let _refMeasureCtx = null;
+const REF_PILL_CHROME = 32;  // px: padding (14) + border (2) + icon glyph + gap (~16)
+const REF_PILL_GAP = 5;      // px between pills
+const REF_CELL_PAD = 14;     // px: cell padding + divider breathing room
+function _refMeasureContext() {
+  if (!_refMeasureCtx) {
+    const cs = getComputedStyle(document.documentElement);
+    const mono = (cs.getPropertyValue('--font-mono') || 'monospace').trim() || 'monospace';
+    _refMeasureCtx = document.createElement('canvas').getContext('2d');
+    _refMeasureCtx.font = `600 10px ${mono}`;
+  }
+  return _refMeasureCtx;
+}
+function measureRefBlockWidth(commit) {
+  const refs = commit && commit.refs;
+  if (!refs || !refs.length) return 0;
+  const ctx = _refMeasureContext();
+  let w = REF_CELL_PAD;
+  for (let i = 0; i < refs.length; i++) {
+    const label = refs[i].type === 'head' ? 'HEAD' : (refs[i].name || '');
+    w += Math.ceil(ctx.measureText(label).width) + REF_PILL_CHROME;
+    if (i > 0) w += REF_PILL_GAP;
+  }
+  return w;
+}
+// The widest ref block across ALL commits, clamped to a sane ceiling. 0 when no commit
+// carries a ref (so the column collapses entirely on ref-less history).
+function computeRefColWidth(commits, paneWidth) {
+  let max = 0;
+  for (const c of commits) {
+    const w = measureRefBlockWidth(c);
+    if (w > max) max = w;
+  }
+  if (max <= 0) return 0;
+  const ceiling = Math.max(120, Math.min(360, Math.round((paneWidth || 800) * 0.4)));
+  return Math.min(max, ceiling);
+}
+
 // Build a case-insensitive regex that matches any of the search terms, for highlighting
 // filter matches (#5). Terms are escaped for HTML (so they match the escaped haystack) and
 // for regex meta-chars. Returns null when there's nothing to highlight.
@@ -320,6 +366,11 @@ function renderGraph() {
   const commitByHash = new Map();
   for (const c of commits) commitByHash.set(c.hash, c);
 
+  // Width of the branches column (#readability). Computed once here so it's stable across
+  // the virtualized scroll; buildRow gives every row this exact width so the message text
+  // starts at the same x on every line, forming an aligned GitKraken-style ref column.
+  const refColWidth = computeRefColWidth(commits, container.clientWidth);
+
   // Search-match highlighting (#5): when a text filter is active, mark the matched terms
   // in the message/author. Only the 'message'/'all' modes match visible text — for the
   // 'files'/'content' modes the match lives in data we don't show, so there's nothing to
@@ -347,6 +398,14 @@ function renderGraph() {
   // `relatedSet` (declared here, set by applyAncestryHighlight) is the lineage of the
   // selected commit; the builders below add a `rel` class to elements in it (#3).
   let relatedSet = null;
+
+  // SVG virtualization (#OOM): the <svg> is only ever as tall as the viewport (not the full
+  // history), so it never becomes a giant composited layer that exhausts GPU memory. Geometry
+  // is still authored in absolute document coordinates; instead of moving every node, we PAN
+  // the svg's viewBox to the current scroll offset (one cheap attribute write per frame in
+  // renderWindow). The outer <svg> clips anything outside its viewBox, so off-screen buffer
+  // geometry and long carry lines that overshoot the viewport cost nothing extra. Only the
+  // windowed subset of dots/edges exists in the DOM, rebuilt when the row window changes.
 
   // Build the SVG string for one edge. A straight run is a single <line> spanning all its
   // rows (#2); a column change is a short cubic.
@@ -403,25 +462,35 @@ function renderGraph() {
     return dot + `</circle>`;
   };
 
+  // Build the branch-column cell for one commit. Refs live in their OWN virtualized column
+  // to the LEFT of the lane graph (GitKraken style), so this is rendered separately from the
+  // row. Only commits that actually carry a ref get a cell; the fixed column width keeps the
+  // lane graph aligned regardless. Pills are right-aligned so their labels point at the lanes.
+  const buildRefCell = (c, pos) => {
+    const refs = c.refs;
+    if (!refs || !refs.length) return '';
+    let refPills = '';
+    for (const r of refs) {
+      if (r.type === 'tag') refPills += `<span class="ref-pill tag" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
+      else if (r.type === 'local') {
+        const headCls = r.isHead ? ' head' : '';
+        refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(r.name)}</span>`;
+      } else if (r.type === 'remote') refPills += `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
+      else if (r.type === 'head') refPills += `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
+      else refPills += `<span class="ref-pill" data-ref-type="other">${escapeHtml(r.name)}</span>`;
+    }
+    // title lists the refs in full for when a crowded commit's pills overflow the clamped width.
+    const refTitle = escapeHtml(refs.map(r => r.type === 'head' ? 'HEAD' : r.name).join('  '));
+    const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
+    return `<div class="graph-ref-cell${relCls}" data-hash="${c.hash}" title="${refTitle}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">${refPills}</div>`;
+  };
+
   // Build the row HTML for one commit. Rows are absolutely positioned at their row offset
   // so only the visible ones need to exist in the DOM (#1).
   const buildRow = (c, pos) => {
     const isHead = c.hash === head;
     const isCollapsed = collapsedSet && collapsedSet.has(c.hash);
     const collapsible = isCollapsibleCommit(c, pos);
-
-    let refPills = '';
-    if (c.refs && c.refs.length) {
-      for (const r of c.refs) {
-        if (r.type === 'tag') refPills += `<span class="ref-pill tag" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
-        else if (r.type === 'local') {
-          const headCls = r.isHead ? ' head' : '';
-          refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(r.name)}</span>`;
-        } else if (r.type === 'remote') refPills += `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
-        else if (r.type === 'head') refPills += `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
-        else refPills += `<span class="ref-pill" data-ref-type="other">${escapeHtml(r.name)}</span>`;
-      }
-    }
 
     const shortHash = (c.hash || '').slice(0, 7);
     const dateStr = c.date ? relativeTime(c.date) : '';
@@ -430,6 +499,8 @@ function renderGraph() {
     const selectedCls = state.selectedGraphHash === c.hash ? ' selected' : '';
     const headCls = isHead ? ' head' : '';
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
+    // The fold toggle is hidden by default and revealed on row hover/selection (CSS); the
+    // spacer keeps the message indent stable for non-foldable rows.
     const foldToggle = collapsible
       ? `<button class="graph-fold-btn${isCollapsed ? ' collapsed' : ''}" data-fold="${c.hash}" title="${isCollapsed ? 'Expand branch line' : 'Collapse branch line'}" tabindex="-1">${isCollapsed ? '▸' : '▾'}</button>`
       : `<span class="graph-fold-spacer"></span>`;
@@ -437,7 +508,7 @@ function renderGraph() {
     const authorHtml = highlightSearchTerms(c.author_name || '', highlightRe);
     return `<div class="graph-row${selectedCls}${headCls}${relCls}" data-hash="${c.hash}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">` +
         foldToggle +
-        `<span class="graph-row-msg" title="${escapeHtml(c.message || '')}">${refPills}${msgHtml}</span>` +
+        `<span class="graph-row-msg" title="${escapeHtml(c.message || '')}">${msgHtml}</span>` +
         `<span class="graph-row-author">${authorHtml}</span>` +
         `<span class="graph-row-date" title="${escapeHtml(dateTitle)}">${escapeHtml(dateStr)}</span>` +
         `<span class="graph-row-hash">${escapeHtml(shortHash)}</span>` +
@@ -452,15 +523,30 @@ function renderGraph() {
       `</div>`
     : '';
 
-  // Skeleton only: a full-height SVG + a full-height rows spacer, both populated per-window.
-  // The element heights reserve the full scroll range so the scrollbar is accurate even
-  // though only the visible rows exist in the DOM.
+  // Skeleton. Column layout (left → right):
+  //   [branches] (gap) [lane graph SVG] [message rows]
+  // The branches column and message rows are virtualized lists of absolutely-positioned cells
+  // (full-height spacers reserve the scroll range). The lane graph is a viewport-height SVG,
+  // sticky so it stays pinned in view while the column scrolls — see the SVG virtualization
+  // note above; its height/viewBox are (re)set per window in renderWindow(). When no commit
+  // carries a ref the branches column (and its gap) are dropped entirely.
+  const GRAPH_REF_GAP = 8; // px gap between the branches column and the lane graph
+  const refsColHtml = refColWidth > 0
+    ? `<div class="graph-refs-col" style="height:${totalHeight}px;width:${refColWidth}px"></div>` +
+      `<div class="graph-col-gap"></div>`
+    : '';
+  const gridCols = refColWidth > 0
+    ? `${refColWidth}px ${GRAPH_REF_GAP}px ${svgWidth}px 1fr`
+    : `${svgWidth}px 1fr`;
   container.innerHTML =
-    `<div class="graph-svg-wrap" style="grid-template-columns: ${svgWidth}px 1fr">` +
-      `<svg class="graph-svg" width="${svgWidth}" height="${totalHeight}" viewBox="0 0 ${svgWidth} ${totalHeight}">` +
-        `<g class="graph-edges"></g>` +
-        `<g class="graph-dots"></g>` +
-      `</svg>` +
+    `<div class="graph-svg-wrap${refColWidth > 0 ? ' has-refs' : ''}" style="grid-template-columns: ${gridCols}">` +
+      refsColHtml +
+      `<div class="graph-svg-col" style="height:${totalHeight}px;width:${svgWidth}px">` +
+        `<svg class="graph-svg" width="${svgWidth}" height="0" viewBox="0 0 ${svgWidth} 0" preserveAspectRatio="xMinYMin slice">` +
+          `<g class="graph-edges"></g>` +
+          `<g class="graph-dots"></g>` +
+        `</svg>` +
+      `</div>` +
       `<div class="graph-rows" style="height:${totalHeight}px"></div>` +
     `</div>` +
     hiddenRowHtml;
@@ -469,6 +555,8 @@ function renderGraph() {
   const edgesG = container.querySelector('.graph-edges');
   const dotsG = container.querySelector('.graph-dots');
   const rowsEl = container.querySelector('.graph-rows');
+  const svgEl = container.querySelector('.graph-svg');
+  const refsColEl = container.querySelector('.graph-refs-col');
 
   // ----- Row windowing (#1) -----
   // Render only the rows in the viewport (plus a buffer), and the dots/edges that touch
@@ -476,9 +564,20 @@ function renderGraph() {
   // or selection changes. Keeps the live DOM bounded no matter how many commits are loaded.
   const BUFFER_ROWS = 8;
   let winStart = -1, winEnd = -1;
+  let svgViewH = -1;
   const renderWindow = (force) => {
     const viewH = container.clientHeight || 600;
     const scrollTop = container.scrollTop;
+
+    // SVG virtualization: keep the (sticky, viewport-tall) <svg> showing exactly the scrolled
+    // slice of the absolute-coordinate geometry by panning its viewBox. This runs every frame
+    // — including when the row window is unchanged — so dots/edges stay glued to their rows
+    // between window rebuilds. Height/width only change on resize.
+    if (svgEl) {
+      if (viewH !== svgViewH) { svgEl.setAttribute('height', viewH); svgViewH = viewH; }
+      svgEl.setAttribute('viewBox', `0 ${scrollTop} ${svgWidth} ${viewH}`);
+    }
+
     let start = Math.floor(scrollTop / GRAPH_ROW_H) - BUFFER_ROWS;
     let end = Math.ceil((scrollTop + viewH) / GRAPH_ROW_H) + BUFFER_ROWS;
     if (start < 0) start = 0;
@@ -488,15 +587,18 @@ function renderGraph() {
 
     const rowParts = [];
     const dotParts = [];
+    const refParts = [];
     for (let i = start; i <= end; i++) {
       const c = commits[i];
       const pos = positions.get(c.hash);
       if (!pos) continue;
       dotParts.push(buildDot(c, pos));
       rowParts.push(buildRow(c, pos));
+      if (refsColEl) refParts.push(buildRefCell(c, pos));
     }
     dotsG.innerHTML = dotParts.join('');
     rowsEl.innerHTML = rowParts.join('');
+    if (refsColEl) refsColEl.innerHTML = refParts.join('');
 
     const edgeParts = [];
     for (let i = 0; i < edges.length; i++) {
@@ -610,10 +712,11 @@ function renderGraph() {
       toggleCommitFold(foldBtn.dataset.fold);
       return;
     }
-    // Left-click on a commit dot OR its row selects the commit and shows its diff.
+    // Left-click on a commit dot, its row, OR its branch-column cell selects the commit.
     const dot = e.target.closest('circle.commit-dot');
     const row = e.target.closest('.graph-row');
-    const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash);
+    const refCell = e.target.closest('.graph-ref-cell');
+    const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash) || (refCell && refCell.dataset.hash);
     if (!hash) return;
     // Focus the container (without scrolling) so arrow-key navigation works after a click.
     container.focus({ preventScroll: true });

@@ -553,6 +553,7 @@
 #graph-container.graph-highlight-active .graph-edge:not(.rel) { opacity: 0.13; }
 #graph-container.graph-highlight-active circle.commit-dot:not(.rel) { opacity: 0.22; }
 #graph-container.graph-highlight-active .graph-row:not(.rel) { opacity: 0.4; }
+#graph-container.graph-highlight-active .graph-ref-cell:not(.rel) { opacity: 0.4; }
 #graph-container.graph-highlight-active .graph-edge.rel { stroke-width: 3; }
 .graph-svg .graph-edge { transition: opacity 0.12s ease, stroke-width 0.12s ease; }
 

@@ -726,10 +726,18 @@
   grid-template-columns: auto 1fr;
 }
 
+/* Full-height spacer that reserves the graph column's scroll range. The actual <svg> is
+   sticky inside it and only ever viewport-tall (SVG virtualization — see 07-graph.js), so
+   the browser never rasterizes one giant composited layer for the whole history. */
+.graph-svg-col {
+  position: relative;
+  flex-shrink: 0;
+  align-self: start;
+}
 .graph-svg {
   display: block;
-  flex-shrink: 0;
   position: sticky;
+  top: 0;
   left: 0;
   background: var(--bg);
   z-index: 1;
@@ -808,6 +816,9 @@
   font-size: 10px;
   line-height: 1;
   cursor: pointer;
+  /* Hidden by default to keep the graph uncluttered; revealed on row hover/selection below.
+     visibility (not display) keeps the 18px slot reserved so the message never shifts. */
+  visibility: hidden;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .graph-fold-btn:hover {
@@ -819,6 +830,13 @@
   background: var(--gold-accent);
   color: var(--ink-black);
   border-color: var(--gold-accent);
+}
+/* Reveal the toggle when hovering or selecting the row. A row that is actually collapsed
+   keeps its toggle visible so it can always be re-expanded. */
+.graph-row:hover .graph-fold-btn,
+.graph-row.selected .graph-fold-btn,
+.graph-fold-btn.collapsed {
+  visibility: visible;
 }
 .graph-fold-spacer {
   flex-shrink: 0;
@@ -874,6 +892,29 @@
 .graph-row.head .graph-row-hash { opacity: 0.9; }
 
 /* Ref pills (branch / tag labels rendered inline on the commit row) */
+/* Branches column — refs live in their OWN column to the far LEFT of the lane graph
+   (GitKraken style), separated from the lanes by a small gap track. It's a virtualized list
+   of absolutely-positioned cells (full-height spacer reserves the scroll range), mirroring
+   .graph-rows. Pills are right-aligned so their labels point at the lanes. */
+.graph-refs-col {
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.graph-col-gap { pointer-events: none; }   /* empty grid track that forms the gap */
+
+.graph-ref-cell {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 2px;
+  overflow: hidden;
+}
+
 .ref-pill {
   display: inline-flex;
   align-items: center;
@@ -881,13 +922,13 @@
   font-family: var(--font-mono);
   font-size: 10px;
   padding: 2px 7px;
-  margin-right: 6px;
   border: 1px solid;
   white-space: nowrap;
   cursor: grab;
   user-select: none;
   letter-spacing: 0.02em;
   font-weight: 600;
+  flex-shrink: 0;
   transition: transform 0.1s, box-shadow 0.1s;
 }
 .ref-pill:hover { box-shadow: 0 0 6px rgba(255,255,255,0.15); }
