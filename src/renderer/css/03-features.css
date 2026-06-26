@@ -578,6 +578,44 @@
   cursor: not-allowed;
 }
 
+/* Cherry-pick drag: press a commit dot and drag it onto another commit (#cherrypick). */
+#graph-container.dot-dragging { cursor: grabbing; user-select: none; }
+#graph-container.dot-dragging circle.commit-dot { cursor: grabbing; }
+.graph-svg circle.commit-dot.drag-source {
+  r: 7;
+  stroke: var(--gold-accent);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 6px var(--gold-accent));
+}
+/* Floating chip that follows the cursor during a cherry-pick drag. */
+.dot-drag-label {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  color: var(--bone-white);
+  background: color-mix(in srgb, var(--gold-accent) 30%, var(--shadow-black));
+  border: 1px solid var(--gold-accent);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  white-space: nowrap;
+}
+
+/* Branch picker shown when a cherry-pick destination has several local branches. */
+.cp-branch-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.cp-branch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.cp-branch-row:hover { background: color-mix(in srgb, var(--gold-accent) 10%, transparent); }
+.cp-branch-row input { accent-color: var(--gold-accent); }
+
 /* ============================================
    CONFLICT BANNER (above workspace)
    ============================================ */

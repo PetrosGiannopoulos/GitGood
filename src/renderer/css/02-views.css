@@ -736,9 +736,13 @@
 }
 .graph-svg {
   display: block;
+  /* Sticky VERTICALLY only — it stays pinned at the top of the viewport as the column
+     scrolls (renderWindow pans its viewBox to match). It must NOT be sticky horizontally:
+     a `left` inset would pin it to the container's left edge during horizontal scroll and
+     draw the lanes at a negative x on top of the branches column (notably after a refocus,
+     when the browser restores the previous horizontal scroll offset). */
   position: sticky;
   top: 0;
-  left: 0;
   background: var(--bg);
   z-index: 1;
 }
@@ -848,10 +852,19 @@
   font-size: 11px;
   color: var(--parchment-dim);
   margin-right: 8px;
-  flex-shrink: 1;
-  min-width: 0;
+  flex-shrink: 0;
+  /* Show only ~8 characters by default so the commit message gets the space; the full name
+     is in the DOM (search/ellipsis still work) and is revealed on row hover/selection. */
+  max-width: 8ch;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: max-width 0.16s ease;
+}
+/* Reveal the full author when the row is hovered or selected. */
+.graph-row:hover .graph-row-author,
+.graph-row.selected .graph-row-author {
+  max-width: 240px;
 }
 .graph-row-date {
   font-family: var(--font-mono);
@@ -910,9 +923,29 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
   padding: 0 2px;
   overflow: hidden;
+}
+
+/* Inner track holding the pills. Overflows the clamped cell off the LEFT edge (the cell is
+   right-aligned); on row hover an overflowing track ping-pongs into view like a news ticker
+   so crowded branch columns can be read fully (see startRefMarquee in 07-graph.js). */
+.graph-ref-track {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  will-change: transform;
+}
+.graph-ref-track.marquee {
+  animation: ref-marquee var(--marquee-dur, 6s) ease-in-out infinite alternate;
+}
+@keyframes ref-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(var(--marquee-shift, 0)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-ref-track.marquee { animation: none; }
 }
 
 .ref-pill {

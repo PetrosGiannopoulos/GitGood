@@ -482,7 +482,9 @@ function renderGraph() {
     // title lists the refs in full for when a crowded commit's pills overflow the clamped width.
     const refTitle = escapeHtml(refs.map(r => r.type === 'head' ? 'HEAD' : r.name).join('  '));
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
-    return `<div class="graph-ref-cell${relCls}" data-hash="${c.hash}" title="${refTitle}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">${refPills}</div>`;
+    // Pills go in an inner track so a crowded cell (more/longer branches than the clamped
+    // column can show) can ping-pong its overflow into view on hover (see startRefMarquee).
+    return `<div class="graph-ref-cell${relCls}" data-hash="${c.hash}" title="${refTitle}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px"><div class="graph-ref-track">${refPills}</div></div>`;
   };
 
   // Build the row HTML for one commit. Rows are absolutely positioned at their row offset
@@ -664,6 +666,7 @@ function renderGraph() {
     container.removeEventListener('drop', container._graphHandlers.drop);
     if (container._graphHandlers.mouseover) container.removeEventListener('mouseover', container._graphHandlers.mouseover);
     if (container._graphHandlers.mouseout) container.removeEventListener('mouseout', container._graphHandlers.mouseout);
+    if (container._graphHandlers.mousedown) container.removeEventListener('mousedown', container._graphHandlers.mousedown);
     if (container._graphHandlers.keydown) container.removeEventListener('keydown', container._graphHandlers.keydown);
     if (container._graphHandlers.scroll) container.removeEventListener('scroll', container._graphHandlers.scroll);
   }
@@ -835,11 +838,39 @@ function renderGraph() {
   // toggling a class on the matching circle when the pointer enters/leaves a row.
   const dotForHash = (hash) =>
     hash ? container.querySelector(`.graph-svg circle.commit-dot[data-hash="${CSS.escape(hash)}"]`) : null;
+  const refCellForHash = (hash) =>
+    hash ? container.querySelector(`.graph-refs-col .graph-ref-cell[data-hash="${CSS.escape(hash)}"]`) : null;
+
+  // Ticker for an overflowing branch column: when a commit carries more (or longer) branch
+  // pills than the clamped column can show, hovering its row slowly slides the hidden pills
+  // into view and back (ping-pong) like a news ticker so every branch name can be read.
+  const startRefMarquee = (hash) => {
+    const cell = refCellForHash(hash);
+    if (!cell) return;
+    const track = cell.querySelector('.graph-ref-track');
+    if (!track) return;
+    // How far the track overflows the clamped cell's content box. Right-aligned, so the
+    // overflow is hidden off the LEFT edge; translating the track right by this amount
+    // reveals it. clientWidth includes the cell's 2px×2 padding, so subtract it.
+    const overflow = Math.round(track.scrollWidth - (cell.clientWidth - 4));
+    if (overflow <= 2) return; // fits — nothing to scroll
+    track.style.setProperty('--marquee-shift', overflow + 'px');
+    // Slow, readable pace (~45px/s) with a sensible floor so tiny overflows still ease.
+    track.style.setProperty('--marquee-dur', Math.max(2.5, overflow / 45).toFixed(2) + 's');
+    track.classList.add('marquee');
+  };
+  const stopRefMarquee = (hash) => {
+    const cell = refCellForHash(hash);
+    const track = cell && cell.querySelector('.graph-ref-track');
+    if (track) track.classList.remove('marquee');
+  };
+
   const onMouseOver = (e) => {
     const row = e.target.closest('.graph-row');
     if (!row || !row.dataset.hash) return;
     const dot = dotForHash(row.dataset.hash);
     if (dot) dot.classList.add('row-hover');
+    startRefMarquee(row.dataset.hash);
   };
   const onMouseOut = (e) => {
     const row = e.target.closest('.graph-row');
@@ -848,6 +879,93 @@ function renderGraph() {
     if (row.contains(e.relatedTarget)) return;
     const dot = dotForHash(row.dataset.hash);
     if (dot) dot.classList.remove('row-hover');
+    stopRefMarquee(row.dataset.hash);
+  };
+
+  // ----- Cherry-pick by dragging a commit onto another (#cherrypick) -----
+  // SVG <circle>s don't participate in HTML5 drag-and-drop reliably in Chromium, so we run
+  // our own pointer drag: press a commit's dot OR its message row, move past a threshold to
+  // begin, release over another commit to replay the pressed commit onto that commit's branch
+  // (see handleCherryPickDrop). A plain press-release with no movement falls through to
+  // onClick (commit selection).
+  let dotDrag = null;          // { hash, startX, startY, active }
+  let dotDragLabel = null;     // floating chip that follows the cursor while dragging
+  let lastDropTarget = null;   // row currently flagged as the hovered drop target
+
+  const clearDropTarget = () => {
+    if (lastDropTarget) { lastDropTarget.classList.remove('drop-allowed', 'drop-denied'); lastDropTarget = null; }
+  };
+  // The commit/row under a viewport point (a dot in the SVG column or a message row).
+  const targetAtPoint = (x, y) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el || !el.closest) return { hash: null, row: null };
+    const dot = el.closest('circle.commit-dot');
+    const row = el.closest('.graph-row');
+    return { hash: (dot && dot.dataset.hash) || (row && row.dataset.hash) || null, row };
+  };
+  const endDotDrag = () => {
+    document.removeEventListener('mousemove', onDotDragMove);
+    document.removeEventListener('mouseup', onDotDragUp);
+    if (dotDragLabel) { dotDragLabel.remove(); dotDragLabel = null; }
+    clearDropTarget();
+    container.classList.remove('dot-dragging');
+    const src = container.querySelector('circle.commit-dot.drag-source');
+    if (src) src.classList.remove('drag-source');
+    dotDrag = null;
+  };
+  const onDotDragMove = (e) => {
+    if (!dotDrag) return;
+    if (!dotDrag.active) {
+      // Don't commit to a drag until the pointer clearly moves — keeps clicks as clicks.
+      if (Math.hypot(e.clientX - dotDrag.startX, e.clientY - dotDrag.startY) < 5) return;
+      dotDrag.active = true;
+      container.classList.add('dot-dragging');
+      const src = dotForHash(dotDrag.hash);
+      if (src) src.classList.add('drag-source');
+      dotDragLabel = document.createElement('div');
+      dotDragLabel.className = 'dot-drag-label';
+      dotDragLabel.textContent = '⚒ Cherry-pick ' + dotDrag.hash.slice(0, 7);
+      document.body.appendChild(dotDragLabel);
+    }
+    dotDragLabel.style.left = (e.clientX + 14) + 'px';
+    dotDragLabel.style.top = (e.clientY + 14) + 'px';
+    // Flag the hovered target: allowed only if it's a DIFFERENT commit carrying a local
+    // branch (the cherry-pick lands on a branch tip).
+    const { hash, row } = targetAtPoint(e.clientX, e.clientY);
+    clearDropTarget();
+    if (row && hash && hash !== dotDrag.hash) {
+      const c = commitByHash.get(hash);
+      const hasLocal = !!(c && (c.refs || []).some(r => r.type === 'local'));
+      row.classList.add(hasLocal ? 'drop-allowed' : 'drop-denied');
+      lastDropTarget = row;
+    }
+  };
+  const onDotDragUp = (e) => {
+    if (!dotDrag) return;
+    const wasActive = dotDrag.active;
+    const sourceHash = dotDrag.hash;
+    const target = wasActive ? targetAtPoint(e.clientX, e.clientY) : { hash: null };
+    endDotDrag();
+    if (!wasActive) return;                       // a click, not a drag — leave to onClick
+    if (!target.hash || target.hash === sourceHash) return;
+    handleCherryPickDrop(sourceHash, target.hash);
+  };
+  const onDotMouseDown = (e) => {
+    if (e.button !== 0) return;
+    // The fold toggle and draggable ref pills have their own behaviour — don't hijack them.
+    if (e.target.closest('.graph-fold-btn') || e.target.closest('.ref-pill')) return;
+    // Start a cherry-pick drag from either the commit dot OR its message row (the row is the
+    // bigger, more natural grab area). Pills live in a separate column, so they're excluded.
+    const dot = e.target.closest('circle.commit-dot');
+    const row = e.target.closest('.graph-row');
+    const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash);
+    if (!hash) return;
+    // Suppress the browser's text-selection on the row; the 5px threshold still lets a plain
+    // press fall through to onClick (selection) since no click is cancelled here.
+    e.preventDefault();
+    dotDrag = { hash, startX: e.clientX, startY: e.clientY, active: false };
+    document.addEventListener('mousemove', onDotDragMove);
+    document.addEventListener('mouseup', onDotDragUp);
   };
 
   container.addEventListener('click', onClick);
@@ -860,6 +978,7 @@ function renderGraph() {
   container.addEventListener('drop', onDrop);
   container.addEventListener('mouseover', onMouseOver);
   container.addEventListener('mouseout', onMouseOut);
+  container.addEventListener('mousedown', onDotMouseDown);
   // Make the graph focusable so it can receive arrow-key navigation (#8).
   if (!container.hasAttribute('tabindex')) container.tabIndex = 0;
   container.addEventListener('keydown', onKeyDown);
@@ -874,7 +993,7 @@ function renderGraph() {
   };
   container.addEventListener('scroll', onScroll, { passive: true });
 
-  container._graphHandlers = { click: onClick, dblclick: onDblClick, context: onContext, dragstart: onDragStart, dragend: onDragEnd, dragover: onDragOver, dragleave: onDragLeave, drop: onDrop, mouseover: onMouseOver, mouseout: onMouseOut, keydown: onKeyDown, scroll: onScroll };
+  container._graphHandlers = { click: onClick, dblclick: onDblClick, context: onContext, dragstart: onDragStart, dragend: onDragEnd, dragover: onDragOver, dragleave: onDragLeave, drop: onDrop, mouseover: onMouseOver, mouseout: onMouseOut, mousedown: onDotMouseDown, keydown: onKeyDown, scroll: onScroll };
 
   // The viewport height affects how many rows are visible — repaint when the pane resizes.
   if (typeof ResizeObserver !== 'undefined') {
@@ -1208,6 +1327,87 @@ async function handleBranchDrop(branch, targetHash) {
   if (!confirmed) return;
   const r = await withLoading('Moving branch', () => gs.moveBranch({ branch, hash: targetHash }));
   if (handleResult(r, `Moved ${branch}`)) await refreshAll();
+}
+
+// ============================================
+// CHERRY-PICK DROP — drag a commit dot onto another commit to replay it there
+// ============================================
+// Cherry-pick replays the SOURCE commit's changes as a NEW commit on top of a branch tip.
+// The DESTINATION is the dropped-on commit, which must carry at least one LOCAL branch (that
+// branch is what the new commit lands on, and it's checked out first if it isn't current).
+// If several local branches sit on the destination, the user picks which one.
+async function handleCherryPickDrop(sourceHash, targetHash) {
+  const commits = (state.graph && state.graph.commits) || [];
+  const source = commits.find(c => c.hash === sourceHash);
+  const target = commits.find(c => c.hash === targetHash);
+  if (!source || !target) return;
+  const locals = (target.refs || []).filter(r => r.type === 'local').map(r => r.name);
+  if (!locals.length) {
+    showToast('Drop onto a commit that has a local branch — that’s where the cherry-pick lands.', 'error', 6000);
+    return;
+  }
+  const srcShort = sourceHash.slice(0, 7);
+  const srcMsg = (source.message || '').length > 60 ? source.message.slice(0, 60) + '…' : (source.message || '');
+  if (locals.length === 1) {
+    const current = (state.branches.local && state.branches.local.current) || '';
+    const note = locals[0] === current ? '' : ` "${locals[0]}" will be checked out first.`;
+    const confirmed = await modal.confirm({
+      title: 'Cherry-pick Commit',
+      message: `Replay ${srcShort}${srcMsg ? ` "${srcMsg}"` : ''} as a new commit on branch "${locals[0]}".${note}`,
+      confirmText: 'Cherry-pick'
+    });
+    if (!confirmed) return;
+    await runCherryPickOnto(sourceHash, locals[0]);
+  } else {
+    showCherryPickBranchDialog(sourceHash, srcShort, srcMsg, locals);
+  }
+}
+
+// Destination commit carries several local branches — let the user choose which one the
+// cherry-picked commit lands on (the chosen branch is checked out if it isn't current).
+function showCherryPickBranchDialog(sourceHash, srcShort, srcMsg, locals) {
+  const current = (state.branches.local && state.branches.local.current) || '';
+  const body = document.createElement('div');
+  const rows = locals.map((b, i) => `
+    <label class="cp-branch-row">
+      <input type="radio" name="cp-branch" value="${escapeHtml(b)}" ${i === 0 ? 'checked' : ''} />
+      <span class="ref-pill local${b === current ? ' head' : ''}" style="cursor:default">${escapeHtml(b)}</span>
+      <span class="text-muted" style="font-size:11px">${b === current ? 'current' : 'will be checked out'}</span>
+    </label>`).join('');
+  body.innerHTML = `
+    <p class="modal-text">Replay <code class="text-mono text-red">${escapeHtml(srcShort)}</code>${srcMsg ? ` "${escapeHtml(srcMsg)}"` : ''} as a new commit on a branch.</p>
+    <p class="modal-text text-muted" style="font-size:12px">The target commit has several local branches — choose which one the cherry-pick should land on:</p>
+    <div class="cp-branch-list">${rows}</div>`;
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn-medieval primary'; okBtn.textContent = 'Cherry-pick';
+  okBtn.onclick = async () => {
+    const sel = body.querySelector('input[name="cp-branch"]:checked');
+    if (!sel) { showToast('Select a branch', 'error'); return; }
+    modal.hide();
+    await runCherryPickOnto(sourceHash, sel.value);
+  };
+  modal.show({ title: 'Cherry-pick onto Branch', body, footer: [cancelBtn, okBtn] });
+}
+
+// Check out `destBranch` (if not already current), then cherry-pick `sourceHash` onto it.
+// Always refreshes afterwards so a conflicting cherry-pick surfaces the conflict resolver.
+async function runCherryPickOnto(sourceHash, destBranch) {
+  const current = (state.branches.local && state.branches.local.current) || '';
+  if (destBranch !== current) {
+    const co = await withLoading(`Checking out ${destBranch}`, () => gs.checkoutSafe({ branch: destBranch }));
+    if (!co.ok) { showToast('Checkout failed: ' + co.error, 'error', 6000); return; }
+    if (!(co.data && co.data.switched)) {
+      showToast(`Couldn’t switch to ${destBranch} — commit or stash your changes first.`, 'error', 6000);
+      return;
+    }
+  }
+  const r = await withLoading('Cherry-picking', () => gs.cherryPick(sourceHash));
+  if (r.ok) showToast(`Cherry-picked ${sourceHash.slice(0, 7)} onto ${destBranch}`, 'success');
+  else showToast('Cherry-pick: ' + r.error, 'error', 7000);
+  await refreshAll();
 }
 
 // ============================================
