@@ -10,7 +10,42 @@
 // (curves) at the single row boundary where it actually shifts columns. This is
 // what keeps lines tracking their dots instead of swooping across the whole graph.
 //
-// Returns: { positions: Map<hash,{row,lane,colorIdx}>, edges: [{fromLane,toLane,fromRow,toRow,colorLane,colorIdx,owner,type}], laneCount }
+// Returns: { positions: Map<hash,{row,lane,colorIdx,branchLine}>, edges: [{fromLane,toLane,fromRow,toRow,colorLane,colorIdx,owner,type}], laneCount }
+//
+// branchLine (#lanelabel): Git stores no "which branch was this commit made on" — a branch is
+// just a movable pointer, and that information is gone once the branch is deleted or
+// fast-forward-merged. We approximate the *visual* branch line each commit sits on by tagging
+// every lane with a name: the lane's tip ref when it's born at a branch head, or the source
+// branch parsed out of a "Merge branch 'X'" message for a merged-in side line (the one place
+// Git actually records a now-deleted feature branch's name).
+
+// Pick the name that best identifies a branch LINE from a commit's refs: prefer a local branch,
+// then a remote-tracking branch, then HEAD. Tags don't name a line, so they're skipped.
+function pickLaneLabel(refs) {
+  if (!refs || !refs.length) return null;
+  const local = refs.find(r => r.type === 'local');
+  if (local) return local.name;
+  const remote = refs.find(r => r.type === 'remote');
+  if (remote) return remote.name;
+  const head = refs.find(r => r.type === 'head');
+  if (head) return 'HEAD';
+  return null;
+}
+
+// Extract the source branch name Git auto-records in a merge commit's message. This is the only
+// trace of a feature branch's name that survives after the branch is deleted, so it's what lets
+// a merged-in lane stay labelled. Returns null for messages we can't parse.
+function parseMergeSource(msg) {
+  if (!msg) return null;
+  let m = msg.match(/^Merge branch '([^']+)'/);
+  if (m) return m[1];
+  m = msg.match(/^Merge remote-tracking branch '([^']+)'/);
+  if (m) return m[1];
+  m = msg.match(/^Merge pull request #\d+ from (\S+)/);
+  if (m) { const i = m[1].indexOf('/'); return i >= 0 ? m[1].slice(i + 1) : m[1]; }
+  return null;
+}
+
 function layoutGraph(commits) {
   const positions = new Map();
   const edges = [];
@@ -28,6 +63,11 @@ function layoutGraph(commits) {
   // consistent color top-to-bottom. laneColorIdx[i] = color index, or -1 when lane i free.
   const PALETTE = LANE_COLORS.length;
   let laneColorIdx = [];
+
+  // laneRef[i] = the branch-line name owning lane i (see branchLine note above), or null. It
+  // travels with the lane for its whole lifetime — set when the lane is born (at a tip ref or a
+  // merge's parsed source branch) and cleared when the lane is freed/reused.
+  let laneRef = [];
   const assignColor = (laneIdx) => {
     const used = new Set();
     for (let i = 0; i < lanes.length; i++) {
@@ -48,6 +88,7 @@ function layoutGraph(commits) {
     for (let i = 0; i < lanes.length; i++) if (lanes[i] === null) return i;
     lanes.push(null);
     laneColorIdx.push(-1);
+    laneRef.push(null);
     return lanes.length - 1;
   };
 
@@ -62,9 +103,11 @@ function layoutGraph(commits) {
       myLane = allocLane();
       lanes[myLane] = c.hash; // mark active so assignColor counts it among live lanes
       assignColor(myLane);
+      // The lane is born here at a branch head, so name it after that tip's ref (if any).
+      laneRef[myLane] = pickLaneLabel(c.refs);
     }
     const myColorIdx = laneColorIdx[myLane];
-    positions.set(c.hash, { row, lane: myLane, colorIdx: myColorIdx });
+    positions.set(c.hash, { row, lane: myLane, colorIdx: myColorIdx, branchLine: laneRef[myLane] });
 
     // 2. Collect every lane currently routing toward THIS commit (besides myLane).
     //    Those lanes converge into myLane at this row (merge of branch lines).
@@ -81,7 +124,7 @@ function layoutGraph(commits) {
     //    - extra parents (merge) claim lanes routing toward them.
 
     // Free converging lanes (they merged into myLane at this row) and release their colors.
-    for (const i of convergingLanes) { lanes[i] = null; laneColorIdx[i] = -1; }
+    for (const i of convergingLanes) { lanes[i] = null; laneColorIdx[i] = -1; laneRef[i] = null; }
 
     // Assign myLane to follow the first parent
     if (parents.length > 0) {
@@ -89,10 +132,14 @@ function layoutGraph(commits) {
     } else {
       lanes[myLane] = null; // root commit; lane ends
       laneColorIdx[myLane] = -1;
+      laneRef[myLane] = null;
     }
 
     // Extra parents (merge commits): route each toward its parent in some lane.
     const mergeParentLanes = [];
+    // The merge message names the branch that was merged in (e.g. "Merge branch 'feature'");
+    // it labels the first merged-in side line even after that branch is deleted.
+    const mergeSource = parseMergeSource(c.message);
     for (let p = 1; p < parents.length; p++) {
       const par = parents[p];
       let pl = findLane(par);
@@ -100,6 +147,9 @@ function layoutGraph(commits) {
         pl = allocLane();
         lanes[pl] = par;
         assignColor(pl); // new side-branch lane → its own distinct color
+        // Name the freshly-born side lane after the merge's source branch (first extra parent
+        // only — multi-parent octopus messages don't reliably map names to parents).
+        if (p === 1 && mergeSource) laneRef[pl] = mergeSource;
       }
       mergeParentLanes.push({ parent: par, lane: pl });
     }
@@ -456,9 +506,16 @@ function renderGraph() {
       + relCls;
     const r = isMerge ? 6 : 5;
     let dot = `<circle class="${cls}" cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="${isHead ? '#efe6d4' : '#0a0606'}" stroke-width="${isHead ? 2 : 1.5}" data-hash="${c.hash}" data-foldable="${collapsible ? '1' : ''}">`;
-    if (collapsible) {
-      dot += `<title style="pointer-events:none">${isCollapsed ? 'Right-click to expand this branch line' : 'Right-click to collapse this branch line'}</title>`;
-    }
+    // Hover tooltip (#lanelabel): name the branch line this dot sits on, falling back to a note
+    // when the line's branch is gone (deleted / outside the loaded window). Append the fold hint
+    // if the dot is also collapsible, so the dot keeps a single native <title>.
+    const lineLabel = pos.branchLine
+      ? `Branch line: ${pos.branchLine}`
+      : 'Branch line: unknown (branch deleted or outside view)';
+    const foldHint = collapsible
+      ? (isCollapsed ? ' — right-click to expand this branch line' : ' — right-click to collapse this branch line')
+      : '';
+    dot += `<title style="pointer-events:none">${escapeHtml(lineLabel + foldHint)}</title>`;
     return dot + `</circle>`;
   };
 
@@ -508,9 +565,14 @@ function renderGraph() {
       : `<span class="graph-fold-spacer"></span>`;
     const msgHtml = highlightSearchTerms(c.message || '', highlightRe);
     const authorHtml = highlightSearchTerms(c.author_name || '', highlightRe);
+    // Message hover tooltip also names the branch line (#lanelabel) so the wide row is a hover
+    // target for it too, not just the small dot.
+    const lineNote = pos.branchLine
+      ? `\n\nBranch line: ${pos.branchLine}`
+      : '\n\nBranch line: unknown (branch deleted or outside view)';
     return `<div class="graph-row${selectedCls}${headCls}${relCls}" data-hash="${c.hash}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">` +
         foldToggle +
-        `<span class="graph-row-msg" title="${escapeHtml(c.message || '')}">${msgHtml}</span>` +
+        `<span class="graph-row-msg" title="${escapeHtml((c.message || '') + lineNote)}">${msgHtml}</span>` +
         `<span class="graph-row-author">${authorHtml}</span>` +
         `<span class="graph-row-date" title="${escapeHtml(dateTitle)}">${escapeHtml(dateStr)}</span>` +
         `<span class="graph-row-hash">${escapeHtml(shortHash)}</span>` +

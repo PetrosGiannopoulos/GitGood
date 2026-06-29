@@ -723,6 +723,217 @@ $('#btn-branch').onclick = () => {
   if (tab) tab.click();
 };
 $('#btn-stash').onclick = () => showStashMenu();
+if ($('#btn-squash')) $('#btn-squash').onclick = () => showSquashDialog();
+
+// ============================================
+// SQUASH / COMBINE COMMITS — fold the current feature branch into a single commit.
+// Non-destructive: a backup branch is stamped at the current HEAD before any reset, so
+// every original commit stays recoverable. Handles the "already pushed" case by offering
+// a safe force-push (--force-with-lease) afterwards.
+// ============================================
+async function showSquashDialog() {
+  if (!state.repo) { showToast('Open a repository first', 'error'); return; }
+
+  const pr = await withLoading('Reading branch history', () => gs.squashPreview());
+  if (!pr.ok) { showToast(pr.error || 'Could not read history', 'error', 6000); return; }
+  const info = pr.data;
+  const recent = info.recent || [];
+  if (recent.length < 2) {
+    showToast('Need at least two commits on this branch to combine', 'info', 4000);
+    return;
+  }
+
+  // Live state for the dialog.
+  const maxN = recent.length;
+  let mode = (info.base && info.sinceBaseCount >= 2) ? 'base' : 'count';
+  let count = info.sinceBaseCount >= 2 ? info.sinceBaseCount : Math.min(2, maxN);
+  let summaryEdited = false;
+  let descEdited = false;
+
+  // How many commits the current selection folds together.
+  const selectedCount = () => mode === 'base' ? (info.sinceBaseCount || 0) : count;
+  // The commits (newest first) that will be combined, for the preview + suggestion.
+  const selectedCommits = () => recent.slice(0, Math.min(selectedCount(), recent.length));
+
+  // Build a suggested message from the selected range: the OLDEST commit's subject as the
+  // summary, and a bullet list of all folded subjects (oldest→newest) as the description,
+  // so nothing in the original messages is silently lost.
+  function suggestion() {
+    const range = selectedCommits();
+    if (!range.length) return { summary: '', description: '' };
+    const oldest = range[range.length - 1];
+    const bullets = range.slice().reverse().map(c => `- ${c.subject}`).join('\n');
+    return { summary: oldest.subject || '', description: bullets };
+  }
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Combine the commits on <strong class="text-red">${escapeHtml(info.branch)}</strong> into a single commit. Your changes are kept — only the commits are folded together.</p>
+    <div class="merge-strategies" id="sq-modes">
+      <label class="merge-strategy ${mode === 'base' ? 'selected' : ''}" data-mode="base" ${info.base ? '' : 'style="opacity:.45;pointer-events:none"'}>
+        <input type="radio" name="sq-mode" value="base" ${mode === 'base' ? 'checked' : ''} ${info.base ? '' : 'disabled'} />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">⚔ Whole feature branch ${info.base ? '(recommended)' : '(no base branch found)'}</div>
+          <div class="merge-strategy-desc">${info.base
+            ? `Fold every commit made since this branch diverged from <strong>${escapeHtml(info.base)}</strong> — <strong id="sq-base-n">${info.sinceBaseCount}</strong> commit(s).`
+            : 'No main/master/develop branch was found to measure against.'}</div>
+        </div>
+      </label>
+      <label class="merge-strategy ${mode === 'count' ? 'selected' : ''}" data-mode="count">
+        <input type="radio" name="sq-mode" value="count" ${mode === 'count' ? 'checked' : ''} />
+        <div class="merge-strategy-body">
+          <div class="merge-strategy-title">⚒ Last N commits</div>
+          <div class="merge-strategy-desc">Fold the
+            <input type="number" id="sq-count" min="2" max="${maxN}" value="${count}" style="width:64px" />
+            most recent commits (HEAD~N).</div>
+        </div>
+      </label>
+    </div>
+
+    <div class="branches-label" style="margin:14px 0 6px">⚜ Commits to combine (<span id="sq-count-label">${selectedCount()}</span>)</div>
+    <div id="sq-preview" style="font-family:var(--font-mono);font-size:12px;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);padding:8px;max-height:150px;overflow-y:auto"></div>
+
+    <div class="modal-field" style="margin-top:14px">
+      <label>New commit summary</label>
+      <input class="modal-input" id="sq-summary" maxlength="80" placeholder="Summary (required)" />
+    </div>
+    <div class="modal-field">
+      <label>Description (optional)</label>
+      <textarea class="modal-input" id="sq-desc" rows="4" style="resize:vertical"></textarea>
+    </div>
+
+    ${info.dirty ? `
+    <label class="modal-checkbox">
+      <input type="checkbox" id="sq-include-wt" />
+      Also include current uncommitted changes in the single commit
+    </label>` : ''}
+    <label class="modal-checkbox">
+      <input type="checkbox" id="sq-backup" checked />
+      Create a backup branch first (recommended — lets you undo)
+    </label>
+    <p class="modal-text text-muted" id="sq-pushnote" style="font-size:12px;margin-top:10px"></p>
+  `;
+
+  const summaryEl = body.querySelector('#sq-summary');
+  const descEl = body.querySelector('#sq-desc');
+  const previewEl = body.querySelector('#sq-preview');
+  const countInput = body.querySelector('#sq-count');
+  const countLabel = body.querySelector('#sq-count-label');
+  const pushNote = body.querySelector('#sq-pushnote');
+
+  function renderPreview() {
+    const range = selectedCommits();
+    previewEl.innerHTML = range.length
+      ? range.map(c => `<div><span class="text-red">${escapeHtml(c.short)}</span> ${escapeHtml(c.subject)}</div>`).join('')
+      : '<span class="text-muted">Nothing selected.</span>';
+    countLabel.textContent = selectedCount();
+    // Apply the suggested message unless the user has typed their own.
+    const sug = suggestion();
+    if (!summaryEdited) summaryEl.value = sug.summary;
+    if (!descEdited) descEl.value = sug.description;
+    // Already-pushed warning: if we'd fold more commits than sit ahead of the upstream,
+    // some were already pushed and the remote will need a (safe) force-push afterwards.
+    if (info.tracking && selectedCount() > (info.aheadOfUpstream || 0)) {
+      pushNote.innerHTML = `⚠ Some of these commits are already on <strong>${escapeHtml(info.tracking)}</strong>. After combining, GitGood will offer a safe force-push (<code>--force-with-lease</code>) to update the remote.`;
+    } else if (info.tracking) {
+      pushNote.textContent = 'These commits are not yet on the remote — a normal push will work afterwards.';
+    } else {
+      pushNote.textContent = 'This branch has no upstream yet — you can push it normally afterwards.';
+    }
+  }
+
+  // Mode selection (radio cards).
+  body.querySelectorAll('#sq-modes .merge-strategy').forEach(card => {
+    card.onclick = () => {
+      if (card.dataset.mode === 'base' && !info.base) return;
+      mode = card.dataset.mode;
+      const radio = card.querySelector('input[type="radio"]');
+      if (radio) radio.checked = true;
+      body.querySelectorAll('#sq-modes .merge-strategy').forEach(c => c.classList.toggle('selected', c === card));
+      renderPreview();
+    };
+  });
+  if (countInput) {
+    countInput.onclick = (e) => e.stopPropagation();
+    countInput.oninput = () => {
+      let n = parseInt(countInput.value, 10);
+      if (isNaN(n)) return;
+      n = Math.max(1, Math.min(maxN, n));
+      count = n;
+      if (mode !== 'count') {
+        mode = 'count';
+        body.querySelectorAll('#sq-modes .merge-strategy').forEach(c => c.classList.toggle('selected', c.dataset.mode === 'count'));
+        const r = body.querySelector('input[name="sq-mode"][value="count"]'); if (r) r.checked = true;
+      }
+      renderPreview();
+    };
+  }
+  summaryEl.addEventListener('input', () => { summaryEdited = true; });
+  descEl.addEventListener('input', () => { descEdited = true; });
+
+  renderPreview();
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn-medieval primary';
+  okBtn.innerHTML = '<span class="btn-icon">⚒</span> Combine';
+  okBtn.onclick = async () => {
+    const summary = summaryEl.value.trim();
+    if (!summary) { showToast('A summary is required', 'error'); summaryEl.focus(); return; }
+    const n = selectedCount();
+    if (n < 2) { showToast('Select at least two commits to combine', 'error'); return; }
+    const opts = {
+      summary,
+      description: descEl.value.trim(),
+      backup: body.querySelector('#sq-backup').checked,
+      includeWorkingTree: !!(body.querySelector('#sq-include-wt') && body.querySelector('#sq-include-wt').checked),
+      aheadOfUpstream: info.aheadOfUpstream,
+    };
+    if (mode === 'base') opts.target = info.mergeBase;
+    else opts.count = count;
+
+    modal.hide();
+    const r = await withLoading('Combining commits', () => gs.squash(opts));
+    if (!r.ok) { showToast(r.error || 'Combine failed', 'error', 7000); return; }
+    await refreshAll();
+
+    const res = r.data || {};
+    const needForce = !!info.tracking && (res.combined || 0) > (info.aheadOfUpstream || 0);
+    showToast(`Combined ${res.combined} commits into one`, 'success');
+    await offerPushAfterSquash(needForce, res.backupRef);
+  };
+
+  modal.show({ title: 'Combine Commits', body, footer: [cancelBtn, okBtn] });
+}
+
+// After a squash, offer to update the remote. If the rewritten commits were already
+// pushed, the remote has diverged, so a safe force-push (--force-with-lease) is required;
+// otherwise a normal push suffices.
+async function offerPushAfterSquash(needForce, backupRef) {
+  const backupLine = backupRef ? `\n\nA backup branch "${backupRef}" was created — delete it once you're happy, or check it out to undo.` : '';
+  if (needForce) {
+    const ok = await modal.confirm({
+      title: 'Push the Single Commit',
+      message: `Some combined commits were already on the remote, so the remote must be rewritten with a force-push using --force-with-lease (the safe force — it refuses if a teammate pushed in the meantime).${backupLine}\n\nForce-push now?`,
+      confirmText: 'Force-Push (lease)',
+    });
+    if (!ok) return;
+    const r = await withLoading('Force-pushing', () => gs.push({ force: true }));
+    if (handleResult(r, 'Pushed the single commit')) await refreshAll();
+  } else {
+    const ok = await modal.confirm({
+      title: 'Push the Single Commit',
+      message: `The branch now has one commit.${backupLine}\n\nPush it to the remote now?`,
+      confirmText: 'Push',
+    });
+    if (!ok) return;
+    await doPush();
+  }
+}
 
 $('#btn-open-folder').onclick = () => {
   if (state.repo) gs.openInExplorer(state.repo.path);

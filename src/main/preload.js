@@ -59,6 +59,8 @@ const api = {
   revert: (h) => ipcRenderer.invoke('repo:revert', h),
   reset: (opts) => ipcRenderer.invoke('repo:reset', opts),
   moveBranch: (opts) => ipcRenderer.invoke('repo:moveBranch', opts),
+  squashPreview: () => ipcRenderer.invoke('repo:squashPreview'),
+  squash: (opts) => ipcRenderer.invoke('repo:squash', opts),
 
   // Graph
   graphLog: (opts) => ipcRenderer.invoke('repo:graphLog', opts),

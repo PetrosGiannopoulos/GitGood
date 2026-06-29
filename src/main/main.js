@@ -698,6 +698,10 @@ ipcMain.handle('repo:push', wrap(async (_, opts) => {
   ensureGit();
   const pg = makeProgressGit(currentRepoPath);
   const args = [];
+  // --force-with-lease is the SAFE force: it refuses to overwrite the remote if the
+  // remote branch moved since we last fetched (i.e. a coworker pushed in the meantime),
+  // unlike a bare --force. Needed after a squash that rewrote already-pushed commits.
+  if (opts && opts.force) args.push('--force-with-lease');
   if (opts && opts.setUpstream) args.push('-u');
   if (opts && opts.remote) args.push(opts.remote);
   if (opts && opts.branch) args.push(opts.branch);
@@ -913,6 +917,131 @@ ipcMain.handle('repo:reset', wrap(async (_, { hash, mode }) => {
   const modeFlag = '--' + (mode || 'mixed');
   await g.raw(['reset', modeFlag, hash]);
   return true;
+}));
+
+// Parse `git log` output into plain commit objects. Uses \x1f (unit separator) between
+// fields and one line per commit so subjects with spaces survive intact.
+async function _listCommits(g, range, maxCount) {
+  const fmt = '%H%x1f%h%x1f%s%x1f%an%x1f%aI';
+  const args = ['log', '--pretty=format:' + fmt];
+  if (maxCount) args.push('--max-count=' + maxCount);
+  args.push(range);
+  let raw = '';
+  try { raw = await g.raw(args); } catch (e) { return []; }
+  return (raw || '').split('\n').filter(Boolean).map(line => {
+    const [hash, short, subject, author, date] = line.split('\x1f');
+    return { hash, short, subject, author, date };
+  });
+}
+
+// Gather everything the renderer needs to offer a safe squash of the current branch:
+// how many commits sit ahead of the upstream (already-pushed detection), the merge-base
+// with a likely base branch (main/master/develop), and the recent commit list to preview.
+ipcMain.handle('repo:squashPreview', wrap(async () => {
+  const g = ensureGit();
+  const status = await g.status();
+  const branch = status.current;
+  if (!branch || status.detached) {
+    throw new Error('You are not on a branch (detached HEAD). Check out your feature branch first.');
+  }
+  const tracking = status.tracking || null;
+
+  // How many commits has HEAD moved ahead of its upstream? If this is LESS than the number
+  // we end up combining, then some of those commits were already pushed → force-push needed.
+  let aheadOfUpstream = 0;
+  if (tracking) {
+    try {
+      aheadOfUpstream = parseInt((await g.raw(['rev-list', '--count', `${tracking}..HEAD`])).trim(), 10) || 0;
+    } catch (e) { /* leave 0 */ }
+  }
+
+  // Pick a base branch to measure the feature against: the first conventional default
+  // branch that exists and isn't the branch we're on.
+  let localNames = [];
+  try { localNames = (await g.branchLocal()).all || []; } catch (e) { /* none */ }
+  let base = null;
+  for (const pref of ['main', 'master', 'develop', 'devel']) {
+    if (pref !== branch && localNames.includes(pref)) { base = pref; break; }
+  }
+
+  let mergeBase = null;
+  let sinceBaseCount = 0;
+  if (base) {
+    try {
+      mergeBase = (await g.raw(['merge-base', base, 'HEAD'])).trim() || null;
+      if (mergeBase) {
+        sinceBaseCount = parseInt((await g.raw(['rev-list', '--count', `${mergeBase}..HEAD`])).trim(), 10) || 0;
+      }
+    } catch (e) { mergeBase = null; sinceBaseCount = 0; }
+  }
+
+  // Recent commits along HEAD, newest first, to drive the live preview and the "last N" mode.
+  const recent = await _listCommits(g, 'HEAD', 100);
+
+  const dirty = (status.files || []).length > 0;
+
+  return { branch, tracking, aheadOfUpstream, base, mergeBase, sinceBaseCount, recent, dirty };
+}));
+
+// Perform a non-destructive squash: stamp a backup branch at the current HEAD, then
+// `reset --soft` to the combine point and create a single commit. --soft keeps the index
+// and working tree, so the combined diff is preserved and committed as one.
+ipcMain.handle('repo:squash', wrap(async (_, opts) => {
+  const g = ensureGit();
+  opts = opts || {};
+  const { target, count, summary, description, includeWorkingTree } = opts;
+  const makeBackup = opts.backup !== false;
+
+  const status = await g.status();
+  const branch = status.current;
+  if (!branch || status.detached) throw new Error('You are not on a branch (detached HEAD).');
+  if (!summary || !summary.trim()) throw new Error('A commit summary is required.');
+
+  // Resolve the commit we will reset back to.
+  let resetTo;
+  if (target) resetTo = String(target);
+  else if (count && count > 0) resetTo = `HEAD~${count}`;
+  else throw new Error('Nothing selected to combine.');
+
+  let resolved;
+  try { resolved = (await g.raw(['rev-parse', '--verify', resetTo + '^{commit}'])).trim(); }
+  catch (e) { throw new Error('Could not resolve the combine point (' + resetTo + ').'); }
+
+  const head = (await g.raw(['rev-parse', 'HEAD'])).trim();
+  if (resolved === head) throw new Error('The combine point is the current commit — there is nothing to combine.');
+
+  // The reset target must be an ancestor of HEAD, or we'd be rewriting unrelated history.
+  const isAncestor = await g.raw(['merge-base', '--is-ancestor', resolved, 'HEAD']).then(() => true).catch(() => false);
+  if (!isAncestor) throw new Error('The combine point is not an ancestor of the current commit.');
+
+  const combined = parseInt((await g.raw(['rev-list', '--count', `${resolved}..HEAD`])).trim(), 10) || 0;
+
+  // Safety net: a branch holding the pre-squash HEAD so every original commit stays
+  // reachable and the operation can be fully undone (in addition to git's reflog).
+  let backupRef = null;
+  if (makeBackup) {
+    const safeBranch = branch.replace(/[^\w.-]+/g, '-');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '');
+    backupRef = `gitgood-backup/${safeBranch}/${stamp}`;
+    await g.raw(['branch', backupRef, 'HEAD']);
+  }
+
+  try {
+    await g.raw(['reset', '--soft', resolved]);
+    // Optionally fold in any current uncommitted changes so the result is exactly one
+    // commit of the latest working state.
+    if (includeWorkingTree) await g.raw(['add', '-A']);
+    const commitArgs = ['commit', '-m', summary.trim()];
+    if (description && description.trim()) commitArgs.push('-m', description.trim());
+    await g.raw(commitArgs);
+  } catch (e) {
+    // Roll back to the pre-squash state so a failure never leaves a half-done reset.
+    try { await g.raw(['reset', '--soft', head]); } catch (e2) { /* best effort */ }
+    throw e;
+  }
+
+  const newHead = (await g.raw(['rev-parse', 'HEAD'])).trim();
+  return { branch, backupRef, combined, newHead, aheadOfUpstream: opts.aheadOfUpstream };
 }));
 
 ipcMain.handle('repo:moveBranch', wrap(async (_, { branch, hash }) => {
