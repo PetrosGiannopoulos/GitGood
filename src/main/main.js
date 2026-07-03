@@ -502,20 +502,126 @@ ipcMain.handle('repo:commitFiles', wrap(async (_, opts) => {
 // argument as a regex, and this platform's engine rejects a lone "(" even when escaped.)
 // Scoped to --all to match the graph; the caller intersects the result with its loaded
 // commits, so extra hashes are harmless.
-ipcMain.handle('repo:searchDiffContent', wrap(async (_, opts) => {
+// Diff-content ("pickaxe", git log -S) search. This is inherently expensive: git has to
+// diff every commit it walks, so on big repos it can take many seconds — and `--max-count`
+// bounds only *matching* commits, not commits *traversed*, so a rare/absent query still
+// diffs the whole history. To keep the UI responsive we run git as a killable child process
+// instead of simple-git's blocking .raw(), so we can: (a) cancel an in-flight search when the
+// query changes, (b) enforce a hard timeout, and (c) stream matches to the renderer as they
+// arrive (via the `search:progress` channel) so the graph lights up progressively.
+//
+// This handler is intentionally NOT wrapped by wrap(): it hand-rolls the { ok, data } shape so
+// it can resolve on the child's `close` event with partial/timeout/cancel flags.
+let _diffSearch = null; // { proc, cancelled, hashes }
+
+ipcMain.handle('repo:searchDiffContent', (_e, opts) => {
   const query = ((opts && opts.query) || '').trim();
-  if (!query) return [];
-  const g = ensureGit();
+  if (!query) return { ok: true, data: { hashes: [], timedOut: false, cancelled: false } };
+  if (!currentRepoPath) return { ok: false, error: 'No repository opened.' };
+
+  // Cancel any search still running for a previous query so processes don't pile up.
+  if (_diffSearch && _diffSearch.proc) {
+    _diffSearch.cancelled = true;
+    try { _diffSearch.proc.kill(); } catch (e) {}
+  }
+
   const limit = (opts && opts.limit) || 2000;
-  // `-S<string>` glued into one arg; passed as an array element, so no shell parsing and
-  // a leading '-' in the query can't be mistaken for a separate flag.
-  const raw = await g.raw([
-    'log', '--all', `--max-count=${limit}`,
-    '--format=%H',
-    '-S' + query
-  ]);
-  return raw.split('\n').map(s => s.trim()).filter(Boolean);
-}));
+  const timeoutMs = (opts && opts.timeoutMs) || 15000;
+  const { spawn } = require('child_process');
+
+  return new Promise((resolve) => {
+    const record = { proc: null, cancelled: false, hashes: [] };
+    _diffSearch = record;
+
+    let proc;
+    try {
+      // `-S<string>` is glued into one argv element so no shell parses it and a leading '-'
+      // in the query can't be mistaken for a flag. windowsHide avoids a console flash.
+      proc = spawn('git', [
+        'log', '--all', `--max-count=${limit}`, '--format=%H', '-S' + query
+      ], {
+        cwd: currentRepoPath,
+        windowsHide: true,
+        env: Object.assign({}, process.env, { GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' })
+      });
+    } catch (err) {
+      if (_diffSearch === record) _diffSearch = null;
+      resolve({ ok: false, error: err.message });
+      return;
+    }
+    record.proc = proc;
+
+    // Buffer stdout by line; flush new hashes to the renderer in throttled batches.
+    let buf = '';
+    let pending = [];
+    let flushTimer = null;
+    const sendProgress = (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.webContents.send('search:progress', payload); } catch (e) {}
+      }
+    };
+    const flush = () => {
+      flushTimer = null;
+      if (!pending.length) return;
+      const delta = pending; pending = [];
+      sendProgress({ query, hashesDelta: delta, done: false });
+    };
+    const scheduleFlush = () => { if (!flushTimer) flushTimer = setTimeout(flush, 120); };
+
+    proc.stdout.on('data', (d) => {
+      buf += d.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (line) { record.hashes.push(line); pending.push(line); }
+      }
+      scheduleFlush();
+    });
+    proc.stderr.on('data', () => { /* ignore — an invalid pattern just yields no matches */ });
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill(); } catch (e) {}
+    }, timeoutMs);
+
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (flushTimer) { clearTimeout(flushTimer); }
+      // Emit anything still buffered (last line may lack a trailing newline).
+      const tail = buf.trim();
+      if (tail) { record.hashes.push(tail); pending.push(tail); }
+      if (pending.length) sendProgress({ query, hashesDelta: pending, done: false });
+      pending = [];
+      if (_diffSearch === record) _diffSearch = null;
+      sendProgress({ query, hashesDelta: [], done: true, timedOut, cancelled: record.cancelled });
+      resolve({ ok: true, data: { hashes: record.hashes, timedOut, cancelled: record.cancelled } });
+    };
+
+    proc.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (_diffSearch === record) _diffSearch = null;
+      resolve({ ok: false, error: err.message });
+    });
+    proc.on('close', finish);
+  });
+});
+
+// Cancel any in-flight diff-content search (e.g. the user cleared the filter box). The killed
+// process resolves its pending invoke with cancelled:true, so the renderer won't cache it.
+ipcMain.handle('repo:cancelDiffSearch', () => {
+  if (_diffSearch && _diffSearch.proc) {
+    _diffSearch.cancelled = true;
+    try { _diffSearch.proc.kill(); } catch (e) {}
+  }
+  return { ok: true };
+});
 
 // Returns commits with parents and ref decorations — the data the visual graph needs
 ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {

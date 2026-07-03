@@ -784,6 +784,13 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   border-color: var(--gold-accent);
   box-shadow: 0 0 0 2px rgba(200, 160, 74, 0.2);
 }
+/* Spinner shown at the trailing edge while a diff-content (pickaxe) search runs. */
+.commit-search.searching {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='none' stroke='%23c8a04a' stroke-width='2' stroke-linecap='round' stroke-dasharray='9 24'><animateTransform attributeName='transform' type='rotate' from='0 8 8' to='360 8 8' dur='0.7s' repeatCount='indefinite'/></circle></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 26px;
+}
 
 /* Filter-mode dropdown beside the commit search box */
 .commit-search-mode {

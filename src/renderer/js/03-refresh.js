@@ -242,9 +242,11 @@ function relayoutGraph() {
   };
   renderGraph();
 
-  // Reflect "no matches" on the graph search box
+  // Reflect "no matches" on the graph search box — but not while a diff-content search is
+  // still streaming (`searching`), where 0 matches so far just means "not found yet".
   const searchBox = document.getElementById('graph-search');
-  if (searchBox) searchBox.classList.toggle('has-no-matches', !!query && commits.length === 0);
+  if (searchBox) searchBox.classList.toggle('has-no-matches',
+    !!query && commits.length === 0 && !searchBox.classList.contains('searching'));
 }
 
 // Given the laid-out commits and a set of collapsed commit hashes, return the set of
@@ -446,9 +448,11 @@ function renderHistory() {
   const query = (state.historyFilter || '').trim();
   const commits = query ? allCommits.filter(c => commitMatchesFilter(c, query, state.historyFilterMode)) : allCommits;
 
-  // Reflect "no matches" on the search box
+  // Reflect "no matches" on the search box — but not while a diff-content search is still
+  // streaming (`searching`), where 0 matches so far just means "not found yet".
   const searchBox = $('#history-search');
-  if (searchBox) searchBox.classList.toggle('has-no-matches', !!query && commits.length === 0);
+  if (searchBox) searchBox.classList.toggle('has-no-matches',
+    !!query && commits.length === 0 && !searchBox.classList.contains('searching'));
 
   if (!allCommits.length) {
     list.innerHTML = `

@@ -2172,15 +2172,19 @@ function wireGraphTab() {
       // If filtering by files, make sure the commit→files map is loaded first; if filtering
       // by diff content, make sure the pickaxe match set for this query is loaded first.
       if ((state.graphFilterMode === 'files' || state.graphFilterMode === 'all') && state.graphFilter.trim()) {
+        cancelContentSearch();
         await ensureCommitFilesMap();
       } else if (state.graphFilterMode === 'content' && state.graphFilter.trim()) {
         await ensureContentMatches(state.graphFilter);
+      } else {
+        // No content filter active — stop any diff search still running.
+        cancelContentSearch();
       }
       relayoutGraph();
     };
     graphSearch.oninput = () => { clearTimeout(t); t = setTimeout(applyGraph, 180); };
     graphSearch.onkeydown = (e) => {
-      if (e.key === 'Escape') { graphSearch.value = ''; state.graphFilter = ''; relayoutGraph(); }
+      if (e.key === 'Escape') { graphSearch.value = ''; state.graphFilter = ''; cancelContentSearch(); relayoutGraph(); }
     };
     if (graphMode) graphMode.onchange = () => {
       state.graphFilterMode = graphMode.value;
@@ -2198,15 +2202,18 @@ function wireGraphTab() {
     const applyHistory = async () => {
       state.historyFilter = historySearch.value;
       if ((state.historyFilterMode === 'files' || state.historyFilterMode === 'all') && state.historyFilter.trim()) {
+        cancelContentSearch();
         await ensureCommitFilesMap();
       } else if (state.historyFilterMode === 'content' && state.historyFilter.trim()) {
         await ensureContentMatches(state.historyFilter);
+      } else {
+        cancelContentSearch();
       }
       renderHistory();
     };
     historySearch.oninput = () => { clearTimeout(t2); t2 = setTimeout(applyHistory, 180); };
     historySearch.onkeydown = (e) => {
-      if (e.key === 'Escape') { historySearch.value = ''; state.historyFilter = ''; renderHistory(); }
+      if (e.key === 'Escape') { historySearch.value = ''; state.historyFilter = ''; cancelContentSearch(); renderHistory(); }
     };
     if (historyMode) historyMode.onchange = () => {
       state.historyFilterMode = historyMode.value;
@@ -2300,6 +2307,16 @@ wireGraphTab();
       // touching the active-operation counter that begin()/end() manage).
       opProgress.indeterminate(label);
     }
+  });
+})();
+
+// ============================================
+// DIFF-CONTENT SEARCH STREAMING — matches arrive progressively from the pickaxe search
+// ============================================
+(() => {
+  if (!gs.onSearchProgress) return;
+  gs.onSearchProgress((payload) => {
+    if (typeof applyContentSearchProgress === 'function') applyContentSearchProgress(payload);
   });
 })();
 

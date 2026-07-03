@@ -24,6 +24,12 @@ const api = {
   log: (opts) => ipcRenderer.invoke('repo:log', opts),
   commitFiles: (opts) => ipcRenderer.invoke('repo:commitFiles', opts),
   searchDiffContent: (opts) => ipcRenderer.invoke('repo:searchDiffContent', opts),
+  cancelDiffSearch: () => ipcRenderer.invoke('repo:cancelDiffSearch'),
+  onSearchProgress: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('search:progress', handler);
+    return () => ipcRenderer.removeListener('search:progress', handler);
+  },
   remotes: () => ipcRenderer.invoke('repo:remotes'),
   stashList: () => ipcRenderer.invoke('repo:stashList'),
 

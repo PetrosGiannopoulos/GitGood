@@ -101,35 +101,111 @@ async function ensureCommitFilesMap() {
 const _contentMatchCache = new Map();   // trimmed query -> Set<hash>
 const _contentMatchLoading = new Map(); // trimmed query -> Promise<Set<hash>>
 
+// The diff-content search that is currently in flight. The main process streams matches on
+// the `search:progress` channel as git finds them; applyContentSearchProgress (below) folds
+// those into `set` and repaints the active view so results appear progressively instead of
+// all-at-once when the (potentially slow) search finishes.
+let _activeContentSearch = null; // { query, set }
+
 // Ensure the diff-content match set for `query` is loaded and cached. Callers must await
 // this before rendering a 'content'-mode filter, otherwise commitMatchesFilter sees no set
 // and filters everything out. Concurrent callers for the same query share one request.
+//
+// The search is streamed and cancellable in the main process: starting a new query kills the
+// git process for the previous one, and a hard timeout there caps the wait. A result flagged
+// `cancelled` is partial and NOT cached (so retyping that query re-runs a full search); a
+// `timedOut` result is cached but the user is warned it may be incomplete.
 async function ensureContentMatches(query) {
   const q = (query || '').trim();
   if (!q) return new Set();
   if (_contentMatchCache.has(q)) return _contentMatchCache.get(q);
   if (_contentMatchLoading.has(q)) return _contentMatchLoading.get(q);
   const p = (async () => {
-    let set = new Set();
+    // Share one Set with the streaming handler so partial matches land here as they arrive.
+    const set = new Set();
+    _activeContentSearch = { query: q, set };
+    setContentSearchBusy(true);
+    let cancelled = false, timedOut = false;
     try {
       const r = await gs.searchDiffContent({ query: q, limit: 2000 });
-      if (r && r.ok) set = new Set(r.data || []);
-    } catch (e) { /* leave empty on error (e.g. an invalid pattern) */ }
+      if (r && r.ok && r.data) {
+        (r.data.hashes || []).forEach(h => set.add(h));
+        cancelled = !!r.data.cancelled;
+        timedOut = !!r.data.timedOut;
+      }
+    } catch (e) { /* leave partial set on error (e.g. an invalid pattern) */ }
+    _contentMatchLoading.delete(q);
+    // A cancelled search was superseded by a newer query; don't cache its partial result and
+    // don't touch UI state — the newer search owns _activeContentSearch and the busy flag now.
+    // Evict any partial set the streaming handler may have written so retyping re-runs a full
+    // search rather than reusing incomplete results.
+    if (cancelled) { _contentMatchCache.delete(q); return set; }
+    if (_activeContentSearch && _activeContentSearch.query === q) _activeContentSearch = null;
+    setContentSearchBusy(false);
     _contentMatchCache.set(q, set);
     // Keep only the most recent handful of queries.
     while (_contentMatchCache.size > 12) {
       _contentMatchCache.delete(_contentMatchCache.keys().next().value);
     }
-    _contentMatchLoading.delete(q);
+    if (timedOut) {
+      showToast(`Diff search timed out — showing ${set.size} match${set.size === 1 ? '' : 'es'} found so far. Narrow the query for complete results.`, 'error', 6000);
+    }
     return set;
   })();
   _contentMatchLoading.set(q, p);
   return p;
 }
 
+// Fold a streamed batch of pickaxe matches into the in-flight search and repaint the active
+// view. Called from the `search:progress` subscription (wired in 07-graph.js init).
+function applyContentSearchProgress(payload) {
+  if (!payload || !_activeContentSearch) return;
+  if (payload.query !== _activeContentSearch.query) return; // stale batch from a previous query
+  let added = false;
+  for (const h of (payload.hashesDelta || [])) {
+    if (!_activeContentSearch.set.has(h)) { _activeContentSearch.set.add(h); added = true; }
+  }
+  // The live Set isn't in _contentMatchCache yet, but commitMatchesFilter reads the cache by
+  // query. Expose the partial set there so a repaint mid-search shows the matches so far.
+  if (added) _contentMatchCache.set(payload.query, _activeContentSearch.set);
+  if (added) _scheduleContentRepaint();
+}
+
+// Coalesce the progressive repaints so a fast stream doesn't relayout the graph per batch.
+let _contentRepaintTimer = null;
+function _scheduleContentRepaint() {
+  if (_contentRepaintTimer) return;
+  _contentRepaintTimer = setTimeout(() => {
+    _contentRepaintTimer = null;
+    const tab = (typeof state !== 'undefined' && state.currentTab) || 'graph';
+    if (tab === 'history' && typeof renderHistory === 'function') renderHistory();
+    else if (typeof relayoutGraph === 'function') relayoutGraph();
+  }, 150);
+}
+
+// Abort an in-flight diff-content search — called when the filter box is cleared, Escape is
+// pressed, or the filter mode changes away from 'content'. Kills the git process in main so
+// it stops churning, and settles the spinner immediately rather than waiting for it to finish.
+function cancelContentSearch() {
+  if (!_activeContentSearch) return;
+  _activeContentSearch = null;
+  setContentSearchBusy(false);
+  try { if (gs.cancelDiffSearch) gs.cancelDiffSearch(); } catch (e) { /* best effort */ }
+}
+
+// Toggle the spinner on whichever filter input is visible while a content search runs.
+function setContentSearchBusy(busy) {
+  ['#graph-search', '#history-search'].forEach(sel => {
+    const el = document.querySelector(sel);
+    if (el) el.classList.toggle('searching', !!busy);
+  });
+}
+
 function clearContentMatchCache() {
   _contentMatchCache.clear();
   _contentMatchLoading.clear();
+  _activeContentSearch = null;
+  setContentSearchBusy(false);
 }
 
 // mode: 'message' (default) matches message/author/email/hash; 'files' matches changed
