@@ -17,6 +17,7 @@ async function refreshAll() {
   // content search re-runs against the updated history.
   _commitFilesMap = null;
   clearContentMatchCache();
+  clearLocalOnlyCommits();
   // The hidden-info (empty folders / ignored) cache is repo-specific and time-based;
   // drop it on a full refresh so switching repos can't show the previous repo's data.
   hiddenInfoCache = null;
@@ -190,6 +191,9 @@ async function refreshGraph() {
   } else if (state.graphFilterMode === 'content' && (state.graphFilter || '').trim()) {
     await ensureContentMatches(state.graphFilter);
   }
+  // Preload the local-only set too (refreshAll cleared it) so hiding unpushed commits doesn't
+  // flash the full graph before the set arrives.
+  if (state.graphHideLocalCommits) await ensureLocalOnlyCommits();
   relayoutGraph();
 }
 
@@ -212,6 +216,19 @@ function relayoutGraph() {
     commits = commits.filter(c => commitMatchesFilter(c, query, state.graphFilterMode));
   }
 
+  // 0.5 Hide local-only (unpushed) commits when the option is on. These are only branch tips,
+  //     so removing them leaves every remaining (remote-reachable) commit's parents intact —
+  //     no structural gaps, hence no `filtered` stub treatment needed here. If the set hasn't
+  //     loaded yet, kick off the load and repaint when it arrives (this pass shows everything).
+  if (state.graphHideLocalCommits) {
+    const localOnly = localOnlyCommitSet();
+    if (localOnly) {
+      if (localOnly.size) commits = commits.filter(c => !localOnly.has(c.hash));
+    } else {
+      ensureLocalOnlyCommits().then(() => relayoutGraph());
+    }
+  }
+
   // 1. Global collapse (only when not filtering — filtering already narrows the view)
   if (!query && state.graphCollapsed && commits.length > GRAPH_COLLAPSE_VISIBLE) {
     hiddenCount = commits.length - GRAPH_COLLAPSE_VISIBLE;
@@ -231,7 +248,7 @@ function relayoutGraph() {
     }
   }
 
-  const layout = layoutGraph(commits);
+  const layout = layoutGraph(commits, { filtered: !!query });
   state.graph = {
     commits, head, hiddenCount,
     perCommitHidden,

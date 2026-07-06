@@ -358,6 +358,25 @@
               </label>
               <button class="mini-btn" id="graph-load-more" title="Load another batch of older commits">↧ Load more</button>
               <button class="mini-btn" id="graph-refresh" title="Reload graph">⟳ Refresh</button>
+              <div class="graph-settings-menu" id="graph-settings-menu">
+                <button class="mini-btn" id="graph-settings-btn" title="Graph display options" aria-haspopup="true" aria-expanded="false">⚙</button>
+                <div class="graph-settings-dropdown" id="graph-settings-dropdown" hidden>
+                  <div class="graph-settings-title">Branch display</div>
+                  <label class="graph-settings-item">
+                    <input type="checkbox" id="graph-opt-hide-local" />
+                    <span>Hide local branches</span>
+                  </label>
+                  <label class="graph-settings-item">
+                    <input type="checkbox" id="graph-opt-strip-remote" />
+                    <span>Remote branches without prefix</span>
+                  </label>
+                  <div class="graph-settings-title">Commits</div>
+                  <label class="graph-settings-item" title="Hide commits that exist only on local branches (not yet pushed to any remote)">
+                    <input type="checkbox" id="graph-opt-hide-local-commits" />
+                    <span>Hide local (unpushed) commits</span>
+                  </label>
+                </div>
+              </div>
             </div>
             <div class="graph-body" id="graph-body">
               <div class="graph-container" id="graph-container">

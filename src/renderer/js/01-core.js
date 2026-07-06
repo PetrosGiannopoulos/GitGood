@@ -43,6 +43,9 @@ const state = {
   selectedGraphHash: null,
   graphLoading: false,
   graphCollapsed: false,   // when true, hide the middle of long history (show newest few)
+  graphHideLocal: false,   // when true, don't draw local-branch ref pills in the graph
+  graphStripRemotePrefix: false, // when true, show remote branches without their "<remote>/" prefix
+  graphHideLocalCommits: false,  // when true, hide commits not reachable from any remote (unpushed)
   collapsedCommits: null,  // Set<hash>: commits whose same-lane descendant chain is folded
   graphFilter: '',         // text filter for the graph tab
   graphFilterMode: 'message', // 'message' | 'files' | 'all'
@@ -207,6 +210,30 @@ function clearContentMatchCache() {
   _activeContentSearch = null;
   setContentSearchBusy(false);
 }
+
+// Local-only (unpushed) commits — the set of hashes reachable from some ref but NOT from any
+// remote. Loaded lazily and cached; cleared on refreshAll() since fetch/commit/push change it.
+// Used by the graph's "hide local commits" option (see relayoutGraph).
+let _localOnlyCommits = null;   // Set<hash>, or null until loaded
+let _localOnlyLoading = null;   // Promise<Set<hash>> while loading
+async function ensureLocalOnlyCommits() {
+  if (_localOnlyCommits) return _localOnlyCommits;
+  if (_localOnlyLoading) return _localOnlyLoading;
+  _localOnlyLoading = (async () => {
+    let set = new Set();
+    try {
+      const r = await gs.localOnlyCommits();
+      if (r && r.ok) set = new Set(r.data || []);
+    } catch (e) { /* leave empty on error — show everything rather than hide wrongly */ }
+    _localOnlyCommits = set;
+    _localOnlyLoading = null;
+    return set;
+  })();
+  return _localOnlyLoading;
+}
+// Current local-only set for synchronous readers (relayoutGraph). Returns null if not yet loaded.
+function localOnlyCommitSet() { return _localOnlyCommits; }
+function clearLocalOnlyCommits() { _localOnlyCommits = null; _localOnlyLoading = null; }
 
 // mode: 'message' (default) matches message/author/email/hash; 'files' matches changed
 // file paths; 'all' matches either; 'content' matches commits whose diff content changed

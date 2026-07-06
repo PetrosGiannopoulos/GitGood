@@ -46,7 +46,11 @@ function parseMergeSource(msg) {
   return null;
 }
 
-function layoutGraph(commits) {
+function layoutGraph(commits, opts) {
+  // filtered: the commit list is a search-narrowed subset (not the full loaded window). In that
+  // mode a "missing first parent" means the parent was filtered out, NOT that history ran off
+  // the loaded window — so we must not draw the long "continues below" line down to the bottom.
+  const filtered = !!(opts && opts.filtered);
   const positions = new Map();
   const edges = [];
 
@@ -202,6 +206,13 @@ function layoutGraph(commits) {
     const firstParent = parents[0];
     const fpPos = positions.get(firstParent);
     if (!fpPos) {
+      if (filtered) {
+        // Filter mode: the parent exists but was filtered out of view. Draw only a short dashed
+        // stub off the dot ("history continues, hidden by the filter") instead of a full-height
+        // line to the bottom edge — the long lines are what made filtered graphs look tangled.
+        edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: row, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'stub-down' });
+        continue;
+      }
       // First parent is outside the loaded window. Draw the line continuing straight down
       // to the bottom edge so it reads as "history continues below". One solid run to the
       // last row, then a dashed "continue-down" stub that fades off past the bottom.
@@ -351,14 +362,32 @@ function _refMeasureContext() {
   }
   return _refMeasureCtx;
 }
+// Resolve a commit's refs to the { ref, label } list that will actually be drawn, honoring the
+// graph display toggles: local branches are dropped when `graphHideLocal` is on, and remote
+// branches lose their "<remote>/" prefix when `graphStripRemotePrefix` is on. Shared by the
+// width measurer and the cell renderer so the reserved column width matches what's shown.
+function visibleRefsForDisplay(refs) {
+  if (!refs || !refs.length) return [];
+  const hideLocal = !!(typeof state !== 'undefined' && state.graphHideLocal);
+  const stripPrefix = !!(typeof state !== 'undefined' && state.graphStripRemotePrefix);
+  const out = [];
+  for (const r of refs) {
+    if (r.type === 'local' && hideLocal) continue;
+    let label;
+    if (r.type === 'head') label = 'HEAD';
+    else if (r.type === 'remote' && stripPrefix) label = (r.name || '').replace(/^[^/]+\//, '');
+    else label = r.name || '';
+    out.push({ ref: r, label });
+  }
+  return out;
+}
 function measureRefBlockWidth(commit) {
-  const refs = commit && commit.refs;
-  if (!refs || !refs.length) return 0;
+  const shown = visibleRefsForDisplay(commit && commit.refs);
+  if (!shown.length) return 0;
   const ctx = _refMeasureContext();
   let w = REF_CELL_PAD;
-  for (let i = 0; i < refs.length; i++) {
-    const label = refs[i].type === 'head' ? 'HEAD' : (refs[i].name || '');
-    w += Math.ceil(ctx.measureText(label).width) + REF_PILL_CHROME;
+  for (let i = 0; i < shown.length; i++) {
+    w += Math.ceil(ctx.measureText(shown[i].label).width) + REF_PILL_CHROME;
     if (i > 0) w += REF_PILL_GAP;
   }
   return w;
@@ -442,7 +471,11 @@ function renderGraph() {
   for (let i = 0; i < edges.length; i++) {
     const e = edges[i];
     edgeLo[i] = Math.min(e.fromRow, e.toRow);
-    edgeHi[i] = e.type === 'continue-down' ? commits.length : Math.max(e.fromRow, e.toRow);
+    // 'continue-down' fades all the way off the bottom; 'stub-down' is a short tick just below
+    // its own dot, so its span reaches one row past `fromRow`.
+    edgeHi[i] = e.type === 'continue-down' ? commits.length
+      : e.type === 'stub-down' ? e.fromRow + 1
+      : Math.max(e.fromRow, e.toRow);
   }
 
   // `relatedSet` (declared here, set by applyAncestryHighlight) is the lineage of the
@@ -469,6 +502,12 @@ function renderGraph() {
     if (e.type === 'continue-down') {
       const yStart = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
       return `<line class="graph-edge${relCls}"${owner} x1="${x1}" y1="${yStart}" x2="${x1}" y2="${totalHeight}" stroke="${color}" stroke-width="2" stroke-dasharray="3 3" opacity="0.55"/>`;
+    }
+    if (e.type === 'stub-down') {
+      // Short dashed tick just below the dot: the first parent exists but is filtered out.
+      const yStart = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+      const yEnd = yStart + GRAPH_ROW_H * 0.6;
+      return `<line class="graph-edge${relCls}"${owner} x1="${x1}" y1="${yStart}" x2="${x1}" y2="${yEnd}" stroke="${color}" stroke-width="2" stroke-dasharray="3 3" opacity="0.45"/>`;
     }
     const y1 = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
     const y2 = e.toRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
@@ -524,20 +563,23 @@ function renderGraph() {
   // row. Only commits that actually carry a ref get a cell; the fixed column width keeps the
   // lane graph aligned regardless. Pills are right-aligned so their labels point at the lanes.
   const buildRefCell = (c, pos) => {
-    const refs = c.refs;
-    if (!refs || !refs.length) return '';
+    // visibleRefsForDisplay applies the hide-local / strip-remote-prefix toggles. `label` is the
+    // text to draw; data-ref-name always keeps the ref's FULL name so context-menu actions
+    // (checkout/delete a remote branch, etc.) still receive the real ref.
+    const shown = visibleRefsForDisplay(c.refs);
+    if (!shown.length) return '';
     let refPills = '';
-    for (const r of refs) {
-      if (r.type === 'tag') refPills += `<span class="ref-pill tag" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
+    for (const { ref: r, label } of shown) {
+      if (r.type === 'tag') refPills += `<span class="ref-pill tag" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
       else if (r.type === 'local') {
         const headCls = r.isHead ? ' head' : '';
-        refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(r.name)}</span>`;
-      } else if (r.type === 'remote') refPills += `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`;
+        refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(label)}</span>`;
+      } else if (r.type === 'remote') refPills += `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
       else if (r.type === 'head') refPills += `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
-      else refPills += `<span class="ref-pill" data-ref-type="other">${escapeHtml(r.name)}</span>`;
+      else refPills += `<span class="ref-pill" data-ref-type="other">${escapeHtml(label)}</span>`;
     }
     // title lists the refs in full for when a crowded commit's pills overflow the clamped width.
-    const refTitle = escapeHtml(refs.map(r => r.type === 'head' ? 'HEAD' : r.name).join('  '));
+    const refTitle = escapeHtml(shown.map(s => s.label).join('  '));
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
     // Pills go in an inner track so a crowded cell (more/longer branches than the clamped
     // column can show) can ping-pong its overflow into view on hover (see startRefMarquee).
@@ -2159,6 +2201,52 @@ function wireGraphTab() {
     relayoutGraph();
   };
   updateGraphCollapseButton();
+
+  // Graph display-options gear: branch-display toggles (hide local pills / strip remote prefix).
+  const gearBtn = $('#graph-settings-btn');
+  const gearMenu = $('#graph-settings-dropdown');
+  if (gearBtn && gearMenu) {
+    const hideLocalCb = $('#graph-opt-hide-local');
+    const stripRemoteCb = $('#graph-opt-strip-remote');
+    const hideLocalCommitsCb = $('#graph-opt-hide-local-commits');
+    // Reflect persisted state onto the checkboxes each time the menu opens.
+    const syncChecks = () => {
+      if (hideLocalCb) hideLocalCb.checked = !!state.graphHideLocal;
+      if (stripRemoteCb) stripRemoteCb.checked = !!state.graphStripRemotePrefix;
+      if (hideLocalCommitsCb) hideLocalCommitsCb.checked = !!state.graphHideLocalCommits;
+    };
+    const closeMenu = () => {
+      gearMenu.hidden = true;
+      gearBtn.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+    const onDocDown = (e) => { if (!gearMenu.contains(e.target) && e.target !== gearBtn) closeMenu(); };
+    const onKeyDown = (e) => { if (e.key === 'Escape') closeMenu(); };
+    gearBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (gearMenu.hidden) {
+        syncChecks();
+        gearMenu.hidden = false;
+        gearBtn.setAttribute('aria-expanded', 'true');
+        document.addEventListener('mousedown', onDocDown, true);
+        document.addEventListener('keydown', onKeyDown, true);
+      } else {
+        closeMenu();
+      }
+    };
+    // Persist to app settings and relayout so the change is immediate and sticky.
+    const persist = () => { try { gs.setAppSettings({ graphHideLocal: !!state.graphHideLocal, graphStripRemotePrefix: !!state.graphStripRemotePrefix, graphHideLocalCommits: !!state.graphHideLocalCommits }); } catch (e) {} };
+    if (hideLocalCb) hideLocalCb.onchange = () => { state.graphHideLocal = hideLocalCb.checked; persist(); relayoutGraph(); };
+    if (stripRemoteCb) stripRemoteCb.onchange = () => { state.graphStripRemotePrefix = stripRemoteCb.checked; persist(); relayoutGraph(); };
+    if (hideLocalCommitsCb) hideLocalCommitsCb.onchange = async () => {
+      state.graphHideLocalCommits = hideLocalCommitsCb.checked;
+      persist();
+      // Load the local-only set before laying out so enabling it hides immediately.
+      if (state.graphHideLocalCommits) await ensureLocalOnlyCommits();
+      relayoutGraph();
+    };
+  }
 
   // Graph search/filter (debounced so typing stays smooth on large graphs)
   const graphSearch = $('#graph-search');

@@ -1146,6 +1146,9 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   theme: 'crusader',
   defaultBranchName: 'main',
   graphLimit: 300,
+  graphHideLocal: false,
+  graphStripRemotePrefix: false,
+  graphHideLocalCommits: false,
   autoFetchOnFocus: true,
   confirmDestructive: true,
   defaultSshKeyPath: '',
@@ -1170,6 +1173,9 @@ async function applySavedAppSettings() {
       // Mirror a few into state for downstream code
       if (typeof state !== 'undefined') {
         if (r.data.graphLimit) state.graphLimit = r.data.graphLimit;
+        state.graphHideLocal = !!r.data.graphHideLocal;
+        state.graphStripRemotePrefix = !!r.data.graphStripRemotePrefix;
+        state.graphHideLocalCommits = !!r.data.graphHideLocalCommits;
         state.llmEnabled = !!r.data.llmAssistant;
         state.llmModel = r.data.llmModel || 'llama3.2:3b';
         state.llmEmbedModel = r.data.llmEmbedModel || 'nomic-embed-text';

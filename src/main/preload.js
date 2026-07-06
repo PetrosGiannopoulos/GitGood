@@ -25,6 +25,7 @@ const api = {
   commitFiles: (opts) => ipcRenderer.invoke('repo:commitFiles', opts),
   searchDiffContent: (opts) => ipcRenderer.invoke('repo:searchDiffContent', opts),
   cancelDiffSearch: () => ipcRenderer.invoke('repo:cancelDiffSearch'),
+  localOnlyCommits: () => ipcRenderer.invoke('repo:localOnlyCommits'),
   onSearchProgress: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('search:progress', handler);

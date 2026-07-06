@@ -623,6 +623,22 @@ ipcMain.handle('repo:cancelDiffSearch', () => {
   return { ok: true };
 });
 
+// Hashes of commits reachable from some ref but NOT from any remote-tracking ref — i.e. the
+// local-only (unpushed) commits. The graph uses this to optionally hide them. On a repo with no
+// remote-tracking refs, `--not --remotes` is a no-op that would return the ENTIRE history, so we
+// guard that case and return [] (nothing to hide) rather than letting the option blank the graph.
+ipcMain.handle('repo:localOnlyCommits', wrap(async () => {
+  const g = ensureGit();
+  let hasRemoteRefs = false;
+  try {
+    const rr = await g.raw(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes/']);
+    hasRemoteRefs = !!rr.trim();
+  } catch (e) { /* treat as no remotes */ }
+  if (!hasRemoteRefs) return [];
+  const raw = await g.raw(['rev-list', '--all', '--not', '--remotes']);
+  return raw.split('\n').map(s => s.trim()).filter(Boolean);
+}));
+
 // Returns commits with parents and ref decorations — the data the visual graph needs
 ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
   const g = ensureGit();
@@ -2669,6 +2685,9 @@ const DEFAULT_APP_SETTINGS = {
   theme: 'crusader',                  // crusader|molecular|biohazard|sweet|monastery|racing
   defaultBranchName: 'main',          // default branch when initializing a new repo
   graphLimit: 300,                    // default commits to load in graph
+  graphHideLocal: false,              // hide local-branch ref pills in the graph
+  graphStripRemotePrefix: false,      // show remote branches without their "<remote>/" prefix
+  graphHideLocalCommits: false,       // hide commits not reachable from any remote (unpushed)
   autoFetchOnFocus: true,             // auto-refresh on window focus
   confirmDestructive: true,           // extra confirm on discard/force-push/etc.
   defaultSshKeyPath: '',              // pre-fill path for clone SSH key picker
