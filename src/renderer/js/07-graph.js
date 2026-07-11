@@ -1892,7 +1892,34 @@ function setupCustomSelect({ triggerId, dropdownId, placeholder, onSelect, getCu
     }, 50);
   }
 
+  // Builds the dropdown shell once (persistent search input + an empty list
+  // container). Re-typing must NOT recreate the <input>, or it loses focus on
+  // every keystroke — so oninput only refreshes the list container, not this.
   function rebuildOptions() {
+    dropdown.innerHTML = `
+      <div class="cs-search-wrap">
+        <input type="text" class="cs-search" placeholder="Filter branches…" value="${escapeHtml(currentSearch)}" />
+      </div>
+      <div class="cs-list"></div>
+    `;
+
+    const searchInput = dropdown.querySelector('.cs-search');
+    if (searchInput) {
+      searchInput.oninput = () => {
+        currentSearch = searchInput.value;
+        renderList();
+      };
+      searchInput.onkeydown = (e) => {
+        if (e.key === 'Escape') { close(); trigger.focus(); }
+      };
+    }
+    renderList();
+  }
+
+  function renderList() {
+    const listEl = dropdown.querySelector('.cs-list');
+    if (!listEl) return;
+
     const { local, remotes } = state.branches || {};
     const localAll = (local && local.all) || [];
     const remoteAll = (remotes && remotes.all) || [];
@@ -1902,12 +1929,7 @@ function setupCustomSelect({ triggerId, dropdownId, placeholder, onSelect, getCu
     const filteredLocal = localAll.filter(b => !filter || b.toLowerCase().includes(filter));
     const filteredRemote = remoteAll.filter(b => !filter || b.toLowerCase().includes(filter));
 
-    const parts = [`
-      <div class="cs-search-wrap">
-        <input type="text" class="cs-search" placeholder="Filter branches…" value="${escapeHtml(currentSearch)}" />
-      </div>
-    `];
-
+    const parts = [];
     if (filteredLocal.length) {
       parts.push(`<div class="cs-group-label">Local</div>`);
       for (const b of filteredLocal) {
@@ -1939,19 +1961,9 @@ function setupCustomSelect({ triggerId, dropdownId, placeholder, onSelect, getCu
       parts.push(`<div class="cs-empty">${filter ? 'No matches' : 'No branches'}</div>`);
     }
 
-    dropdown.innerHTML = parts.join('');
+    listEl.innerHTML = parts.join('');
 
-    const searchInput = dropdown.querySelector('.cs-search');
-    if (searchInput) {
-      searchInput.oninput = () => {
-        currentSearch = searchInput.value;
-        rebuildOptions();
-      };
-      searchInput.onkeydown = (e) => {
-        if (e.key === 'Escape') { close(); trigger.focus(); }
-      };
-    }
-    dropdown.querySelectorAll('.cs-option').forEach(opt => {
+    listEl.querySelectorAll('.cs-option').forEach(opt => {
       opt.onclick = () => {
         if (opt.classList.contains('disabled')) return;
         const val = opt.dataset.value;
