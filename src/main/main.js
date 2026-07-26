@@ -754,6 +754,34 @@ ipcMain.handle('repo:unstageAll', wrap(async () => {
   return true;
 }));
 
+// After discarding untracked files, remove any parent directories they leave empty.
+// Git doesn't track directories, so deleting the last file in a freshly-added folder
+// would otherwise strand the now-empty folder (and its empty ancestors). Walk upward
+// from each starting directory toward — but never including or past — the repo root,
+// stopping a branch at the first directory that still holds entries. This mirrors the
+// cleanup other Git clients get from `git clean -fd`.
+function pruneEmptyDirs(startDirs) {
+  const root = path.resolve(currentRepoPath);
+  for (const start of startDirs) {
+    let dir = path.resolve(start);
+    while (dir !== root && dir.startsWith(root + path.sep)) {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir);
+      } catch (e) {
+        break; // already removed or inaccessible — stop climbing this branch
+      }
+      if (entries.length > 0) break; // still holds files/other dirs — leave it in place
+      try {
+        fs.rmdirSync(dir);
+      } catch (e) {
+        break; // couldn't remove (race, permissions) — stop climbing this branch
+      }
+      dir = path.dirname(dir);
+    }
+  }
+}
+
 ipcMain.handle('repo:discard', wrap(async (_, files) => {
   const g = ensureGit();
   const fileList = Array.isArray(files) ? files : [files];
@@ -768,19 +796,25 @@ ipcMain.handle('repo:discard', wrap(async (_, files) => {
   if (tracked.length) {
     await g.checkout(['--', ...tracked]);
   }
-  // For untracked files: physically delete them from disk
+  // For untracked files: physically delete them from disk, then prune any parent
+  // directories they leave empty (see pruneEmptyDirs). We collect the parents first and
+  // prune only after every file is gone, so a folder holding several discarded files is
+  // correctly removed once its last child is deleted, regardless of iteration order.
   if (untracked.length) {
+    const parentDirs = [];
     for (const f of untracked) {
       const fullPath = path.join(currentRepoPath, f);
       try {
         const st = fs.statSync(fullPath);
         if (st.isDirectory()) fs.rmSync(fullPath, { recursive: true, force: true });
         else fs.unlinkSync(fullPath);
+        parentDirs.push(path.dirname(fullPath));
       } catch (e) {
         // If file is already gone, fine; otherwise report
         if (e.code !== 'ENOENT') throw e;
       }
     }
+    pruneEmptyDirs(parentDirs);
   }
   return true;
 }));
