@@ -251,7 +251,10 @@ function splitDiffByFile(diffText) {
       continue;
     }
     if (!cur) {
-      cur = { path: '(diff)', status: 'modified', lines: [], pathLocked: false };
+      // Content before the first "diff --git" header — for `git show` this is the commit
+      // metadata (hash, Author, Date, message). It's not a file, so mark it synthetic and
+      // drop it below rather than surfacing a bogus "(diff)" entry in the file list.
+      cur = { path: '(diff)', status: 'modified', lines: [], pathLocked: false, synthetic: true };
     }
     if (raw.startsWith('new file mode')) cur.status = 'added';
     else if (raw.startsWith('deleted file mode')) cur.status = 'deleted';
@@ -269,7 +272,9 @@ function splitDiffByFile(diffText) {
     cur.lines.push(raw);
   }
   if (cur) files.push(cur);
-  return files.map(f => ({ path: f.path, status: f.status, binary: !!f.binary, diff: f.lines.join('\n') }));
+  return files
+    .filter(f => !f.synthetic)
+    .map(f => ({ path: f.path, status: f.status, binary: !!f.binary, diff: f.lines.join('\n') }));
 }
 
 const FILE_STATUS_LETTER = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' };
