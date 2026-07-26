@@ -903,6 +903,49 @@ function clearMultiSelection() {
   state.lastClickedKey = null;
 }
 
+// The changes section (staged / unstaged) the user is currently "in", used to scope the
+// Ctrl+A select-all shortcut. Derived from the selection anchor, then the previewed file,
+// then any selected key. Returns null when nothing is selected in either section.
+function activeChangesSection() {
+  const from = state.lastClickedKey
+    || (state.selectedFile != null ? (state.selectedFileStaged ? 'staged:' : 'unstaged:') : null)
+    || [...state.multiSelected][0];
+  if (!from) return null;
+  if (from.startsWith('staged:')) return 'staged';
+  if (from.startsWith('unstaged:')) return 'unstaged';
+  return null;
+}
+
+// Select every (filter-visible) file in the currently active changes section. Returns true
+// if it selected anything, so the caller can suppress the browser's default Ctrl+A.
+function selectAllInActiveSection() {
+  const section = activeChangesSection();
+  if (!section) return false;
+  const q = state.searchQuery.trim().toLowerCase();
+  const matches = (f) => !q || f.path.toLowerCase().includes(q);
+  const files = (section === 'staged' ? state.stagedFiles : state.unstagedFiles).filter(matches);
+  if (!files.length) return false;
+  state.multiSelected.clear();
+  files.forEach(f => state.multiSelected.add(section + ':' + f.path));
+  // Keep the shift-range anchor if it's already in this section; otherwise anchor to the top.
+  if (!state.lastClickedKey || !state.lastClickedKey.startsWith(section + ':')) {
+    state.lastClickedKey = section + ':' + files[0].path;
+  }
+  renderChanges();
+  return true;
+}
+
+// Ctrl/Cmd+A on the Changes tab selects all files in the active section (staged or
+// unstaged) rather than selecting the whole page. Skipped while typing in a field so the
+// commit message / search box keep their native select-all.
+document.addEventListener('keydown', (e) => {
+  if ((e.key || '').toLowerCase() !== 'a' || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+  if (state.currentTab !== 'changes') return;
+  const el = document.activeElement;
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+  if (selectAllInActiveSection()) e.preventDefault();
+});
+
 // Return the contiguous list of selection keys from `fromKey` to `toKey` in the visible
 // (filter-aware) order — staged files first, then unstaged. Used for Shift-range selection;
 // order-independent, so it handles the anchor being above or below the clicked row.

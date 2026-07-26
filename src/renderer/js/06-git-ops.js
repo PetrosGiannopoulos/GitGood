@@ -53,7 +53,10 @@ async function discardFiles(files) {
     confirmText: hasUntracked && !hasTracked ? 'Delete' : 'Discard'
   });
   if (!confirmed) return;
-  const r = await gs.discard(list);
+  const busyLabel = hasUntracked && !hasTracked
+    ? (list.length === 1 ? 'Deleting file' : `Deleting ${list.length} files`)
+    : (list.length === 1 ? 'Discarding changes' : `Discarding ${list.length} files`);
+  const r = await withLoading(busyLabel, () => gs.discard(list));
   if (handleResult(r, list.length === 1 ? 'Done' : `Done — ${list.length} files`)) {
     clearMultiSelection();
     await refreshStatus();
