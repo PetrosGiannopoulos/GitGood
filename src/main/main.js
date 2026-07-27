@@ -830,10 +830,17 @@ ipcMain.handle('repo:restoreFromCommit', wrap(async (_, { hash, files }) => {
   return { restored: fileList.length };
 }));
 
-ipcMain.handle('repo:commit', wrap(async (_, { message, description }) => {
+ipcMain.handle('repo:commit', wrap(async (_, { message, description, amend }) => {
   const g = ensureGit();
   if (!message || !message.trim()) throw new Error('Commit message required');
   const fullMsg = description && description.trim() ? `${message}\n\n${description}` : message;
+  // Amend rewrites HEAD instead of adding a commit. Unlike a normal commit it is allowed
+  // to have nothing staged — editing only the message is a valid use — so we pass
+  // --allow-empty to stop git rejecting a message-only amend as an empty commit.
+  if (amend) {
+    const result = await g.raw(['commit', '--amend', '--allow-empty', '-m', fullMsg]);
+    return { amended: true, output: result };
+  }
   const result = await g.commit(fullMsg);
   return result;
 }));
@@ -3388,4 +3395,460 @@ ipcMain.handle('llm:clearIndex', wrap(async () => {
     if (fs.existsSync(p)) fs.unlinkSync(p);
   } catch (e) {}
   return { cleared: true };
+}));
+
+// ============================================
+// PARTIAL STAGING — hunk & line level
+// ============================================
+// The renderer builds a synthetic unified patch containing only the hunks/lines the
+// user selected (see buildPartialPatch in 04-diff.js) and sends it here to be applied
+// with `git apply`. Three combinations are used:
+//   stage hunk    → { cached: true,  reverse: false }  patch built from `git diff`
+//   unstage hunk  → { cached: true,  reverse: true  }  patch built from `git diff --cached`
+//   discard hunk  → { cached: false, reverse: true  }  patch built from `git diff`
+//
+// The patch is written to a temp file byte-for-byte (no line-ending translation) because
+// `git apply` matches context exactly — a CRLF file's diff carries the CR inside each
+// line, and rewriting it would make every hunk fail to apply.
+ipcMain.handle('repo:applyPatch', wrap(async (_, { patch, cached, reverse }) => {
+  const g = ensureGit();
+  if (!patch || !patch.trim()) throw new Error('Empty patch — nothing selected.');
+  const tmp = path.join(os.tmpdir(), `gitgood-patch-${Date.now()}-${Math.random().toString(36).slice(2)}.diff`);
+  // Git requires the patch to end with a newline.
+  const body = patch.endsWith('\n') ? patch : patch + '\n';
+  fs.writeFileSync(tmp, body, { encoding: 'utf8' });
+  try {
+    // --recount lets git derive the hunk line counts from the body instead of trusting
+    // our arithmetic. Our counts are computed correctly, but a hand-built patch is
+    // exactly what --recount exists for, so it costs nothing and removes a whole class
+    // of "corrupt patch at line N" failures.
+    const args = ['apply', '--whitespace=nowarn', '--recount', '--unidiff-zero'];
+    if (cached) args.push('--cached');
+    if (reverse) args.push('-R');
+    args.push(tmp);
+    await g.raw(args);
+    return { applied: true };
+  } catch (err) {
+    const msg = err.message || String(err);
+    if (/patch does not apply|corrupt patch/i.test(msg)) {
+      throw new Error(
+        'The selection could not be applied — the file changed since this diff was loaded. ' +
+        'Refresh and try again.\n\nOriginal error: ' + msg
+      );
+    }
+    throw err;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (e) { /* best effort */ }
+  }
+}));
+
+// Make an untracked file diffable so its hunks can be staged individually. `git add -N`
+// records the path in the index with an empty blob, which makes `git diff` emit a normal
+// "new file" diff for it without actually staging any content.
+ipcMain.handle('repo:intentToAdd', wrap(async (_, files) => {
+  const g = ensureGit();
+  const list = Array.isArray(files) ? files : [files];
+  if (!list.length) return { added: 0 };
+  await g.raw(['add', '-N', '--', ...list]);
+  return { added: list.length };
+}));
+
+// ============================================
+// AMEND
+// ============================================
+// Details of HEAD, used to prefill the commit box when Amend is toggled on and to warn
+// when the commit being rewritten has already been published.
+ipcMain.handle('repo:headCommit', wrap(async () => {
+  const g = ensureGit();
+  let raw;
+  try {
+    raw = await g.raw(['log', '-1', '--pretty=format:%H%x1f%s%x1f%b']);
+  } catch (e) {
+    // No commits yet (unborn HEAD) — nothing to amend.
+    return { exists: false };
+  }
+  const [hash, subject, body] = (raw || '').split('\x1f');
+  if (!hash) return { exists: false };
+
+  // "Published" = some remote-tracking ref contains this commit. Amending then requires a
+  // force-push, so the UI warns first.
+  let pushed = false;
+  try {
+    const contains = await g.raw(['branch', '-r', '--contains', hash.trim()]);
+    pushed = !!(contains && contains.trim());
+  } catch (e) { /* no remotes / detached — treat as unpublished */ }
+
+  return {
+    exists: true,
+    hash: hash.trim(),
+    subject: subject || '',
+    body: (body || '').replace(/\s+$/, ''),
+    pushed
+  };
+}));
+
+// ============================================
+// REBASE
+// ============================================
+// The commits that a rebase onto `onto` would replay, oldest first — the same set and
+// order git would put in the interactive todo file.
+ipcMain.handle('repo:rebaseTodo', wrap(async (_, { onto }) => {
+  const g = ensureGit();
+  if (!onto) throw new Error('A target to rebase onto is required');
+
+  const status = await g.status();
+  const current = status.current;
+
+  let base = '';
+  try { base = (await g.raw(['merge-base', 'HEAD', onto])).trim(); } catch (e) {}
+  if (!base) throw new Error(`No common ancestor between HEAD and "${onto}" — these histories are unrelated.`);
+
+  const ontoHash = (await g.revparse([onto])).trim();
+  const headHash = (await g.revparse(['HEAD'])).trim();
+  if (base === headHash) {
+    return { commits: [], base, current, alreadyUpToDate: true, upToDateReason: 'behind' };
+  }
+  if (base === ontoHash) {
+    // HEAD already contains everything on `onto`; a rebase would be a no-op.
+    return { commits: [], base, current, alreadyUpToDate: true, upToDateReason: 'ahead' };
+  }
+
+  const SEP = '\x1f';
+  const raw = await g.raw([
+    'log', '--reverse', '--no-merges',
+    `--pretty=format:%H${SEP}%h${SEP}%s${SEP}%an${SEP}%aI%x1e`,
+    `${base}..HEAD`
+  ]);
+  const commits = (raw || '').split(/\x1e\r?\n?/).map(s => s.trim()).filter(Boolean).map(line => {
+    const [hash, short, subject, author, date] = line.split(SEP);
+    return { hash, short, subject, author, date };
+  });
+
+  // Merges are excluded from the list above (a default rebase drops them), so tell the
+  // UI if any exist between base and HEAD — they will not survive the rebase.
+  let mergeCount = 0;
+  try {
+    const m = await g.raw(['rev-list', '--count', '--merges', `${base}..HEAD`]);
+    mergeCount = parseInt((m || '0').trim(), 10) || 0;
+  } catch (e) {}
+
+  return { commits, base, current, mergeCount, alreadyUpToDate: false };
+}));
+
+// Write the helper used as GIT_SEQUENCE_EDITOR / GIT_EDITOR during an interactive rebase.
+// Git invokes the editor as `<editor> <file>` through its own shell; we point it at
+// Electron running in plain-Node mode (ELECTRON_RUN_AS_NODE) so we don't depend on a
+// `node` or `cp` being on PATH inside a packaged app.
+function writeRebaseEditorScript(todoPath, messagesPath) {
+  const script = path.join(os.tmpdir(), `gitgood-rebase-editor-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+  const lines = [
+    "'use strict';",
+    '// GitGood interactive-rebase editor shim.',
+    '// Git calls this once for the rebase todo list, then once per reword/squash step for',
+    '// the commit message. We tell them apart by the filename git hands us.',
+    "const fs = require('fs');",
+    'const target = process.argv[process.argv.length - 1];',
+    'const TODO = ' + JSON.stringify(todoPath) + ';',
+    'const MESSAGES = ' + JSON.stringify(messagesPath) + ';',
+    '',
+    "if (/git-rebase-todo$/.test(target.replace(/\\\\/g, '/'))) {",
+    "  fs.writeFileSync(target, fs.readFileSync(TODO, 'utf8'), 'utf8');",
+    '  process.exit(0);',
+    '}',
+    '',
+    '// Commit-message editor (COMMIT_EDITMSG). Consume the next queued message, if any;',
+    "// otherwise leave git's prepared message untouched.",
+    'try {',
+    "  const queue = JSON.parse(fs.readFileSync(MESSAGES, 'utf8'));",
+    '  if (Array.isArray(queue) && queue.length) {',
+    '    const next = queue.shift();',
+    "    fs.writeFileSync(MESSAGES, JSON.stringify(queue), 'utf8');",
+    "    if (typeof next === 'string') fs.writeFileSync(target, /\\n$/.test(next) ? next : next + '\\n', 'utf8');",
+    '  }',
+    "} catch (e) { /* fall back to git's own message */ }",
+    'process.exit(0);',
+    ''
+  ];
+  fs.writeFileSync(script, lines.join('\n'), 'utf8');
+  return script;
+}
+
+// Environment variables that simple-git refuses to pass through, because an editor,
+// pager, askpass or ssh command taken from the environment is arbitrary code execution.
+// A rebase inherits the whole ambient environment (it needs PATH, SystemRoot, HOME…),
+// so any of these that merely happen to be set on the user's machine would abort the
+// rebase before it started. Strip them: a local rebase needs none of them, and we set
+// GIT_TERMINAL_PROMPT=0 so there is nothing for an askpass helper to answer anyway.
+const GIT_UNSAFE_ENV_VARS = [
+  'GIT_ASKPASS', 'SSH_ASKPASS',
+  'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR',
+  'GIT_SSH_COMMAND', 'GIT_PROXY_COMMAND',
+  'GIT_EXTERNAL_DIFF', 'GIT_PAGER',
+  'GIT_CONFIG', 'GIT_CONFIG_COUNT'
+];
+
+function rebaseSafeEnv() {
+  const env = Object.assign({}, process.env);
+  for (const key of GIT_UNSAFE_ENV_VARS) delete env[key];
+  return env;
+}
+
+// Run a rebase. Two modes:
+//   plain       → git rebase <onto>
+//   interactive → git rebase -i <onto> with a todo list supplied by the UI
+// `todo` is [{ hash, subject, action, message? }] in the final (possibly reordered) order.
+// Actions: pick | reword | squash | fixup | drop.
+ipcMain.handle('repo:rebase', wrap(async (_, opts) => {
+  ensureGit();
+  const { onto, todo, autostash } = opts || {};
+  if (!onto) throw new Error('A target to rebase onto is required');
+
+  const args = ['rebase'];
+  if (autostash) args.push('--autostash');
+
+  const env = Object.assign({}, rebaseSafeEnv(), { GIT_TERMINAL_PROMPT: '0' });
+  let todoPath = null, messagesPath = null, scriptPath = null;
+
+  if (Array.isArray(todo) && todo.length) {
+    const kept = todo.filter(t => t && t.hash && t.action);
+    if (!kept.length) throw new Error('The rebase plan is empty.');
+    if (kept.every(t => t.action === 'drop')) {
+      throw new Error('The plan drops every commit — that would leave nothing to rebase.');
+    }
+    const firstKept = kept.find(t => t.action !== 'drop');
+    if (firstKept && (firstKept.action === 'squash' || firstKept.action === 'fixup')) {
+      throw new Error('The first commit in the plan cannot be a squash or fixup — there is nothing before it to squash into.');
+    }
+
+    // Todo file: one "<action> <hash> <subject>" line per commit, oldest first.
+    const todoBody = kept
+      .map(t => `${t.action} ${t.hash} ${(t.subject || '').replace(/\r?\n/g, ' ')}`)
+      .join('\n') + '\n';
+
+    // Message queue: git opens the commit-message editor once per reword, and once per
+    // squash group (a fixup never opens one). Walking the todo in order therefore queues
+    // the messages in exactly the order the editor shim will be asked for them.
+    const messages = [];
+    for (let i = 0; i < kept.length; i++) {
+      const t = kept[i];
+      if (t.action === 'reword') {
+        messages.push(typeof t.message === 'string' ? t.message : (t.subject || ''));
+      } else if (t.action === 'pick') {
+        // Does a squash group start here? Look ahead across the following squash/fixups.
+        const group = [];
+        for (let j = i + 1; j < kept.length; j++) {
+          if (kept[j].action === 'squash' || kept[j].action === 'fixup') group.push(kept[j]);
+          else break;
+        }
+        if (group.some(gg => gg.action === 'squash')) {
+          // The UI may attach a combined message to the pick that leads the group;
+          // otherwise join the subjects the way git's default squash message would.
+          if (typeof t.message === 'string' && t.message.trim()) messages.push(t.message);
+          else {
+            const parts = [t.subject || ''].concat(
+              group.filter(gg => gg.action === 'squash').map(gg => gg.subject || '')
+            );
+            messages.push(parts.filter(Boolean).join('\n\n'));
+          }
+        }
+      }
+    }
+
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    todoPath = path.join(os.tmpdir(), `gitgood-rebase-todo-${stamp}`);
+    messagesPath = path.join(os.tmpdir(), `gitgood-rebase-msgs-${stamp}.json`);
+    fs.writeFileSync(todoPath, todoBody, 'utf8');
+    fs.writeFileSync(messagesPath, JSON.stringify(messages), 'utf8');
+    scriptPath = writeRebaseEditorScript(todoPath, messagesPath);
+
+    // Git runs the editor through a shell, so quote the Electron path (it usually has
+    // spaces on Windows).
+    const editor = `"${process.execPath}" "${scriptPath}"`;
+    env.ELECTRON_RUN_AS_NODE = '1';
+    env.GIT_SEQUENCE_EDITOR = editor;
+    env.GIT_EDITOR = editor;
+    args.push('-i');
+  }
+
+  args.push(onto);
+
+  // A dedicated instance so the interactive-rebase env doesn't leak into other commands.
+  //
+  // simple-git blocks GIT_EDITOR / GIT_SEQUENCE_EDITOR by default, because an editor
+  // pulled from untrusted env is arbitrary code execution. That reasoning doesn't apply
+  // here: the editor is a script this process just wrote to its own temp dir, invoked
+  // through our own Electron binary, with nothing user-supplied in the command. The
+  // exemption is scoped to this one instance — the module-level `git` keeps the guard.
+  const rg = simpleGit(currentRepoPath, { unsafe: { allowUnsafeEditor: true } }).env(env);
+  try {
+    const output = await rg.raw(args);
+    return { rebased: true, output, conflicted: false };
+  } catch (err) {
+    const msg = err.message || String(err);
+    // A conflict is an expected outcome, not a failure — the conflict resolver takes over.
+    const inProgress = fs.existsSync(path.join(currentRepoPath, '.git', 'rebase-merge'))
+                    || fs.existsSync(path.join(currentRepoPath, '.git', 'rebase-apply'));
+    if (inProgress) return { rebased: false, conflicted: true, output: msg };
+    if (/unstaged changes|please commit or stash/i.test(msg)) {
+      throw new Error('You have uncommitted changes. Commit or stash them first, or enable "Stash changes automatically".\n\nOriginal error: ' + msg);
+    }
+    throw err;
+  } finally {
+    for (const p of [todoPath, messagesPath, scriptPath]) {
+      if (p) { try { fs.unlinkSync(p); } catch (e) { /* best effort */ } }
+    }
+  }
+}));
+
+// Skip the current commit in an in-progress rebase or cherry-pick. (Merge and revert have
+// no --skip; continue/abort are handled by repo:operationContinue / repo:operationAbort.)
+ipcMain.handle('repo:operationSkip', wrap(async () => {
+  const g = ensureGit();
+  let op = null;
+  if (fs.existsSync(path.join(currentRepoPath, '.git', 'rebase-merge'))
+   || fs.existsSync(path.join(currentRepoPath, '.git', 'rebase-apply'))) op = 'rebase';
+  else if (fs.existsSync(path.join(currentRepoPath, '.git', 'CHERRY_PICK_HEAD'))) op = 'cherry-pick';
+
+  if (!op) throw new Error('Nothing to skip — no rebase or cherry-pick in progress.');
+  await g.raw([op, '--skip']);
+  return { operation: op, skipped: true };
+}));
+
+// ============================================
+// BLAME & FILE HISTORY
+// ============================================
+// `git blame --porcelain` output, parsed into one entry per line. The porcelain format
+// emits a full commit header the first time a commit appears and only the hash on
+// subsequent lines, so we keep a map of commits seen so far and back-fill from it.
+ipcMain.handle('repo:blame', wrap(async (_, { path: filePath, rev }) => {
+  const g = ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+
+  const args = ['blame', '--porcelain'];
+  if (rev) args.push(rev);
+  args.push('--', filePath);
+
+  let raw;
+  try {
+    raw = await g.raw(args);
+  } catch (err) {
+    const msg = err.message || String(err);
+    if (/no such path|does not exist|no such file/i.test(msg)) {
+      throw new Error(`"${filePath}" is not tracked at this revision, so it cannot be blamed.`);
+    }
+    if (/binary/i.test(msg)) throw new Error(`"${filePath}" is a binary file — there are no lines to blame.`);
+    throw err;
+  }
+
+  const parsed = parseBlamePorcelain(raw, filePath);
+  return { file: filePath, rev: rev || 'HEAD', lines: parsed.lines, commitCount: parsed.commitCount };
+}));
+
+// Parse `git blame --porcelain` into one entry per line. Split out from the handler so
+// it can be exercised directly against recorded git output.
+function parseBlamePorcelain(raw, filePath) {
+  const commits = {};   // hash -> { author, authorMail, authorTime, summary, ... }
+  const lines = [];
+  const src = (raw || '').split('\n');
+  let i = 0;
+  while (i < src.length) {
+    // "<sha> <origLine> <finalLine> [<numLinesInGroup>]"
+    const m = src[i].match(/^([0-9a-f]{40})\s+(\d+)\s+(\d+)(?:\s+(\d+))?$/);
+    if (!m) { i++; continue; }
+    const hash = m[1];
+    const origLine = parseInt(m[2], 10);
+    const finalLine = parseInt(m[3], 10);
+    i++;
+
+    const info = commits[hash] || (commits[hash] = {});
+    // Consume the key/value header block up to the TAB-prefixed content line.
+    while (i < src.length && !src[i].startsWith('\t')) {
+      const line = src[i];
+      const sp = line.indexOf(' ');
+      const key = sp === -1 ? line : line.slice(0, sp);
+      const value = sp === -1 ? '' : line.slice(sp + 1);
+      if (key === 'author') info.author = value;
+      else if (key === 'author-mail') info.authorMail = value.replace(/^<|>$/g, '');
+      else if (key === 'author-time') info.authorTime = parseInt(value, 10);
+      else if (key === 'summary') info.summary = value;
+      else if (key === 'previous') info.previous = value.split(' ')[0];
+      else if (key === 'filename') info.filename = value;
+      i++;
+    }
+    // The content line itself (TAB-prefixed); strip the single leading TAB.
+    const content = i < src.length ? src[i].slice(1) : '';
+    i++;
+
+    lines.push({
+      hash,
+      short: hash.slice(0, 7),
+      origLine,
+      line: finalLine,
+      content,
+      author: info.author || '',
+      authorMail: info.authorMail || '',
+      authorTime: info.authorTime || 0,
+      summary: info.summary || '',
+      filename: info.filename || filePath,
+      // An all-zero sha is git's marker for a line that isn't committed yet.
+      uncommitted: /^0+$/.test(hash)
+    });
+  }
+
+  return { lines, commitCount: Object.keys(commits).length };
+}
+
+// Commits that touched a single file, newest first. `--follow` traces the file across
+// renames (git only supports it for one path, which is all we ever pass).
+ipcMain.handle('repo:fileHistory', wrap(async (_, { path: filePath, limit, follow }) => {
+  const g = ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+  const max = Math.max(1, Math.min(1000, limit || 200));
+
+  const SEP = '\x1f';
+  const args = [
+    'log', `--max-count=${max}`,
+    // The record separator goes at the START of the format, not the end: with
+    // --name-status git prints the file list *after* the pretty output, so a trailing
+    // separator would cut each record between its metadata and its own file list,
+    // attaching every commit's status block to the next commit.
+    `--pretty=format:%x1e%H${SEP}%h${SEP}%s${SEP}%an${SEP}%ae${SEP}%aI`,
+    '--name-status'
+  ];
+  if (follow !== false) args.push('--follow');
+  args.push('--', filePath);
+
+  const raw = await g.raw(args);
+  const entries = (raw || '').split(/\x1e\r?\n?/).map(s => s.trim()).filter(Boolean);
+  const commits = entries.map(entry => {
+    const nl = entry.indexOf('\n');
+    const metaLine = nl === -1 ? entry : entry.slice(0, nl);
+    const rest = nl === -1 ? '' : entry.slice(nl + 1);
+    const [hash, short, subject, author, email, date] = metaLine.split(SEP);
+    // The name-status block says how this commit touched the file and, for a rename,
+    // what it used to be called — which is how the view can show the path changing.
+    let status = 'M', oldPath = null, newPath = null;
+    for (const line of rest.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      const parts = t.split('\t');
+      const code = parts[0];
+      if (/^R/.test(code) && parts.length >= 3) { status = 'R'; oldPath = parts[1]; newPath = parts[2]; }
+      else if (parts.length >= 2) { status = code[0]; newPath = parts[1]; }
+      break;
+    }
+    return { hash, short, subject, author, email, date, status, oldPath, newPath };
+  });
+
+  return { file: filePath, commits };
+}));
+
+// The diff one commit made to one file — used by the file-history view so clicking a
+// commit shows just that file's change rather than the whole commit.
+ipcMain.handle('repo:fileDiffAtCommit', wrap(async (_, { hash, path: filePath }) => {
+  const g = ensureGit();
+  if (!hash || !filePath) throw new Error('A commit and a file path are required');
+  // `<hash>^!` means "this commit against its first parent", and still works for a root
+  // commit (where it degenerates to the full tree).
+  return await g.raw(['show', '--format=', '--patch', `${hash}^!`, '--', filePath]);
 }));

@@ -41,6 +41,9 @@ const api = {
 
   // Staging
   stage: (files) => ipcRenderer.invoke('repo:stage', files),
+  // Partial staging — apply a synthetic patch of only the selected hunks/lines
+  applyPatch: (opts) => ipcRenderer.invoke('repo:applyPatch', opts),
+  intentToAdd: (files) => ipcRenderer.invoke('repo:intentToAdd', files),
   stageAll: () => ipcRenderer.invoke('repo:stageAll'),
   unstage: (files) => ipcRenderer.invoke('repo:unstage', files),
   unstageAll: () => ipcRenderer.invoke('repo:unstageAll'),
@@ -49,6 +52,7 @@ const api = {
 
   // Commit / sync
   commit: (msg) => ipcRenderer.invoke('repo:commit', msg),
+  headCommit: () => ipcRenderer.invoke('repo:headCommit'),
   commitPaths: (opts) => ipcRenderer.invoke('repo:commitPaths', opts),
   push: (opts) => ipcRenderer.invoke('repo:push', opts),
   pull: () => ipcRenderer.invoke('repo:pull'),
@@ -68,6 +72,13 @@ const api = {
   moveBranch: (opts) => ipcRenderer.invoke('repo:moveBranch', opts),
   squashPreview: () => ipcRenderer.invoke('repo:squashPreview'),
   squash: (opts) => ipcRenderer.invoke('repo:squash', opts),
+  rebaseTodo: (opts) => ipcRenderer.invoke('repo:rebaseTodo', opts),
+  rebase: (opts) => ipcRenderer.invoke('repo:rebase', opts),
+
+  // Blame & file history
+  blame: (opts) => ipcRenderer.invoke('repo:blame', opts),
+  fileHistory: (opts) => ipcRenderer.invoke('repo:fileHistory', opts),
+  fileDiffAtCommit: (opts) => ipcRenderer.invoke('repo:fileDiffAtCommit', opts),
 
   // Graph
   graphLog: (opts) => ipcRenderer.invoke('repo:graphLog', opts),
@@ -103,6 +114,7 @@ const api = {
   writeFile: (opts) => ipcRenderer.invoke('repo:writeFile', opts),
   operationContinue: () => ipcRenderer.invoke('repo:operationContinue'),
   operationAbort: () => ipcRenderer.invoke('repo:operationAbort'),
+  operationSkip: () => ipcRenderer.invoke('repo:operationSkip'),
   inspectHidden: () => ipcRenderer.invoke('repo:inspectHidden'),
   addGitkeep: (folder) => ipcRenderer.invoke('repo:addGitkeep', folder),
   addToGitignore: (paths) => ipcRenderer.invoke('repo:addToGitignore', paths),

@@ -353,13 +353,23 @@ function renderBranches() {
       li.oncontextmenu = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        showContextMenu([
+        const items = [
           { label: 'Checkout', icon: '⑂', action: () => checkoutBranch(b) },
-          { label: 'Merge into current', icon: '⚒', action: () => mergeBranch(b) },
+          { label: 'Merge into current', icon: '⚒', action: () => mergeBranch(b) }
+        ];
+        // Rebasing onto yourself is meaningless, so only offer it for other branches.
+        if (b !== current) {
+          items.push(
+            { label: `Rebase ${current || 'HEAD'} onto ${b}`, icon: '⚔', action: () => showRebaseDialog(b) },
+            { label: `Interactive rebase onto ${b}…`, icon: '☰', action: () => showInteractiveRebaseDialog(b) }
+          );
+        }
+        items.push(
           'sep',
           { label: 'Delete branch', icon: '✗', danger: true, action: () => deleteBranch(b, false) },
           { label: 'Force delete', icon: '⚔', danger: true, action: () => deleteBranch(b, true) }
-        ], e.pageX, e.pageY);
+        );
+        showContextMenu(items, e.pageX, e.pageY);
       };
       localList.appendChild(li);
     });
@@ -384,6 +394,8 @@ function renderBranches() {
         const localName = b.replace(/^[^/]+\//, '');
         showContextMenu([
           { label: 'Checkout as local', icon: '⑂', action: () => checkoutRemoteBranch(b, localName) },
+          { label: `Rebase current branch onto ${b}`, icon: '⚔', action: () => showRebaseDialog(b) },
+          { label: `Interactive rebase onto ${b}…`, icon: '☰', action: () => showInteractiveRebaseDialog(b) },
           'sep',
           { label: 'Delete remote branch', icon: '✗', danger: true, action: () => deleteRemoteBranch(b) }
         ], e.pageX, e.pageY);

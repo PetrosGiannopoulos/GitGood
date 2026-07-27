@@ -66,6 +66,8 @@ async function discardFiles(files) {
 async function commitChanges() {
   const summary = $('#commit-summary').value.trim();
   const description = $('#commit-description').value.trim();
+  const amend = isAmendMode();
+
   if (!summary) {
     showToast('Summary required', 'error');
     $('#commit-summary').focus();
@@ -73,8 +75,33 @@ async function commitChanges() {
   }
 
   const stagedCount = $$('#staged-files .file-item').length;
-  if (stagedCount === 0) {
+  // A normal commit needs something staged. An amend does not — rewording the previous
+  // commit without touching its content is a perfectly ordinary thing to want.
+  if (stagedCount === 0 && !amend) {
     showToast('Nothing staged. Stage changes first.', 'error');
+    return;
+  }
+
+  if (amend) {
+    const head = _amendState.head;
+    if (head && head.pushed) {
+      const ok = await modal.confirm({
+        title: 'Amend a Published Commit',
+        message:
+          `Commit ${head.hash.slice(0, 7)} has already been pushed to a remote. Amending rewrites it, ` +
+          `so the remote will have diverged and the next push must be a force-push ` +
+          `(GitGood uses the safe --force-with-lease).\n\n` +
+          `Anyone who already pulled this commit will need to reconcile their history.\n\nAmend anyway?`,
+        danger: true,
+        confirmText: 'Amend Anyway'
+      });
+      if (!ok) return;
+    }
+    const label = stagedCount === 0 ? 'Rewording last commit' : 'Amending last commit';
+    const r = await withLoading(label, () => gs.commit({ message: summary, description, amend: true }));
+    if (!handleResult(r, stagedCount === 0 ? 'Message rewritten' : 'Last deed amended')) return;
+    setAmendMode(false, { clearFields: true });
+    await refreshAll();
     return;
   }
 
@@ -85,6 +112,75 @@ async function commitChanges() {
     await refreshAll();
   }
 }
+
+// ============================================
+// AMEND MODE
+// ============================================
+// Toggling Amend swaps the commit box over to rewriting HEAD: the previous message is
+// loaded in, and whatever the user had typed is parked so unticking restores it rather
+// than silently discarding work.
+const _amendState = {
+  head: null,        // details of HEAD, from repo:headCommit
+  saved: null        // { summary, description } typed before amend was turned on
+};
+
+function isAmendMode() {
+  const cb = document.getElementById('commit-amend');
+  return !!(cb && cb.checked);
+}
+
+async function setAmendMode(on, opts) {
+  opts = opts || {};
+  const cb = document.getElementById('commit-amend');
+  const note = document.getElementById('commit-amend-note');
+  const btn = document.getElementById('commit-btn');
+  const summaryEl = $('#commit-summary');
+  const descEl = $('#commit-description');
+  if (!cb || !summaryEl || !descEl) return;
+
+  cb.checked = !!on;
+
+  if (on) {
+    const r = await gs.headCommit();
+    const head = (r && r.ok) ? r.data : null;
+    if (!head || !head.exists) {
+      cb.checked = false;
+      showToast('There is no commit to amend yet.', 'error');
+      return;
+    }
+    _amendState.head = head;
+    // Park whatever was typed so unticking can restore it.
+    _amendState.saved = { summary: summaryEl.value, description: descEl.value };
+    summaryEl.value = head.subject || '';
+    descEl.value = head.body || '';
+    if (note) {
+      note.innerHTML = head.pushed
+        ? `⚠ <strong>${escapeHtml(head.hash.slice(0, 7))}</strong> is already on a remote — amending will require a force-push.`
+        : `Rewriting <strong>${escapeHtml(head.hash.slice(0, 7))}</strong>. Anything staged is folded into it.`;
+      note.classList.add('visible');
+      note.classList.toggle('warn', !!head.pushed);
+    }
+    if (btn) btn.innerHTML = '<span class="btn-icon">✎</span> Amend';
+  } else {
+    _amendState.head = null;
+    if (opts.clearFields) {
+      summaryEl.value = '';
+      descEl.value = '';
+      _amendState.saved = null;
+    } else if (_amendState.saved) {
+      summaryEl.value = _amendState.saved.summary;
+      descEl.value = _amendState.saved.description;
+      _amendState.saved = null;
+    }
+    if (note) { note.textContent = ''; note.classList.remove('visible', 'warn'); }
+    if (btn) btn.innerHTML = '<span class="btn-icon">✠</span> Commit';
+  }
+}
+
+(() => {
+  const cb = document.getElementById('commit-amend');
+  if (cb) cb.addEventListener('change', () => setAmendMode(cb.checked));
+})();
 
 // Marker used in stash messages so we can find auto-stashes bound to a branch.
 // Format: "[GitGood auto] on <branch-name>"
@@ -617,6 +713,12 @@ $('#btn-pull').onclick = async () => {
   if (handleResult(r, 'Pulled from remote')) {
     await refreshAll();
   }
+};
+
+const _btnPullRebase = $('#btn-pull-rebase');
+if (_btnPullRebase) _btnPullRebase.onclick = async () => {
+  closeSyncMenu();
+  await pullRebase();
 };
 
 $('#btn-push').onclick = async () => {

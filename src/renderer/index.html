@@ -136,6 +136,10 @@
               <span class="tool-dropdown-label">Pull<small>Fetch and merge from remote</small></span>
               <span class="badge" id="pull-badge" style="display:none">0</span>
             </button>
+            <button class="tool-dropdown-item" id="btn-pull-rebase">
+              <span class="tool-icon">⚔</span>
+              <span class="tool-dropdown-label">Pull (rebase)<small>Fetch, then replay your commits on top — no merge commit</small></span>
+            </button>
             <button class="tool-dropdown-item" id="btn-push">
               <span class="tool-icon">↑</span>
               <span class="tool-dropdown-label">Push<small>Upload commits to remote</small></span>
@@ -188,6 +192,7 @@
       <div class="conflict-banner-actions">
         <button class="btn-medieval" id="conflict-banner-view">⚜ Resolve</button>
         <button class="btn-medieval primary" id="conflict-banner-continue" disabled>✓ Continue</button>
+        <button class="btn-medieval" id="conflict-banner-skip" hidden>⤼ Skip</button>
         <button class="btn-medieval danger" id="conflict-banner-abort">✕ Abort</button>
       </div>
     </div>
@@ -550,6 +555,11 @@
                 <div class="commit-header">⚜ Inscribe Thy Deed ⚜</div>
                 <input type="text" id="commit-summary" class="commit-input" placeholder="Summary (required)" maxlength="80" />
                 <textarea id="commit-description" class="commit-textarea" placeholder="Description (optional)"></textarea>
+                <label class="commit-amend" id="commit-amend-row" title="Rewrite the previous commit instead of creating a new one">
+                  <input type="checkbox" id="commit-amend" />
+                  <span>Amend last commit</span>
+                </label>
+                <div class="commit-amend-note" id="commit-amend-note"></div>
                 <button class="btn-medieval primary commit-btn" id="commit-btn">
                   <span class="btn-icon">✠</span> Commit
                 </button>
@@ -588,6 +598,9 @@
       <div class="modal-footer" id="modal-footer"></div>
     </div>
   </div>
+
+  <!-- ============== BLAME / FILE HISTORY OVERLAY ============== -->
+  <div id="blame-overlay" class="blame-overlay hidden"></div>
 
   <!-- ============== TOAST CONTAINER ============== -->
   <div id="toast-container" class="toast-container"></div>
@@ -664,5 +677,7 @@
   <script src="js/08-lfs-settings.js"></script>
   <script src="js/09-terminal-init.js"></script>
   <script src="js/10-llm-assistant.js"></script>
+  <script src="js/11-rebase.js"></script>
+  <script src="js/12-blame.js"></script>
 </body>
 </html>

@@ -1889,3 +1889,344 @@ body.resizing-panes * {
   transition: width 0.2s ease;
 }
 .llm-progress-status { font-size: 11px; color: var(--muted-text); }
+
+/* ============================================
+   REBASE DIALOGS
+   ============================================ */
+.rb-preview {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 8px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+.rb-preview-row {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 8px;
+  padding: 1px 0;
+}
+.rb-preview-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The action legend above the interactive plan. */
+.rb-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 10px 0;
+  font-size: 11px;
+  color: var(--muted-text);
+}
+.rb-legend code {
+  font-family: var(--font-mono);
+  color: var(--gold-accent);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0 4px;
+  margin-right: 4px;
+}
+
+.rb-list {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.rb-row {
+  display: grid;
+  grid-template-columns: 22px 92px 68px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-left: 3px solid transparent;
+  font-size: 12px;
+}
+.rb-row:last-child { border-bottom: none; }
+/* Each action gets its own left rail so the shape of the plan reads at a glance. */
+.rb-row.action-pick   { border-left-color: var(--added); }
+.rb-row.action-reword { border-left-color: var(--gold-accent); }
+.rb-row.action-squash { border-left-color: #4a7fb5; }
+.rb-row.action-fixup  { border-left-color: #6a5a9a; }
+.rb-row.action-drop   { border-left-color: var(--crusader-red); opacity: 0.55; }
+.rb-row.action-drop .rb-subject { text-decoration: line-through; }
+.rb-row.invalid { background: color-mix(in srgb, var(--crusader-red) 18%, transparent); }
+
+.rb-move { display: flex; flex-direction: column; gap: 1px; }
+.rb-move-btn {
+  font-size: 8px;
+  line-height: 1;
+  padding: 1px 3px;
+  cursor: pointer;
+  color: var(--muted-text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.rb-move-btn:hover:not(:disabled) { color: var(--gold-accent); border-color: var(--accent); }
+.rb-move-btn:disabled { opacity: 0.25; cursor: default; }
+
+.rb-action {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 4px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.rb-hash { font-size: 11px; }
+.rb-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.rb-edit-btn {
+  font-size: 11px;
+  padding: 2px 5px;
+  cursor: pointer;
+  color: var(--muted-text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.rb-edit-btn:hover:not(:disabled) { color: var(--gold-accent); border-color: var(--accent); }
+.rb-edit-btn:disabled { opacity: 0.25; cursor: default; }
+
+.rb-summary {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--gold-accent);
+}
+
+/* ============================================
+   BLAME / FILE HISTORY OVERLAY
+   ============================================ */
+.blame-overlay {
+  position: fixed;
+  inset: 0;
+  /* Above all app chrome (which tops out around 50) but deliberately BELOW the transient
+     layers — modal 100, context menu 150, toasts 200 — because the blame view raises all
+     three itself: right-clicking a line opens a context menu, copying a hash shows a
+     toast, and restoring a file opens a modal. Sitting above them would swallow each one.
+     The blocking loading overlay (9000) still covers this, which is correct. */
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3vh 3vw;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(2px);
+}
+.blame-overlay.hidden { display: none; }
+
+.blame-window {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.blame-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: linear-gradient(180deg, var(--bg-raised), var(--bg-panel));
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.blame-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.blame-icon { color: var(--gold-accent); }
+.blame-path {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* keep the filename visible when the path is long */
+  text-align: left;
+}
+.blame-rev { font-family: var(--font-mono); font-size: 12px; color: var(--gold-accent); white-space: nowrap; }
+
+.blame-tabs { display: flex; gap: 4px; flex: 0 0 auto; }
+.blame-tab {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 6px 14px;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.blame-tab:hover { color: var(--gold-accent); border-color: var(--accent); }
+.blame-tab.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 24%, var(--bg));
+  border-color: var(--accent);
+}
+.blame-close {
+  font-size: 16px;
+  line-height: 1;
+  padding: 5px 9px;
+  cursor: pointer;
+  color: var(--muted-text);
+  background: transparent;
+  border: 1px solid transparent;
+}
+.blame-close:hover { color: var(--crusader-red-bright); border-color: var(--border); }
+
+.blame-body { flex: 1; min-height: 0; overflow: auto; }
+
+.blame-summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-text);
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+/* --- blame lines --- */
+.blame-lines {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  min-width: min-content;
+}
+.blame-row {
+  display: grid;
+  /* The gutter is sized so a full "Firstname Lastname" fits without an ellipsis — an
+     author column that truncates at ten characters defeats the point of the view. */
+  grid-template-columns: 4px 320px 56px 1fr;
+  align-items: baseline;
+  cursor: pointer;
+  white-space: pre;
+}
+.blame-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Only the first line of a run by one commit shows its metadata, so a hairline at the
+   run boundary is what tells you where authorship changes. */
+.blame-row.run-start { border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
+.blame-row.uncommitted .blame-code { color: var(--gold-accent); font-style: italic; }
+
+.blame-stripe { display: block; height: 100%; min-height: 1.55em; }
+.blame-meta {
+  display: grid;
+  grid-template-columns: 64px 1fr 76px;
+  gap: 8px;
+  padding: 0 10px;
+  overflow: hidden;
+  color: var(--muted-text);
+  font-size: 11px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+/* Continuation rows keep the gutter background without repeating the text. */
+.blame-row:not(.run-start) .blame-meta { background: var(--bg); }
+.blame-hash { color: var(--crusader-red-bright); }
+.blame-author { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.blame-when { text-align: right; }
+.blame-uncommitted { grid-column: 1 / -1; color: var(--gold-accent); font-style: italic; }
+.blame-lineno {
+  padding: 0 10px 0 0;
+  text-align: right;
+  color: var(--muted-text);
+  user-select: none;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+.blame-code { padding: 0 10px; color: var(--text-dim); }
+
+/* --- file history --- */
+.fh-layout {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  height: 100%;
+  min-height: 0;
+}
+.fh-list {
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+.fh-diff { overflow: auto; min-height: 0; }
+
+.fh-row {
+  display: grid;
+  grid-template-columns: 4px 1fr;
+  gap: 0;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.fh-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.fh-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.fh-stripe { display: block; }
+.fh-body { padding: 8px 12px; min-width: 0; }
+.fh-subject {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fh-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted-text);
+  font-family: var(--font-mono);
+}
+.fh-status {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+.fh-status.A { color: var(--added); border-color: var(--added); }
+.fh-status.M { color: var(--gold-accent); border-color: var(--gold-accent); }
+.fh-status.D { color: var(--crusader-red-bright); border-color: var(--crusader-red); }
+.fh-status.R { color: #7aa7d4; border-color: #4a7fb5; }
+.fh-rename {
+  margin-top: 3px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: #7aa7d4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow windows: stack the history list above the diff instead of squeezing both. */
+@media (max-width: 1000px) {
+  .fh-layout { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; }
+  .fh-list { border-right: none; border-bottom: 1px solid var(--border); }
+  .blame-row { grid-template-columns: 4px 170px 46px 1fr; }
+  .blame-meta { grid-template-columns: 58px 1fr; }
+  .blame-when { display: none; }
+}

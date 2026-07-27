@@ -34,61 +34,524 @@ function diffModeToggleHtml() {
   `</span>`;
 }
 
+// ============================================
+// UNIFIED-DIFF PARSER
+// ============================================
+// Both renderers and the partial-staging patch builder work from this structure rather
+// than re-scanning raw text, so what you see selected is exactly what gets patched.
+
+// Git plumbing lines that carry no content for a human reader. They are hidden from the
+// rendered output but kept in the file's headerLines, because a synthesized patch needs
+// them verbatim to be applicable.
+function isDiffPlumbingLine(raw) {
+  return raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ') ||
+    raw.startsWith('old mode ') || raw.startsWith('new mode ') ||
+    raw.startsWith('deleted file mode ') || raw.startsWith('new file mode ') ||
+    raw.startsWith('similarity index ') || raw.startsWith('dissimilarity index ') ||
+    raw.startsWith('rename from ') || raw.startsWith('rename to ') ||
+    raw.startsWith('copy from ') || raw.startsWith('copy to ');
+}
+
+// Parse a (possibly multi-file) unified diff.
+// Returns { preamble, files: [{ path, headerLines, hunks, binary, isNew, isDeleted }] }
+// where each hunk is { heading, oldStart, oldCount, newStart, newCount, lines } and each
+// line is { type: ' '|'+'|'-', text, raw, noNewline }.
+function parseUnifiedDiff(diffText) {
+  const src = String(diffText || '').split('\n');
+  const preamble = [];
+  const files = [];
+  let file = null;
+  let hunk = null;
+
+  const startFile = (raw) => {
+    // Best-effort path from "diff --git a/X b/Y"; refined below from the +++/--- lines,
+    // which each carry a single unambiguous path.
+    const m = raw.match(/ b\/(.+)$/);
+    file = {
+      path: m ? m[1] : raw.replace('diff --git ', ''),
+      pathLocked: false,
+      headerLines: [raw],
+      hunks: [],
+      binary: false,
+      isNew: false,
+      isDeleted: false
+    };
+    files.push(file);
+    hunk = null;
+  };
+
+  for (let i = 0; i < src.length; i++) {
+    const raw = src[i];
+
+    if (raw.startsWith('diff --git')) { startFile(raw); continue; }
+
+    if (!file) {
+      // Content before the first "diff --git" — for `git show` this is the commit
+      // metadata. Keep it so callers can display it if they want to.
+      preamble.push(raw);
+      continue;
+    }
+
+    if (raw.startsWith('@@')) {
+      const m = raw.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/);
+      hunk = {
+        raw,
+        heading: m ? (m[5] || '') : '',
+        oldStart: m ? parseInt(m[1], 10) : 0,
+        oldCount: m ? (m[2] === undefined ? 1 : parseInt(m[2], 10)) : 0,
+        newStart: m ? parseInt(m[3], 10) : 0,
+        newCount: m ? (m[4] === undefined ? 1 : parseInt(m[4], 10)) : 0,
+        lines: []
+      };
+      file.hunks.push(hunk);
+      continue;
+    }
+
+    if (!hunk) {
+      // Still in the file header block.
+      if (raw.startsWith('new file mode')) file.isNew = true;
+      else if (raw.startsWith('deleted file mode')) file.isDeleted = true;
+      else if (raw.startsWith('Binary files') || raw.startsWith('GIT binary patch')) {
+        file.binary = true;
+        file.binaryNotice = raw;
+        continue;
+      }
+      // Lock the path from the unambiguous +++ / --- lines.
+      if (!file.pathLocked && raw.startsWith('+++ ')) {
+        const p = raw.slice(4).replace(/^b\//, '').trim();
+        if (p && p !== '/dev/null') { file.path = p; file.pathLocked = true; }
+      } else if (!file.pathLocked && raw.startsWith('--- ')) {
+        const p = raw.slice(4).replace(/^a\//, '').trim();
+        if (p && p !== '/dev/null') file.path = p;
+      }
+      if (isDiffPlumbingLine(raw) || raw.startsWith('diff ')) file.headerLines.push(raw);
+      continue;
+    }
+
+    // Inside a hunk body.
+    if (raw.startsWith('\\')) {
+      // "\ No newline at end of file" belongs to the line just before it.
+      const last = hunk.lines[hunk.lines.length - 1];
+      if (last) last.noNewline = true;
+      continue;
+    }
+    if (raw.startsWith('+')) { hunk.lines.push({ type: '+', text: raw.slice(1), raw }); continue; }
+    if (raw.startsWith('-')) { hunk.lines.push({ type: '-', text: raw.slice(1), raw }); continue; }
+    if (raw.startsWith(' ')) { hunk.lines.push({ type: ' ', text: raw.slice(1), raw }); continue; }
+    if (raw === '') {
+      // A trailing empty string from the final split — only meaningful mid-hunk, where
+      // git emits a bare empty line for an empty context line.
+      if (i < src.length - 1) hunk.lines.push({ type: ' ', text: '', raw: ' ' });
+      continue;
+    }
+    // Anything else (e.g. "Binary files ... differ" after a hunk) ends the hunk body.
+    if (raw.startsWith('Binary files')) { file.binary = true; file.binaryNotice = raw; }
+    hunk = null;
+  }
+
+  return { preamble, files };
+}
+
+// Total rendered line count for a parsed diff — used for the truncation cap.
+function parsedDiffLineCount(parsed) {
+  let n = parsed.preamble.length;
+  for (const f of parsed.files) {
+    n += 1;
+    for (const h of f.hunks) n += 1 + h.lines.length;
+  }
+  return n;
+}
+
+// ============================================
+// WORD-LEVEL (INTRA-LINE) DIFF
+// ============================================
+// When a removed line is paired with an added line, highlighting only the tokens that
+// actually changed makes the edit readable at a glance instead of forcing a character
+// hunt across two near-identical lines.
+
+// Split into word-ish tokens: identifiers, whitespace runs, and single symbols. Keeping
+// whitespace as its own token means indentation changes show up rather than being
+// silently folded into the neighbouring word.
+function tokenizeForWordDiff(s) {
+  return s.match(/[A-Za-z0-9_$]+|\s+|[^\sA-Za-z0-9_$]/g) || [];
+}
+
+// Above this many tokens on either side we skip the pairwise LCS and fall back to
+// marking the whole changed span — the cost isn't worth it on machine-generated lines.
+const WORD_DIFF_MAX_TOKENS = 200;
+const WORD_DIFF_LCS_MAX = 60;
+// Lines that share less than this fraction of their tokens are treated as unrelated
+// rewrites; marking every token would be pure noise, so we mark nothing.
+const WORD_DIFF_MIN_SIMILARITY = 0.25;
+
+// Compare two lines and return { oldHtml, newHtml } with changed runs wrapped in
+// <span class="wd">, or null when word-level highlighting shouldn't apply.
+function wordDiffPair(oldText, newText) {
+  if (oldText === newText) return null;
+  const a = tokenizeForWordDiff(oldText);
+  const b = tokenizeForWordDiff(newText);
+  if (!a.length || !b.length) return null;
+  if (a.length > WORD_DIFF_MAX_TOKENS || b.length > WORD_DIFF_MAX_TOKENS) return null;
+
+  // Trim the common head and tail first. For a typical edit this leaves a tiny middle,
+  // which is what keeps the LCS below affordable.
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head &&
+         a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+
+  const aMid = a.slice(head, a.length - tail);
+  const bMid = b.slice(head, b.length - tail);
+
+  // Nothing common at all → unrelated lines; let the +/- colouring speak for itself.
+  const commonTokens = head + tail;
+  const maxLen = Math.max(a.length, b.length);
+  if (commonTokens / maxLen < WORD_DIFF_MIN_SIMILARITY) return null;
+
+  let aMarks, bMarks;
+  if (!aMid.length && !bMid.length) {
+    return null;
+  } else if (!aMid.length || !bMid.length ||
+             aMid.length > WORD_DIFF_LCS_MAX || bMid.length > WORD_DIFF_LCS_MAX) {
+    // Pure insertion/deletion in the middle, or a middle too large to align cheaply —
+    // mark the whole middle on each side.
+    aMarks = aMid.map(() => true);
+    bMarks = bMid.map(() => true);
+  } else {
+    const aligned = lcsMarks(aMid, bMid);
+    aMarks = aligned.aMarks;
+    bMarks = aligned.bMarks;
+  }
+
+  const build = (tokens, mid, marks) => {
+    const out = [];
+    for (let i = 0; i < head; i++) out.push(escapeHtml(tokens[i]));
+    let run = [];
+    const flush = () => {
+      if (run.length) { out.push(`<span class="wd">${escapeHtml(run.join(''))}</span>`); run = []; }
+    };
+    for (let i = 0; i < mid.length; i++) {
+      if (marks[i]) run.push(mid[i]);
+      else { flush(); out.push(escapeHtml(mid[i])); }
+    }
+    flush();
+    for (let i = tokens.length - tail; i < tokens.length; i++) out.push(escapeHtml(tokens[i]));
+    return out.join('');
+  };
+
+  return { oldHtml: build(a, aMid, aMarks), newHtml: build(b, bMid, bMarks) };
+}
+
+// Classic LCS table over two short token arrays. Returns a boolean per token saying
+// "this token is NOT part of the common subsequence", i.e. it changed.
+function lcsMarks(a, b) {
+  const n = a.length, m = b.length;
+  const dp = new Uint16Array((n + 1) * (m + 1));
+  const at = (i, j) => dp[i * (m + 1) + j];
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * (m + 1) + j] = a[i] === b[j]
+        ? at(i + 1, j + 1) + 1
+        : Math.max(at(i + 1, j), at(i, j + 1));
+    }
+  }
+  const aMarks = new Array(n).fill(true);
+  const bMarks = new Array(m).fill(true);
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { aMarks[i] = false; bMarks[j] = false; i++; j++; }
+    else if (at(i + 1, j) >= at(i, j + 1)) i++;
+    else j++;
+  }
+  return { aMarks, bMarks };
+}
+
+// Given a run of consecutive removed lines and added lines inside one hunk, decide which
+// pairs should get intra-line highlighting and precompute the HTML for them. Pairing is
+// positional (the k-th removal with the k-th addition), which is what a reader expects
+// for an edited block and what the split view already does structurally.
+function computeWordDiffs(delLines, addLines) {
+  const n = Math.min(delLines.length, addLines.length);
+  const pairs = new Array(n);
+  for (let k = 0; k < n; k++) {
+    pairs[k] = wordDiffPair(delLines[k].text, addLines[k].text);
+  }
+  return pairs;
+}
+
+// ============================================
+// PARTIAL STAGING — selection state
+// ============================================
+// Only one diff at a time is ever stageable (the Changes tab's selected file), so a
+// single module-level record is enough. `selected` holds "<hunkIndex>:<lineIndex>" keys
+// pointing into `parsedFile.hunks`, which is the same structure buildPartialPatch walks.
+const partialStaging = {
+  fileKey: null,      // "staged:path" / "unstaged:path"
+  path: null,
+  staged: false,
+  parsedFile: null,
+  selected: new Set(),
+  // Flat list of "<h>:<l>" keys in visual order, for shift-click range selection.
+  order: [],
+  lastClicked: null
+};
+
+function partialStagingReset() {
+  partialStaging.selected.clear();
+  partialStaging.lastClicked = null;
+}
+
+// Prepare the selection state for a newly rendered stageable diff. Clears the selection
+// when the file (or its staged/unstaged side) changed, and keeps it otherwise so a
+// re-render — e.g. flipping unified/split — doesn't lose what you had ticked.
+function partialStagingBind(parsedFile, opts) {
+  const fileKey = (opts.staged ? 'staged:' : 'unstaged:') + opts.filePath;
+  if (partialStaging.fileKey !== fileKey) {
+    partialStaging.fileKey = fileKey;
+    partialStagingReset();
+  }
+  partialStaging.path = opts.filePath;
+  partialStaging.staged = !!opts.staged;
+  partialStaging.parsedFile = parsedFile;
+  partialStaging.order = [];
+  parsedFile.hunks.forEach((h, hi) => {
+    h.lines.forEach((l, li) => { if (l.type !== ' ') partialStaging.order.push(hi + ':' + li); });
+  });
+  // Drop selections that no longer exist (the diff shrank since they were made).
+  const valid = new Set(partialStaging.order);
+  for (const k of [...partialStaging.selected]) if (!valid.has(k)) partialStaging.selected.delete(k);
+}
+
+// The action bar shown above a stageable diff.
+function partialBarHtml(staged) {
+  const primary = staged
+    ? `<button class="dpartial-btn" data-partial-action="unstage">⇣ Unstage lines</button>`
+    : `<button class="dpartial-btn" data-partial-action="stage">⇡ Stage lines</button>` +
+      `<button class="dpartial-btn danger" data-partial-action="discard">✕ Discard lines</button>`;
+  return `<div class="dpartial-bar" id="dpartial-bar">` +
+    `<span class="dpartial-count" id="dpartial-count">0 lines selected</span>` +
+    `<span class="dpartial-actions">${primary}` +
+    `<button class="dpartial-btn" data-partial-action="clear">Clear</button></span>` +
+  `</div>`;
+}
+
+// Reflect the current selection size in the bar without re-rendering the whole diff.
+function updatePartialBar() {
+  const bar = document.getElementById('dpartial-bar');
+  if (!bar) return;
+  const n = partialStaging.selected.size;
+  bar.classList.toggle('active', n > 0);
+  const count = document.getElementById('dpartial-count');
+  if (count) count.textContent = n === 0
+    ? 'Click lines to stage part of a change'
+    : `${n} line${n === 1 ? '' : 's'} selected`;
+}
+
+// ============================================
+// PARTIAL STAGING — patch synthesis
+// ============================================
+// Build a unified patch containing only the selected lines, suitable for `git apply`.
+//
+// `reverse` says the patch will be applied with -R, which flips which side of the diff
+// git reads as the source and therefore how unselected lines must be treated:
+//
+//   forward (stage)              reverse (unstage / discard)
+//   ------------------------     -----------------------------
+//   source is the OLD side       source is the NEW side
+//   unselected '+' → drop        unselected '+' → keep as context
+//   unselected '-' → context     unselected '-' → drop
+//
+// Getting this backwards produces a patch whose context doesn't match the file, which is
+// the classic "patch does not apply" failure in hand-rolled partial staging.
+function buildPartialPatch(parsedFile, selectedKeys, options) {
+  const reverse = !!(options && options.reverse);
+  const out = [];
+  const hunkTexts = [];
+  let runningDelta = 0;
+
+  parsedFile.hunks.forEach((hunk, hi) => {
+    const body = [];
+    let oldCount = 0, newCount = 0, changed = 0;
+
+    hunk.lines.forEach((line, li) => {
+      const selected = selectedKeys.has(hi + ':' + li);
+      let emitType = null;
+
+      if (line.type === ' ') emitType = ' ';
+      else if (line.type === '+') {
+        if (selected) { emitType = '+'; changed++; }
+        else emitType = reverse ? ' ' : null;
+      } else if (line.type === '-') {
+        if (selected) { emitType = '-'; changed++; }
+        else emitType = reverse ? null : ' ';
+      }
+
+      if (emitType === null) return;
+      body.push(emitType + line.text);
+      if (line.noNewline) body.push('\\ No newline at end of file');
+      if (emitType === ' ') { oldCount++; newCount++; }
+      else if (emitType === '+') newCount++;
+      else if (emitType === '-') oldCount++;
+    });
+
+    // A hunk with nothing selected contributes nothing — skip it entirely so the patch
+    // stays as small as possible (fewer chances for context to drift).
+    if (!changed) return;
+
+    // Anchor the side git reads as the source to its original position, and derive the
+    // other side from the drift accumulated by the hunks emitted before this one.
+    const oldStart = reverse ? Math.max(1, hunk.newStart - runningDelta) : hunk.oldStart;
+    const newStart = reverse ? hunk.newStart : hunk.oldStart + runningDelta;
+    runningDelta += (newCount - oldCount);
+
+    hunkTexts.push(
+      `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${hunk.heading}\n` + body.join('\n')
+    );
+  });
+
+  if (!hunkTexts.length) return '';
+
+  // Header. For a deleted file whose deletion is only partially selected, the patch is no
+  // longer a deletion — strip the marker and point +++ back at the real path, otherwise
+  // git rejects a "deleted" patch that still leaves content behind.
+  let header = parsedFile.headerLines.slice();
+  const totalRemovals = parsedFile.hunks.reduce(
+    (n, h) => n + h.lines.filter(l => l.type === '-').length, 0);
+  const selectedRemovals = parsedFile.hunks.reduce(
+    (n, h, hi) => n + h.lines.filter((l, li) => l.type === '-' && selectedKeys.has(hi + ':' + li)).length, 0);
+  if (parsedFile.isDeleted && selectedRemovals < totalRemovals) {
+    header = header
+      .filter(l => !l.startsWith('deleted file mode '))
+      .map(l => l.startsWith('+++ ') ? `+++ b/${parsedFile.path}` : l);
+  }
+
+  out.push(header.join('\n'));
+  out.push(hunkTexts.join('\n'));
+  return out.join('\n') + '\n';
+}
+
+// Every line of a hunk, as selection keys — used by the whole-hunk buttons.
+function hunkLineKeys(parsedFile, hunkIndex) {
+  const hunk = parsedFile.hunks[hunkIndex];
+  if (!hunk) return [];
+  const keys = [];
+  hunk.lines.forEach((l, li) => { if (l.type !== ' ') keys.push(hunkIndex + ':' + li); });
+  return keys;
+}
+
+// ============================================
+// UNIFIED VIEW
+// ============================================
 function renderDiffUnified(diffText, opts) {
   opts = opts || {};
   if (!diffText || !diffText.trim()) {
     return '<div class="empty-state"><p>No differences.</p></div>';
   }
-  const allLines = diffText.split('\n');
-  const totalLines = allLines.length;
+  const parsed = parseUnifiedDiff(diffText);
   const cap = opts.lineCap || DIFF_LINE_CAP;
+  const totalLines = parsedDiffLineCount(parsed);
   const truncatedByCap = totalLines > cap;
-  const lines = truncatedByCap ? allLines.slice(0, cap) : allLines;
+
+  // Partial staging only makes sense for a single working-tree file.
+  const stageable = !!(opts.stageable && parsed.files.length === 1 && !parsed.files[0].binary);
+  if (stageable) partialStagingBind(parsed.files[0], opts);
 
   const out = [];
-  let oldLine = 0, newLine = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    // Turn the raw "diff --git a/path b/path" into a clean file header, and drop the
-    // other git plumbing lines (index, ---, +++, mode/rename/similarity) entirely.
-    if (raw.startsWith('diff --git')) {
-      const m = raw.match(/ b\/(.+)$/);
-      const path = m ? m[1] : raw.replace('diff --git ', '');
-      out.push(`<div class="diff-file-header">⚔ ${escapeHtml(path)}</div>`);
+  if (stageable) out.push(partialBarHtml(!!opts.staged));
+
+  let emitted = 0;
+  let stop = false;
+
+  for (const file of parsed.files) {
+    if (stop) break;
+    out.push(`<div class="diff-file-header">⚔ ${escapeHtml(file.path)}</div>`);
+    emitted++;
+    if (file.binary) {
+      out.push(`<div class="diff-notice">${escapeHtml(file.binaryNotice || 'Binary file differs')}</div>`);
       continue;
     }
-    if (raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ') ||
-        raw.startsWith('old mode ') || raw.startsWith('new mode ') ||
-        raw.startsWith('deleted file mode ') || raw.startsWith('new file mode ') ||
-        raw.startsWith('similarity index ') || raw.startsWith('rename from ') ||
-        raw.startsWith('rename to ') || raw.startsWith('copy from ') || raw.startsWith('copy to ')) {
-      continue; // drop git plumbing
-    }
-    if (raw.startsWith('Binary files')) {
-      out.push(`<div class="diff-notice">${escapeHtml(raw)}</div>`);
-      continue;
-    }
-    if (raw.startsWith('@@')) {
-      const m = raw.match(/@@ -(\d+),?\d* \+(\d+),?\d* @@/);
-      if (m) { oldLine = parseInt(m[1]); newLine = parseInt(m[2]); }
-      out.push(`<div class="diff-line hunk"><div class="diff-gutter"></div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
-      continue;
-    }
-    if (raw.startsWith('+') && !raw.startsWith('+++')) {
-      out.push(`<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${newLine}</div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
-      newLine++;
-      continue;
-    }
-    if (raw.startsWith('-') && !raw.startsWith('---')) {
-      out.push(`<div class="diff-line del"><div class="diff-gutter">${oldLine}</div><div class="diff-gutter"></div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
-      oldLine++;
-      continue;
-    }
-    if (raw.startsWith('\\')) {
-      continue; // "\ No newline at end of file"
-    }
-    out.push(`<div class="diff-line"><div class="diff-gutter">${oldLine}</div><div class="diff-gutter">${newLine}</div><div class="diff-text">${escapeHtml(raw)}</div></div>`);
-    oldLine++; newLine++;
+
+    file.hunks.forEach((hunk, hi) => {
+      if (stop) return;
+      const actions = stageable
+        ? `<span class="dhunk-actions">` +
+            (opts.staged
+              ? `<button class="dhunk-btn" data-hunk-action="unstage" data-hunk="${hi}" title="Unstage this hunk">⇣ Unstage</button>`
+              : `<button class="dhunk-btn" data-hunk-action="stage" data-hunk="${hi}" title="Stage this hunk">⇡ Stage</button>` +
+                `<button class="dhunk-btn danger" data-hunk-action="discard" data-hunk="${hi}" title="Discard this hunk">✕ Discard</button>`) +
+            `<button class="dhunk-btn" data-hunk-action="select" data-hunk="${hi}" title="Select every line in this hunk">☑ Select</button>` +
+          `</span>`
+        : '';
+      out.push(
+        `<div class="diff-line hunk${stageable ? ' has-actions' : ''}" data-hunk="${hi}">` +
+          `<div class="diff-gutter"></div><div class="diff-gutter"></div>` +
+          `<div class="diff-text">${escapeHtml(hunk.raw)}</div>${actions}` +
+        `</div>`);
+      emitted++;
+
+      let oldLine = hunk.oldStart;
+      let newLine = hunk.newStart;
+
+      // Walk the hunk in runs so a block of removals followed by a block of additions can
+      // be paired up for intra-line highlighting.
+      let i = 0;
+      while (i < hunk.lines.length) {
+        if (emitted >= cap) { stop = true; return; }
+        const line = hunk.lines[i];
+
+        if (line.type === ' ') {
+          out.push(
+            `<div class="diff-line">` +
+              `<div class="diff-gutter">${oldLine}</div><div class="diff-gutter">${newLine}</div>` +
+              `<div class="diff-text">${escapeHtml(line.raw)}</div>` +
+            `</div>`);
+          oldLine++; newLine++; emitted++; i++;
+          continue;
+        }
+
+        // Collect the run of removals, then the run of additions that follows it.
+        const delRun = [];
+        while (i < hunk.lines.length && hunk.lines[i].type === '-') { delRun.push({ line: hunk.lines[i], idx: i }); i++; }
+        const addRun = [];
+        while (i < hunk.lines.length && hunk.lines[i].type === '+') { addRun.push({ line: hunk.lines[i], idx: i }); i++; }
+
+        const pairs = (delRun.length && addRun.length)
+          ? computeWordDiffs(delRun.map(d => d.line), addRun.map(a => a.line))
+          : [];
+
+        delRun.forEach((d, k) => {
+          const key = hi + ':' + d.idx;
+          const sel = stageable && partialStaging.selected.has(key);
+          const html = pairs[k] ? pairs[k].oldHtml : escapeHtml(d.line.text);
+          out.push(
+            `<div class="diff-line del${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
+              (stageable ? ` data-dkey="${key}"` : '') + `>` +
+              `<div class="diff-gutter">${oldLine + k}</div><div class="diff-gutter"></div>` +
+              `<div class="diff-text">-${html}</div>` +
+            `</div>`);
+          emitted++;
+        });
+        oldLine += delRun.length;
+
+        addRun.forEach((a, k) => {
+          const key = hi + ':' + a.idx;
+          const sel = stageable && partialStaging.selected.has(key);
+          const html = pairs[k] ? pairs[k].newHtml : escapeHtml(a.line.text);
+          out.push(
+            `<div class="diff-line add${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
+              (stageable ? ` data-dkey="${key}"` : '') + `>` +
+              `<div class="diff-gutter"></div><div class="diff-gutter">${newLine + k}</div>` +
+              `<div class="diff-text">+${html}</div>` +
+            `</div>`);
+          emitted++;
+        });
+        newLine += addRun.length;
+
+        // Neither a context line nor a +/- run: guard against an infinite loop.
+        if (!delRun.length && !addRun.length) i++;
+      }
+    });
   }
 
   let html = out.join('');
@@ -102,120 +565,122 @@ function renderDiffUnified(diffText, opts) {
   return html;
 }
 
-// Side-by-side (split) diff. Parses the unified diff into hunks and pairs deleted lines
-// on the left with added lines on the right; context lines appear on both sides.
+// ============================================
+// SPLIT (SIDE-BY-SIDE) VIEW
+// ============================================
+// Deleted lines pair with added lines on the same row; context lines appear on both
+// sides. Word-level highlighting uses the same pairing, so a row reads as one edit.
 function renderDiffSplit(diffText, opts) {
   opts = opts || {};
-  const allLines = diffText.split('\n');
-  const totalLines = allLines.length;
+  if (!diffText || !diffText.trim()) {
+    return '<div class="empty-state"><p>No differences.</p></div>';
+  }
+  const parsed = parseUnifiedDiff(diffText);
   const cap = opts.lineCap || DIFF_LINE_CAP;
+  const totalLines = parsedDiffLineCount(parsed);
   const truncatedByCap = totalLines > cap;
-  const lines = truncatedByCap ? allLines.slice(0, cap) : allLines;
 
-  // A row is { type, leftNum, leftText, rightNum, rightText }
-  // type: 'meta' (file/hunk header, spans full width), 'context', 'change'
-  const rows = [];
-  let oldLine = 0, newLine = 0;
+  const stageable = !!(opts.stageable && parsed.files.length === 1 && !parsed.files[0].binary);
+  if (stageable) partialStagingBind(parsed.files[0], opts);
 
-  // Buffer consecutive removals/additions so we can align them side-by-side.
-  let pendingDel = [];   // {num, text}
-  let pendingAdd = [];   // {num, text}
-  const flushPending = () => {
-    const n = Math.max(pendingDel.length, pendingAdd.length);
-    for (let k = 0; k < n; k++) {
-      const d = pendingDel[k];
-      const a = pendingAdd[k];
-      rows.push({
-        type: 'change',
-        leftNum: d ? d.num : '',
-        leftText: d ? d.text : null,     // null => empty filler cell
-        rightNum: a ? a.num : '',
-        rightText: a ? a.text : null
-      });
-    }
-    pendingDel = [];
-    pendingAdd = [];
-  };
+  const parts = [];
+  let emitted = 0;
+  let stop = false;
 
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (raw.startsWith('diff --git')) {
-      flushPending();
-      const m = raw.match(/ b\/(.+)$/);
-      const path = m ? m[1] : raw.replace('diff --git ', '');
-      rows.push({ type: 'file', text: path });
+  for (const file of parsed.files) {
+    if (stop) break;
+    parts.push(`<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(file.path)}</div></div>`);
+    emitted++;
+    if (file.binary) {
+      parts.push(`<div class="dsplit-row meta"><div class="dsplit-meta">${escapeHtml(file.binaryNotice || 'Binary file differs')}</div></div>`);
       continue;
     }
-    if (raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ') ||
-        raw.startsWith('old mode ') || raw.startsWith('new mode ') ||
-        raw.startsWith('deleted file mode ') || raw.startsWith('new file mode ') ||
-        raw.startsWith('similarity index ') || raw.startsWith('rename from ') ||
-        raw.startsWith('rename to ') || raw.startsWith('copy from ') || raw.startsWith('copy to ')) {
-      continue; // drop git plumbing
-    }
-    if (raw.startsWith('Binary files')) {
-      flushPending();
-      rows.push({ type: 'meta', text: raw });
-      continue;
-    }
-    if (raw.startsWith('@@')) {
-      flushPending();
-      const m = raw.match(/@@ -(\d+),?\d* \+(\d+),?\d* @@/);
-      if (m) { oldLine = parseInt(m[1]); newLine = parseInt(m[2]); }
-      rows.push({ type: 'meta', text: raw });
-      continue;
-    }
-    if (raw.startsWith('+') && !raw.startsWith('+++')) {
-      pendingAdd.push({ num: newLine, text: raw.slice(1) });
-      newLine++;
-      continue;
-    }
-    if (raw.startsWith('-') && !raw.startsWith('---')) {
-      pendingDel.push({ num: oldLine, text: raw.slice(1) });
-      oldLine++;
-      continue;
-    }
-    if (raw.startsWith('\\')) {
-      // "\ No newline at end of file" — attach as meta-ish, skip
-      continue;
-    }
-    // Context line — flush any pending change block first, then add to both sides.
-    flushPending();
-    const text = raw.startsWith(' ') ? raw.slice(1) : raw;
-    rows.push({
-      type: 'context',
-      leftNum: oldLine, leftText: text,
-      rightNum: newLine, rightText: text
+
+    file.hunks.forEach((hunk, hi) => {
+      if (stop) return;
+      const actions = stageable
+        ? `<span class="dhunk-actions">` +
+            (opts.staged
+              ? `<button class="dhunk-btn" data-hunk-action="unstage" data-hunk="${hi}" title="Unstage this hunk">⇣ Unstage</button>`
+              : `<button class="dhunk-btn" data-hunk-action="stage" data-hunk="${hi}" title="Stage this hunk">⇡ Stage</button>` +
+                `<button class="dhunk-btn danger" data-hunk-action="discard" data-hunk="${hi}" title="Discard this hunk">✕ Discard</button>`) +
+            `<button class="dhunk-btn" data-hunk-action="select" data-hunk="${hi}" title="Select every line in this hunk">☑ Select</button>` +
+          `</span>`
+        : '';
+      parts.push(
+        `<div class="dsplit-row meta${stageable ? ' has-actions' : ''}">` +
+          `<div class="dsplit-meta">${escapeHtml(hunk.raw)}</div>${actions}` +
+        `</div>`);
+      emitted++;
+
+      let oldLine = hunk.oldStart;
+      let newLine = hunk.newStart;
+      let i = 0;
+
+      while (i < hunk.lines.length) {
+        if (emitted >= cap) { stop = true; return; }
+        const line = hunk.lines[i];
+
+        if (line.type === ' ') {
+          parts.push(
+            `<div class="dsplit-row">` +
+              `<div class="dsplit-side"><span class="dsplit-num">${oldLine}</span><span class="dsplit-text">${escapeHtml(line.text)}</span></div>` +
+              `<div class="dsplit-side"><span class="dsplit-num">${newLine}</span><span class="dsplit-text">${escapeHtml(line.text)}</span></div>` +
+            `</div>`);
+          oldLine++; newLine++; emitted++; i++;
+          continue;
+        }
+
+        const delRun = [];
+        while (i < hunk.lines.length && hunk.lines[i].type === '-') { delRun.push({ line: hunk.lines[i], idx: i }); i++; }
+        const addRun = [];
+        while (i < hunk.lines.length && hunk.lines[i].type === '+') { addRun.push({ line: hunk.lines[i], idx: i }); i++; }
+        if (!delRun.length && !addRun.length) { i++; continue; }
+
+        const pairs = (delRun.length && addRun.length)
+          ? computeWordDiffs(delRun.map(d => d.line), addRun.map(a => a.line))
+          : [];
+
+        const rows = Math.max(delRun.length, addRun.length);
+        for (let k = 0; k < rows; k++) {
+          if (emitted >= cap) { stop = true; return; }
+          const d = delRun[k];
+          const a = addRun[k];
+
+          let left;
+          if (d) {
+            const key = hi + ':' + d.idx;
+            const sel = stageable && partialStaging.selected.has(key);
+            const html = pairs[k] ? pairs[k].oldHtml : escapeHtml(d.line.text);
+            left = `<div class="dsplit-side del${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
+              (stageable ? ` data-dkey="${key}"` : '') + `>` +
+              `<span class="dsplit-num">${oldLine + k}</span><span class="dsplit-text">${html}</span></div>`;
+          } else {
+            left = `<div class="dsplit-side empty"><span class="dsplit-num"></span><span class="dsplit-text"></span></div>`;
+          }
+
+          let right;
+          if (a) {
+            const key = hi + ':' + a.idx;
+            const sel = stageable && partialStaging.selected.has(key);
+            const html = pairs[k] ? pairs[k].newHtml : escapeHtml(a.line.text);
+            right = `<div class="dsplit-side add${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
+              (stageable ? ` data-dkey="${key}"` : '') + `>` +
+              `<span class="dsplit-num">${newLine + k}</span><span class="dsplit-text">${html}</span></div>`;
+          } else {
+            right = `<div class="dsplit-side empty"><span class="dsplit-num"></span><span class="dsplit-text"></span></div>`;
+          }
+
+          parts.push(`<div class="dsplit-row">${left}${right}</div>`);
+          emitted++;
+        }
+        oldLine += delRun.length;
+        newLine += addRun.length;
+      }
     });
-    oldLine++; newLine++;
-  }
-  flushPending();
-
-  const parts = new Array(rows.length);
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    if (r.type === 'file') {
-      parts[i] = `<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(r.text)}</div></div>`;
-      continue;
-    }
-    if (r.type === 'meta') {
-      parts[i] = `<div class="dsplit-row meta"><div class="dsplit-meta">${escapeHtml(r.text)}</div></div>`;
-      continue;
-    }
-    const leftCls = r.type === 'change' && r.leftText !== null ? 'del' : (r.leftText === null ? 'empty' : '');
-    const rightCls = r.type === 'change' && r.rightText !== null ? 'add' : (r.rightText === null ? 'empty' : '');
-    const leftText = r.leftText === null ? '' : escapeHtml(r.leftText);
-    const rightText = r.rightText === null ? '' : escapeHtml(r.rightText);
-    const leftNum = r.leftText === null ? '' : r.leftNum;
-    const rightNum = r.rightText === null ? '' : r.rightNum;
-    parts[i] =
-      `<div class="dsplit-row">` +
-        `<div class="dsplit-side ${leftCls}"><span class="dsplit-num">${leftNum}</span><span class="dsplit-text">${leftText}</span></div>` +
-        `<div class="dsplit-side ${rightCls}"><span class="dsplit-num">${rightNum}</span><span class="dsplit-text">${rightText}</span></div>` +
-      `</div>`;
   }
 
-  let html = `<div class="dsplit">${parts.join('')}</div>`;
+  let html = (stageable ? partialBarHtml(!!opts.staged) : '') + `<div class="dsplit">${parts.join('')}</div>`;
   const truncated = truncatedByCap || opts.diffTruncated;
   if (truncated) {
     const reason = truncatedByCap
@@ -224,6 +689,136 @@ function renderDiffSplit(diffText, opts) {
     html += `<div class="diff-notice">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div>`;
   }
   return html;
+}
+
+// ============================================
+// PARTIAL STAGING — interaction
+// ============================================
+// Clicking a changed line toggles it; shift-click extends from the last click. Because
+// the diff HTML is rebuilt wholesale on every render, all of this is delegated from the
+// document rather than bound per line.
+document.addEventListener('click', (e) => {
+  // Whole-hunk buttons.
+  const hunkBtn = e.target.closest('[data-hunk-action]');
+  if (hunkBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const hi = parseInt(hunkBtn.dataset.hunk, 10);
+    const action = hunkBtn.dataset.hunkAction;
+    if (action === 'select') {
+      const keys = hunkLineKeys(partialStaging.parsedFile, hi);
+      // Toggle: if the hunk is already fully selected, clicking clears it.
+      const allSelected = keys.length && keys.every(k => partialStaging.selected.has(k));
+      keys.forEach(k => allSelected ? partialStaging.selected.delete(k) : partialStaging.selected.add(k));
+      syncPartialSelectionDom();
+      return;
+    }
+    applyHunk(hi, action);
+    return;
+  }
+
+  // Selection-bar buttons.
+  const barBtn = e.target.closest('[data-partial-action]');
+  if (barBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const action = barBtn.dataset.partialAction;
+    if (action === 'clear') { partialStagingReset(); syncPartialSelectionDom(); return; }
+    applySelectedLines(action);
+    return;
+  }
+
+  // Line toggle. Ignore the click when the user is actually selecting text.
+  const row = e.target.closest('.dsel[data-dkey]');
+  if (!row) return;
+  const sel = window.getSelection();
+  if (sel && sel.toString().length) return;
+
+  const key = row.dataset.dkey;
+  if (e.shiftKey && partialStaging.lastClicked) {
+    const order = partialStaging.order;
+    const a = order.indexOf(partialStaging.lastClicked);
+    const b = order.indexOf(key);
+    if (a !== -1 && b !== -1) {
+      const [lo, hi2] = a <= b ? [a, b] : [b, a];
+      // Extend using the anchor's resulting state so a shift-drag reads as one gesture.
+      const turnOn = !partialStaging.selected.has(key);
+      for (let i = lo; i <= hi2; i++) {
+        if (turnOn) partialStaging.selected.add(order[i]);
+        else partialStaging.selected.delete(order[i]);
+      }
+    }
+  } else {
+    if (partialStaging.selected.has(key)) partialStaging.selected.delete(key);
+    else partialStaging.selected.add(key);
+  }
+  partialStaging.lastClicked = key;
+  syncPartialSelectionDom();
+});
+
+// Repaint selection highlighting in place — far cheaper than re-rendering the diff, and
+// it keeps the scroll position steady while you tick lines.
+function syncPartialSelectionDom() {
+  document.querySelectorAll('.dsel[data-dkey]').forEach(el => {
+    el.classList.toggle('selected', partialStaging.selected.has(el.dataset.dkey));
+  });
+  updatePartialBar();
+}
+
+// Map an action to the (cached, reverse) pair `git apply` needs. See buildPartialPatch
+// for why the reverse flag also changes how unselected lines are emitted.
+const PARTIAL_APPLY_MODES = {
+  stage:   { cached: true,  reverse: false, verb: 'Staging',    done: 'Staged' },
+  unstage: { cached: true,  reverse: true,  verb: 'Unstaging',  done: 'Unstaged' },
+  discard: { cached: false, reverse: true,  verb: 'Discarding', done: 'Discarded' }
+};
+
+async function applyHunk(hunkIndex, action) {
+  const parsedFile = partialStaging.parsedFile;
+  if (!parsedFile) return;
+  const keys = new Set(hunkLineKeys(parsedFile, hunkIndex));
+  if (!keys.size) { showToast('That hunk has no changed lines', 'error'); return; }
+  await runPartialApply(keys, action, 'hunk');
+}
+
+async function applySelectedLines(action) {
+  if (!partialStaging.selected.size) { showToast('Select some lines first', 'error'); return; }
+  await runPartialApply(new Set(partialStaging.selected), action, 'lines');
+}
+
+async function runPartialApply(keys, action, what) {
+  const mode = PARTIAL_APPLY_MODES[action];
+  const parsedFile = partialStaging.parsedFile;
+  if (!mode || !parsedFile) return;
+
+  const count = keys.size;
+  if (action === 'discard') {
+    const confirmed = await modal.confirm({
+      title: what === 'hunk' ? 'Discard Hunk' : 'Discard Selected Lines',
+      message: what === 'hunk'
+        ? `Permanently discard this hunk's changes in "${partialStaging.path}"? This rewrites the file on disk and cannot be undone.`
+        : `Permanently discard ${count} selected line${count === 1 ? '' : 's'} in "${partialStaging.path}"? This rewrites the file on disk and cannot be undone.`,
+      danger: true,
+      confirmText: 'Discard'
+    });
+    if (!confirmed) return;
+  }
+
+  const patch = buildPartialPatch(parsedFile, keys, { reverse: mode.reverse });
+  if (!patch) { showToast('Nothing to apply', 'error'); return; }
+
+  const r = await withLoading(mode.verb, () => gs.applyPatch({
+    patch, cached: mode.cached, reverse: mode.reverse
+  }));
+  if (!r.ok) { showToast(r.error || `${mode.verb} failed`, 'error', 8000); return; }
+
+  showToast(`${mode.done} ${what === 'hunk' ? '1 hunk' : count + ' line' + (count === 1 ? '' : 's')}`, 'success');
+  partialStagingReset();
+  await refreshStatus();
+  // Re-read the file's diff so the pane reflects what's left to stage.
+  if (state.selectedFile === partialStaging.path) {
+    await selectFile(partialStaging.path, partialStaging.staged);
+  }
 }
 
 // ============================================
@@ -486,8 +1081,12 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y) {
   const many = targetPaths.length > 1;
   const label = many ? `Restore ${targetPaths.length} files to working tree`
                       : `Restore “${shortenPath(rightClickedPath || targetPaths[0])}” to working tree`;
+  const focus = rightClickedPath || targetPaths[0];
   const items = [
     { label, icon: '↩', action: () => restoreFilesFromCommit(hash, targetPaths) },
+    'sep',
+    { label: 'File history…', icon: '⌛', action: () => openFileHistory(focus) },
+    { label: 'Blame at this commit…', icon: '⚔', action: () => openBlame(focus, { rev: hash }) },
     'sep',
     { label: 'Copy path' + (many ? 's' : ''), icon: '⎘', action: () => {
         navigator.clipboard.writeText(targetPaths.join('\n'));

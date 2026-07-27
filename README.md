@@ -47,6 +47,9 @@ GitGood is a fully functional **Electron** desktop Git client wrapped in a medie
 
 ### History & Diffs
 - Commit history with author, email, date, and hash
+- **Word-level diff highlighting** — when a removed line pairs with an added line, only the
+  tokens that actually changed are marked, so an edit reads at a glance instead of forcing a
+  character hunt across two near-identical lines
 - **Unified / Split (side-by-side) diff** toggle — choice persists across sessions and applies everywhere
 - Split view shows two clearly separated panes with a center divider and aligned add/remove rows
 - **Per-file browser** in commit previews: a file list (with A / M / D / R status badges) + a single-file diff
@@ -56,9 +59,34 @@ GitGood is a fully functional **Electron** desktop Git client wrapped in a medie
 
 ### Working Tree (Changes)
 - Stage / unstage / discard individual files, multiple selections, or everything at once
+- **Hunk & line-level staging** — stage, unstage or discard a single hunk with the buttons on
+  its header, or click individual lines (shift-click for a range) and act on just those.
+  Works in both unified and split views
+- Untracked files can be opted into partial staging with one click (`git add -N` behind the scenes)
 - Conflict-aware listing with a 3-way conflict resolver
 - Per-file diff with the same unified/split toggle as the rest of the app
+- **Amend last commit** — a toggle beside the commit button that loads the previous message
+  in for editing; warns before rewriting a commit that's already been pushed. Works with
+  nothing staged, so you can reword without changing content
 - Stash system: create, apply, pop, drop — plus a stash browser
+
+### Rebase
+- **Rebase onto any branch** from the branch context menu, with a preview of exactly which
+  commits will be replayed and a warning when they're already published
+- **Interactive rebase** — reorder, `reword`, `squash`, `fixup` and `drop` commits in a visual
+  plan, with a live summary of how many commits you'll end up with
+- **Pull (rebase)** in the sync menu — fetch, then replay your work on top, no merge commit
+- Conflicts hand off to the existing resolver, now with **Skip** alongside Continue and Abort
+- Optional auto-stash so a dirty working tree doesn't block the rebase
+
+### Blame & File History
+- **Blame** any tracked file — per-line author, commit and date, with a colour stripe per
+  commit and repeated metadata collapsed so runs read cleanly
+- Right-click a blame line to **blame the parent commit**, which walks you back past a
+  reformatting or rename commit to whoever actually wrote the line
+- **File history** — every commit that touched a file, following it through renames, with
+  that commit's diff *for that file alone* beside the list
+- Reachable from the Changes list, from any file in a commit preview, and from each other
 
 ### Files from Commits
 - **Checkboxes** on each file in a commit preview, with a **Select all** control and live selection count

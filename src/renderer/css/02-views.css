@@ -593,6 +593,131 @@
 }
 .diff-line.hunk .diff-text { color: var(--crusader-red-bright); font-weight: bold; }
 
+/* ============================================
+   WORD-LEVEL (INTRA-LINE) DIFF
+   ============================================
+   When a removed line is paired with an added line, only the tokens that actually
+   changed are marked, so an edit reads at a glance instead of forcing a character hunt
+   across two near-identical lines. The marker is a background wash rather than a colour
+   change so it composes with every theme's add/remove text colours. */
+.wd {
+  border-radius: 2px;
+  padding: 1px 0;
+  /* Keep the glyph metrics identical to unmarked text so nothing shifts horizontally. */
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.diff-line.add .wd, .dsplit-side.add .wd {
+  background: color-mix(in srgb, var(--added) 34%, transparent);
+  color: #e6ffd0;
+}
+.diff-line.del .wd, .dsplit-side.del .wd {
+  background: color-mix(in srgb, var(--crusader-red) 34%, transparent);
+  color: #ffdede;
+}
+
+/* ============================================
+   PARTIAL STAGING — hunk buttons & line selection
+   ============================================ */
+/* The hunk header grows a fourth, auto-width column for its action buttons. */
+.diff-line.hunk.has-actions { grid-template-columns: 50px 50px 1fr auto; }
+.dsplit-row.meta.has-actions { grid-template-columns: 1fr auto; }
+
+.dhunk-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  background: var(--bg-raised);
+  white-space: nowrap;
+}
+.dhunk-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.dhunk-btn:hover {
+  color: var(--gold-accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel));
+}
+.dhunk-btn.danger:hover {
+  color: #ffd9d9;
+  border-color: var(--crusader-red);
+  background: color-mix(in srgb, var(--crusader-red) 24%, var(--bg-panel));
+}
+
+/* Selectable changed lines. The cursor and hover wash are the affordance — there are no
+   checkboxes, because a diff with a checkbox per line reads as a form, not as code. */
+.diff-line.dsel, .dsplit-side.dsel { cursor: pointer; }
+.diff-line.dsel:hover  { filter: brightness(1.25); }
+.dsplit-side.dsel:hover { filter: brightness(1.25); }
+.diff-line.dsel.selected, .dsplit-side.dsel.selected {
+  /* A gold rail on the gutter edge marks selection without fighting the add/remove
+     background, which still has to stay readable. */
+  box-shadow: inset 3px 0 0 var(--gold-accent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--gold-accent) 12%, transparent),
+    color-mix(in srgb, var(--gold-accent) 12%, transparent));
+}
+.diff-line.dsel.selected .diff-gutter,
+.dsplit-side.dsel.selected .dsplit-num {
+  color: var(--gold-accent);
+  font-weight: bold;
+}
+
+/* Sticky action bar above a stageable diff. */
+.dpartial-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-text);
+  white-space: nowrap;
+}
+.dpartial-bar .dpartial-actions { display: flex; gap: 5px; }
+/* Until something is selected the line buttons would be no-ops — dim them so the hunk
+   buttons are the obvious first move. */
+.dpartial-bar:not(.active) .dpartial-actions { opacity: 0.4; }
+.dpartial-bar.active { color: var(--gold-accent); }
+.dpartial-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.dpartial-btn:hover {
+  color: var(--gold-accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel));
+}
+.dpartial-btn.danger:hover {
+  color: #ffd9d9;
+  border-color: var(--crusader-red);
+  background: color-mix(in srgb, var(--crusader-red) 24%, var(--bg-panel));
+}
+.diff-notice.untracked-hint { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
 /* Commit panel */
 .commit-panel {
   position: relative;            /* anchor for the collapse/expand buttons */
@@ -696,6 +821,38 @@
   flex: 1;
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+/* Amend toggle — sits between the message fields and the commit button. */
+.commit-amend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.commit-amend input { cursor: pointer; accent-color: var(--crusader-red); }
+.commit-amend:hover { color: var(--gold-accent); }
+
+.commit-amend-note {
+  display: none;
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+}
+.commit-amend-note.visible { display: block; }
+.commit-amend-note.warn {
+  border-left-color: var(--crusader-red);
+  color: var(--gold-accent);
 }
 
 .commit-btn {

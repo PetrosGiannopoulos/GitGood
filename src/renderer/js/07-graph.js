@@ -1255,6 +1255,10 @@ function showRefContextMenu(refType, refName, x, y) {
     if (!isCurrent) {
       items.push({ label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutBranch(refName) });
       items.push({ label: `Merge ${refName} into current (smart)`, icon: '⚒', action: () => showSmartMergeDialog(refName) });
+      items.push({ label: `Rebase current onto ${refName}`, icon: '⚔', action: () => showRebaseDialog(refName) });
+      items.push({ label: `Interactive rebase onto ${refName}…`, icon: '☰', action: () => showInteractiveRebaseDialog(refName) });
+    } else {
+      items.push({ label: 'Interactive rebase…', icon: '☰', action: () => promptInteractiveRebaseTarget() });
     }
     items.push({ label: 'Rename branch…', icon: '✎', action: () => showRenameBranchDialog(refName) });
     items.push('sep');
@@ -1266,6 +1270,7 @@ function showRefContextMenu(refType, refName, x, y) {
     showContextMenu([
       { label: `Checkout as local "${local}"`, icon: '⑂', action: () => checkoutRemoteBranch(refName, local) },
       { label: `Merge ${refName} into current (smart)`, icon: '⚒', action: () => showSmartMergeDialog(refName) },
+      { label: `Rebase current onto ${refName}`, icon: '⚔', action: () => showRebaseDialog(refName) },
       'sep',
       { label: 'Copy ref name', icon: '⎘', action: () => copyText(refName, 'Copied') },
       { label: 'Delete remote branch', icon: '✗', danger: true, action: () => deleteRemoteBranch(refName) }

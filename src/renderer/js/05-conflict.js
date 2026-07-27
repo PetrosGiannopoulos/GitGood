@@ -40,6 +40,16 @@ function renderConflictBanner() {
   const continueBtn = $('#conflict-banner-continue');
   continueBtn.disabled = remaining > 0;
   continueBtn.title = remaining > 0 ? 'Resolve all conflicts first' : 'Continue the ' + op;
+
+  // Skip only exists for rebase and cherry-pick — merge and revert have no --skip.
+  const skipBtn = $('#conflict-banner-skip');
+  if (skipBtn) {
+    const skippable = op === 'rebase' || op === 'cherry-pick';
+    skipBtn.hidden = !skippable;
+    skipBtn.title = op === 'rebase'
+      ? 'Drop the commit being replayed and move on to the next one'
+      : 'Drop this cherry-pick and move on';
+  }
 }
 
 // Wire up the banner buttons once
@@ -62,6 +72,22 @@ function renderConflictBanner() {
     if (!sure) return;
     const r = await withLoading('Continuing ' + op, () => gs.operationContinue());
     if (handleResult(r, `Continued ${op}`)) await refreshAll();
+  };
+
+  const skipBtn = $('#conflict-banner-skip');
+  if (skipBtn) skipBtn.onclick = async () => {
+    const op = state.conflicts.operation || 'operation';
+    const sure = await modal.confirm({
+      title: 'Skip This Commit',
+      message: op === 'rebase'
+        ? 'Drop the commit currently being replayed and continue with the next one?\n\nIts changes will not appear in the rebased history. This is the right move when the commit\'s changes are already present on the target branch.'
+        : 'Drop this cherry-pick and continue?\n\nIts changes will not be applied.',
+      danger: true,
+      confirmText: 'Skip Commit'
+    });
+    if (!sure) return;
+    const r = await withLoading('Skipping', () => gs.operationSkip());
+    if (handleResult(r, 'Commit skipped')) await refreshAll();
   };
 
   const abortBtn = $('#conflict-banner-abort');
@@ -873,6 +899,13 @@ function renderFileList(container, files, staged) {
       if (allUnstaged) items.push({ label: `Stash (${selectedPaths.length})`, icon: '⚿', action: () => showStashMenu({ paths: selectedPaths }) });
       if (allUnstaged) items.push({ label: `Discard (${selectedPaths.length})`, icon: '✕', danger: true, action: () => discardFiles(selectedPaths) });
       items.push({ label: `Add to .gitignore (${selectedPaths.length})`, icon: '⊘', action: () => addPathsToGitignore(selectedPaths) });
+      // Blame and history are single-file questions — only offer them when exactly one
+      // file is in play, and not for untracked files (git has no history for those yet).
+      if (selectedPaths.length === 1 && f.status !== 'untracked') {
+        items.push('sep');
+        items.push({ label: 'Blame…', icon: '⚔', action: () => openBlame(f.path) });
+        items.push({ label: 'File history…', icon: '⌛', action: () => openFileHistory(f.path) });
+      }
       if (items.length) items.push('sep');
       items.push({ label: 'Copy path' + (selectedPaths.length > 1 ? 's' : ''), icon: '⎘', action: () => {
         copyText(selectedPaths.join('\n'), `Copied ${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'}`);
@@ -991,15 +1024,20 @@ async function selectFile(path, staged) {
   }
 
   if (!result.data || !result.data.trim()) {
-    // Untracked file — show its raw content
-    if (!staged) {
+    // Untracked file — show its raw content. This fallback is deliberately limited to
+    // files git doesn't know about: an empty diff for a *tracked* file means there is
+    // simply nothing left to show (e.g. every hunk was just staged), and dumping the
+    // whole file as additions there would be actively misleading.
+    const untracked = !staged && !!(state.status && (state.status.not_added || []).includes(path));
+    if (untracked) {
       const fileResult = await gs.fileContent(path);
       if (fileResult.ok && fileResult.data !== null) {
         const lines = (fileResult.data || '').split('\n');
         const html = lines.map((l, i) =>
           `<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${i + 1}</div><div class="diff-text">+${escapeHtml(l)}</div></div>`
         ).join('');
-        $('#diff-content').innerHTML = html || '<div class="empty-state"><p>Empty file.</p></div>';
+        $('#diff-content').innerHTML =
+          (html ? untrackedHintHtml(path) + html : '<div class="empty-state"><p>Empty file.</p></div>');
         return;
       }
     }
@@ -1007,8 +1045,38 @@ async function selectFile(path, staged) {
     return;
   }
 
-  $('#diff-content').innerHTML = renderDiff(result.data);
+  // stageable turns on the per-hunk buttons and per-line selection. It only applies in
+  // the Changes tab, where a diff maps to a real working-tree file we can patch.
+  $('#diff-content').innerHTML = renderDiff(result.data, {
+    stageable: true,
+    filePath: path,
+    staged
+  });
+  updatePartialBar();
 }
+
+// Untracked files have no diff for git to split into hunks. Offer the one-click fix:
+// `git add -N` registers the path so it starts producing a normal diff, after which
+// partial staging works on it like any other file.
+function untrackedHintHtml(path) {
+  return `<div class="diff-notice untracked-hint">` +
+    `⚔ This file is untracked, so git has no hunks to stage from it yet. ` +
+    `<button class="dhunk-btn" data-intent-to-add="${escapeHtml(path)}">Enable partial staging</button>` +
+  `</div>`;
+}
+
+// "Enable partial staging" on the untracked hint above.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-intent-to-add]');
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const path = btn.dataset.intentToAdd;
+  const r = await withLoading('Preparing file', () => gs.intentToAdd([path]));
+  if (!r.ok) { showToast(r.error || 'Could not prepare the file', 'error', 6000); return; }
+  await refreshStatus();
+  await selectFile(path, false);
+});
 
 // ============================================
 // STATUS BAR
