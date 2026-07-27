@@ -704,8 +704,29 @@ $('#btn-fetch').onclick = async () => {
   const r = await withLoading('Fetching', () => gs.fetch());
   if (handleResult(r, 'Fetched from remote')) {
     await refreshAll();
+    refreshRemoteTags();
   }
 };
+
+// The remote a push should target: "origin" if it exists, else the first configured one.
+function preferredRemote() {
+  const list = state.remotes || [];
+  return ((list.find(r => r.name === 'origin') || list[0] || {}).name) || null;
+}
+
+// Ask the remote which tags it has, so the graph can mark the ones that only exist locally.
+// There is no local record of this — fetched tags land in the same refs/tags namespace as
+// your own — so it takes a network round trip, and we only make it off the back of a fetch
+// the user already asked for. Until it succeeds `state.remoteTags` stays null and no tag is
+// marked either way, because "unknown" and "unpublished" are not the same thing.
+async function refreshRemoteTags() {
+  if (!state.repo || !(state.remotes || []).length) return;
+  const r = await gs.remoteTags();
+  if (!r.ok) return;                     // offline or no access — leave the state unknown
+  state.remoteTags = new Set(r.data.tags.map(t => t.name));
+  state.remoteTagsRemote = r.data.remote;
+  if (state.currentTab === 'graph' && (state.graph.commits || []).length) renderGraph();
+}
 
 $('#btn-pull').onclick = async () => {
   closeSyncMenu();
@@ -726,9 +747,16 @@ $('#btn-push').onclick = async () => {
   await doPush();
 };
 
+const _btnPushTags = $('#btn-push-tags');
+if (_btnPushTags) _btnPushTags.onclick = async () => {
+  closeSyncMenu();
+  await doPush(true);
+};
+
 // Push with full handling for: no remote configured, a remote not named "origin",
-// and a branch with no upstream set.
-async function doPush() {
+// and a branch with no upstream set. `withTags` adds --follow-tags, which carries the
+// annotated tags reachable from these commits (lightweight tags need pushTag instead).
+async function doPush(withTags) {
   const remotes = state.remotes || [];
   const branch = (state.status && state.status.current) || null;
 
@@ -740,12 +768,11 @@ async function doPush() {
   }
 
   // Re-read remotes (may have just been added). Prefer "origin", else the first remote.
-  const list = state.remotes || [];
-  const remoteName = (list.find(r => r.name === 'origin') || list[0] || {}).name;
+  const remoteName = preferredRemote();
   if (!remoteName) { showToast('No remote configured to push to.', 'error', 6000); return; }
 
   // 2) Try a normal push first.
-  let r = await withLoading('Pushing', () => gs.push());
+  let r = await withLoading('Pushing', () => gs.push(withTags ? { followTags: true } : undefined));
 
   // 3) No upstream → offer to push and set upstream to the chosen remote.
   if (!r.ok && /no upstream|has no upstream branch|set-upstream|no configured push destination/i.test(r.error || '')) {
@@ -755,8 +782,12 @@ async function doPush() {
       confirmText: 'Push & Set Upstream'
     });
     if (!confirmed) return;
-    r = await withLoading('Pushing', () => gs.push({ setUpstream: true, remote: remoteName, branch }));
-    if (handleResult(r, `Pushed and set upstream to ${remoteName}/${branch}`)) await refreshAll();
+    r = await withLoading('Pushing',
+      () => gs.push({ setUpstream: true, remote: remoteName, branch, followTags: !!withTags }));
+    if (handleResult(r, `Pushed and set upstream to ${remoteName}/${branch}`)) {
+      await refreshAll();
+      if (withTags) refreshRemoteTags();
+    }
     return;
   }
 
@@ -771,7 +802,10 @@ async function doPush() {
     return;
   }
 
-  if (handleResult(r, 'Pushed to remote')) await refreshAll();
+  if (handleResult(r, withTags ? 'Pushed commits and tags' : 'Pushed to remote')) {
+    await refreshAll();
+    if (withTags) refreshRemoteTags();
+  }
 }
 
 // Prompt for a new remote (name + URL). Returns true if one was added.
@@ -1051,6 +1085,8 @@ $('#btn-close-repo').onclick = async () => {
   state.status = null;
   state.selectedCommit = null;
   state.selectedFile = null;
+  state.remoteTags = null;          // belongs to the repo we just closed
+  state.remoteTagsRemote = null;
   clearCommitCache();
   state.collapsedCommits = null;
   state.graphCollapsed = false;

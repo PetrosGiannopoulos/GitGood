@@ -134,6 +134,32 @@ GitGood is a fully functional **Electron** desktop Git client wrapped in a medie
 - View, copy URL, open in browser, and remove remotes
 - Push / pull / fetch with ahead/behind badge indicators
 
+### Tags
+- Create lightweight or annotated tags from any commit, with an optional **"push after creating"**
+- **Push a tag** from its right-click menu. If the remote already has that name on a different
+  commit you're told so plainly and offered a force push, rather than a bare "rejected"
+- **Push with Tags** in the Sync menu (`--follow-tags`) carries the annotated tags on the
+  commits you're pushing. Lightweight tags are git's exception — it never sends those, so
+  push them individually
+- **Delete a tag on the remote**, and when you delete a published tag locally GitGood offers
+  to finish the job — otherwise it reappears on your next fetch
+- Tags the remote doesn't have are drawn with a dashed pill and an `↑`. The marker only appears
+  after a fetch has actually asked the remote what it has: unmarked means "not checked yet",
+  not "published"
+
+### Submodules
+- Submodule rows are marked in the Changes list, so a moved pointer doesn't read as an edited file
+- Selecting one shows **what actually changed** — which way the pointer moved, by how many
+  commits, and the list of commits that move brings in or drops — instead of a diff of two raw SHAs
+- Uncommitted work **inside** a submodule is surfaced, with a note that committing out here
+  records only the pointer
+- Line-level staging is (correctly) not offered on a submodule; **Stage pointer**, **Restore
+  recorded commit** and **Open submodule** are
+- **Submodules…** in the command palette lists every submodule, including ones that were never
+  initialized — those appear nowhere else — with per-row Update and an Update All
+- Discarding a submodule now really restores the recorded commit. `git checkout -- <submodule>`
+  only rewrites the outer index, so this used to report success and change nothing
+
 ### Search, Disk & Quality of Life
 - **Search / filter** the graph and history (matches message, author, email, or hash; supports multiple AND terms)
 - **Disk management** sidebar — async repository size scan (only when you ask, never blocking)

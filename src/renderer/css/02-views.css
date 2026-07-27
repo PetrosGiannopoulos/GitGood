@@ -1148,6 +1148,19 @@
   color: color-mix(in srgb, var(--gold-accent) 40%, var(--bone-white));
 }
 .ref-pill.tag::before { content: '✠ '; }
+
+/* A tag that exists only locally. Shown only once a fetch has actually asked the remote
+   what it has (state.remoteTags) — an unmarked pill means "not checked", not "published". */
+.ref-pill.tag.unpublished {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--gold-accent) 12%, var(--bg-panel));
+}
+.ref-pill.tag.unpublished::after {
+  content: '↑';
+  margin-left: 4px;
+  opacity: 0.75;
+  font-weight: 700;
+}
 .ref-pill.head-only {
   background: color-mix(in srgb, var(--accent) 26%, var(--bg-panel));
   border-color: var(--accent);

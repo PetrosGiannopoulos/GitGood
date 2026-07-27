@@ -570,7 +570,13 @@ function renderGraph() {
     if (!shown.length) return '';
     let refPills = '';
     for (const { ref: r, label } of shown) {
-      if (r.type === 'tag') refPills += `<span class="ref-pill tag" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
+      if (r.type === 'tag') {
+        // state.remoteTags is null until a fetch has actually asked the remote what it has,
+        // and an unmarked pill is the honest rendering of "we don't know yet".
+        const unpub = state.remoteTags && !state.remoteTags.has(r.name);
+        const tip = unpub ? ` title="Not pushed to ${escapeHtml(state.remoteTagsRemote || 'the remote')}"` : '';
+        refPills += `<span class="ref-pill tag${unpub ? ' unpublished' : ''}" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}"${tip}>${escapeHtml(label)}</span>`;
+      }
       else if (r.type === 'local') {
         const headCls = r.isHead ? ' head' : '';
         refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(label)}</span>`;
@@ -1276,12 +1282,23 @@ function showRefContextMenu(refType, refName, x, y) {
       { label: 'Delete remote branch', icon: '✗', danger: true, action: () => deleteRemoteBranch(refName) }
     ], x, y);
   } else if (refType === 'tag') {
-    showContextMenu([
+    const remote = preferredRemote();
+    const items = [
       { label: `Checkout ${refName}`, icon: '⑂', action: () => checkoutCommit(refName) },
-      { label: 'Copy tag name', icon: '⎘', action: () => copyText(refName, 'Copied') },
-      'sep',
-      { label: 'Delete tag', icon: '✗', danger: true, action: () => doDeleteTag(refName) }
-    ], x, y);
+      { label: 'Copy tag name', icon: '⎘', action: () => copyText(refName, 'Copied') }
+    ];
+    // Without a remote there is nowhere to publish to, so those entries would only mislead.
+    if (remote) {
+      items.push('sep');
+      items.push({ label: `Push tag to ${remote}`, icon: '↑', action: () => doPushTag(refName) });
+    }
+    items.push('sep');
+    items.push({ label: 'Delete tag', icon: '✗', danger: true, action: () => doDeleteTag(refName) });
+    if (remote) {
+      items.push({ label: `Delete tag on ${remote}`, icon: '✗', danger: true,
+                   action: () => doDeleteRemoteTag(refName) });
+    }
+    showContextMenu(items, x, y);
   }
 }
 
@@ -1307,15 +1324,92 @@ async function doDeleteTag(tagName) {
   });
   if (!confirmed) return;
   const r = await gs.rawCommand(['tag', '-d', tagName]);
-  if (handleResult(r, 'Tag deleted')) await refreshAll();
+  if (!handleResult(r, 'Tag deleted')) return;
+  await refreshAll();
+
+  // A local delete leaves the tag on the server, so it comes back on the next fetch — the
+  // classic "deleted tag won't die" surprise. Offer the remote half, but only when we
+  // actually know the remote has it; the context menu covers the case where we don't.
+  const remote = preferredRemote();
+  if (remote && state.remoteTags && state.remoteTags.has(tagName)) {
+    const alsoRemote = await modal.confirm({
+      title: 'Delete on Remote Too?',
+      message: `"${tagName}" also exists on ${remote}. Delete it there as well?\n\n`
+             + `If you leave it, the tag will reappear the next time you fetch.`,
+      danger: true, confirmText: `Delete on ${remote}`
+    });
+    if (alsoRemote) await doDeleteRemoteTag(tagName, true);
+  }
+}
+
+// Publish one tag. Lightweight tags never travel with a branch push, so this is the only
+// way most tags reach the remote at all.
+async function doPushTag(tagName) {
+  const remote = preferredRemote();
+  if (!remote) { showToast('No remote configured to push to.', 'error', 6000); return; }
+
+  let r = await withLoading(`Pushing ${tagName}`, () => gs.pushTag({ tag: tagName, remote }));
+
+  if (!r.ok) {
+    if (!/already has a tag named/i.test(r.error || '')) {
+      showToast(r.error || 'Push failed', 'error', 7000);
+      return;
+    }
+    // The remote has this name on a different commit. Only a force push can move it, and
+    // that rewrites what everyone else already fetched — so it is opt-in and spelled out.
+    const force = await modal.confirm({
+      title: 'Tag Already on Remote',
+      message: `${remote} already has "${tagName}", pointing at a different commit.\n\n`
+             + `Force-push to move it? Anyone who already fetched the old tag keeps it until they prune.`,
+      danger: true, confirmText: 'Force Push Tag'
+    });
+    if (!force) return;
+    r = await withLoading(`Force-pushing ${tagName}`, () => gs.pushTag({ tag: tagName, remote, force: true }));
+    if (!r.ok) { showToast(r.error || 'Force push failed', 'error', 7000); return; }
+    showToast(`Tag ${tagName} force-pushed to ${remote}`, 'success');
+  } else {
+    showToast(r.data.result === 'up-to-date'
+      ? `${remote} already has ${tagName}`
+      : `Tag ${tagName} pushed to ${remote}`, 'success');
+  }
+
+  // Only refine a set we already have. Seeding it from a single push would imply every
+  // other tag is unpublished, which we have no basis for.
+  if (state.remoteTags) {
+    state.remoteTags.add(tagName);
+    if (state.currentTab === 'graph') renderGraph();
+  }
+}
+
+async function doDeleteRemoteTag(tagName, skipConfirm) {
+  const remote = preferredRemote();
+  if (!remote) { showToast('No remote configured.', 'error', 6000); return; }
+  if (!skipConfirm) {
+    const ok = await modal.confirm({
+      title: 'Delete Remote Tag',
+      message: `Delete tag "${tagName}" on ${remote}?\n\nThe local tag stays. Anyone who already fetched it keeps their copy.`,
+      danger: true, confirmText: `Delete on ${remote}`
+    });
+    if (!ok) return;
+  }
+  const r = await withLoading('Deleting remote tag', () => gs.deleteRemoteTag({ tag: tagName, remote }));
+  if (!r.ok) { showToast(r.error || 'Delete failed', 'error', 7000); return; }
+  showToast(`Deleted ${tagName} on ${remote}`, 'success');
+  if (state.remoteTags) {
+    state.remoteTags.delete(tagName);
+    if (state.currentTab === 'graph') renderGraph();
+  }
 }
 
 function showCreateTagDialog(hash) {
+  const remote = preferredRemote();
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="modal-text">Tag commit <code class="text-mono text-red">${escapeHtml(hash.slice(0,7))}</code></p>
     <div class="modal-field"><label>Tag Name</label><input class="modal-input" id="new-tag-name" placeholder="v1.0.0" /></div>
     <div class="modal-field"><label>Message (optional, creates annotated tag)</label><input class="modal-input" id="new-tag-msg" placeholder="Release notes…" /></div>
+    ${remote ? `<label class="modal-checkbox"><input type="checkbox" id="new-tag-push" />
+      Push to ${escapeHtml(remote)} after creating (a tag is not shared until it is pushed)</label>` : ''}
   `;
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
@@ -1325,13 +1419,16 @@ function showCreateTagDialog(hash) {
   createBtn.onclick = async () => {
     const name = $('#new-tag-name').value.trim();
     const msg = $('#new-tag-msg').value.trim();
+    const push = !!(body.querySelector('#new-tag-push') || {}).checked;
     if (!name) { showToast('Tag name required', 'error'); return; }
     modal.hide();
     const args = ['tag'];
     if (msg) args.push('-a', name, '-m', msg, hash);
     else args.push(name, hash);
     const r = await gs.rawCommand(args);
-    if (handleResult(r, `Tag ${name} forged`)) await refreshAll();
+    if (!handleResult(r, `Tag ${name} forged`)) return;
+    await refreshAll();
+    if (push) await doPushTag(name);
   };
   modal.show({ title: 'Create Tag', body, footer: [cancelBtn, createBtn] });
 }

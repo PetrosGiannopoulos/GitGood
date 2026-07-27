@@ -60,6 +60,19 @@ const api = {
   pull: () => ipcRenderer.invoke('repo:pull'),
   fetch: () => ipcRenderer.invoke('repo:fetch'),
 
+  // Submodules. A gitlink is one commit hash in the index, so the useful information
+  // (which way it moved, over which commits) has to be read from inside the submodule.
+  submodules: () => ipcRenderer.invoke('repo:submodules'),
+  submoduleSummary: (opts) => ipcRenderer.invoke('repo:submoduleSummary', opts),
+  submoduleUpdate: (opts) => ipcRenderer.invoke('repo:submoduleUpdate', opts),
+
+  // Tags. Creation/deletion still go through rawCommand from the graph; these are the
+  // remote half — a tag is not shared until it is pushed as its own refspec.
+  tags: () => ipcRenderer.invoke('repo:tags'),
+  remoteTags: (remote) => ipcRenderer.invoke('repo:remoteTags', remote),
+  pushTag: (opts) => ipcRenderer.invoke('repo:pushTag', opts),
+  deleteRemoteTag: (opts) => ipcRenderer.invoke('repo:deleteRemoteTag', opts),
+
   // Branches
   checkout: (b) => ipcRenderer.invoke('repo:checkout', b),
   createBranch: (opts) => ipcRenderer.invoke('repo:createBranch', opts),

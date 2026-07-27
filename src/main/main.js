@@ -455,7 +455,15 @@ ipcMain.handle('repo:status', wrap(async () => {
     } catch (e) { /* leave ahead/behind as the original 0/0 */ }
   }
 
-  return { ...status, detached, headHash, ahead, behind, upstreamMissing };
+  // Which of these paths are submodules. The renderer needs it on every status refresh to
+  // tell a gitlink row from an ordinary modified file, and it costs one stat() in the
+  // (overwhelmingly common) case of a repo with no submodules at all.
+  let submodulePaths = [];
+  try {
+    submodulePaths = (await submodulePathList()).map(s => s.path);
+  } catch (e) { /* never let this break a status refresh */ }
+
+  return { ...status, detached, headHash, ahead, behind, upstreamMissing, submodulePaths };
 }));
 
 ipcMain.handle('repo:branches', wrap(async () => {
@@ -804,9 +812,19 @@ ipcMain.handle('repo:discard', wrap(async (_, files) => {
   const tracked = fileList.filter(f => !untrackedSet.has(f));
   const untracked = fileList.filter(f => untrackedSet.has(f));
 
-  // For tracked files: restore from HEAD (or use checkout for older git)
-  if (tracked.length) {
-    await g.checkout(['--', ...tracked]);
+  // For tracked files: restore from HEAD (or use checkout for older git). Submodules need
+  // a second step — `git checkout -- <submodule>` rewrites the outer index entry but leaves
+  // the submodule checked out wherever it was, so the change silently survives a "discard".
+  // Checking it out from inside is what actually restores the recorded commit.
+  const subSet = new Set((await submodulePathList()).map(s => s.path));
+  const trackedSubs = tracked.filter(f => subSet.has(f));
+  const trackedPlain = tracked.filter(f => !subSet.has(f));
+  if (trackedPlain.length) {
+    await g.checkout(['--', ...trackedPlain]);
+  }
+  for (const sp of trackedSubs) {
+    await g.checkout(['--', sp]);
+    await g.raw(['submodule', 'update', '--init', '--', sp]);
   }
   // For untracked files: physically delete them from disk, then prune any parent
   // directories they leave empty (see pruneEmptyDirs). We collect the parents first and
@@ -878,6 +896,9 @@ ipcMain.handle('repo:push', wrap(async (_, opts) => {
   // unlike a bare --force. Needed after a squash that rewrote already-pushed commits.
   if (opts && opts.force) args.push('--force-with-lease');
   if (opts && opts.setUpstream) args.push('-u');
+  // --follow-tags carries annotated tags reachable from what we're pushing. It ignores
+  // lightweight tags by design, so repo:pushTag still exists for those.
+  if (opts && opts.followTags) args.push('--follow-tags');
   if (opts && opts.remote) args.push(opts.remote);
   if (opts && opts.branch) args.push(opts.branch);
   try {
@@ -4270,6 +4291,361 @@ ipcMain.handle('repo:fileBlob', wrap(async (_, { rev, path: filePath }) => {
     bytes: buf.length,
     dataUri: `data:${mime};base64,${buf.toString('base64')}`
   };
+}));
+
+// ============================================
+// SUBMODULES
+// ============================================
+// A submodule is a "gitlink": a mode-160000 index entry holding one commit hash. Left to
+// itself the app treated it as an ordinary modified file, which produces a diff of two raw
+// 40-character SHAs and no way to see what actually moved. Worse, line-level discard on a
+// gitlink reported success while changing nothing — `git apply -R` cannot check out a
+// commit inside a submodule, but it exits 0 anyway.
+
+function gitmodulesFile() {
+  return path.join(currentRepoPath, '.gitmodules');
+}
+
+// The configured submodule paths. Gated on .gitmodules existing so a repo without
+// submodules pays nothing but one stat() call.
+async function submodulePathList() {
+  if (!currentRepoPath || !fs.existsSync(gitmodulesFile())) return [];
+  const g = ensureGit();
+  try {
+    // --get-regexp exits 1 when nothing matches, which simple-git turns into a throw.
+    const raw = await g.raw(['config', '-f', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$']);
+    return String(raw || '').split('\n').filter(Boolean).map(line => {
+      const sp = line.indexOf(' ');
+      return { key: line.slice(0, sp), path: line.slice(sp + 1).trim() };
+    }).filter(e => e.path);
+  } catch (e) {
+    return [];
+  }
+}
+
+// "<prefix><sha1> <path> (<describe>)" — prefix is '-' uninitialised, '+' checked out at a
+// different commit than the index records, 'U' merge conflicts, ' ' in sync.
+function parseSubmoduleStatus(raw) {
+  const out = {};
+  for (const line of String(raw || '').split('\n')) {
+    if (!line.trim()) continue;
+    const m = line.match(/^([-+U ])([0-9a-f]{7,40})\s+(.+?)(?:\s+\((.*)\))?$/);
+    if (!m) continue;
+    out[m[3]] = { state: m[1], hash: m[2], describe: m[4] || null };
+  }
+  return out;
+}
+
+const SUBMODULE_STATE_LABEL = {
+  '-': 'uninitialized', '+': 'pointer-moved', 'U': 'conflicted', ' ': 'in-sync'
+};
+
+ipcMain.handle('repo:submodules', wrap(async () => {
+  const g = ensureGit();
+  const configured = await submodulePathList();
+  if (!configured.length) return [];
+
+  const statusMap = parseSubmoduleStatus(await g.raw(['submodule', 'status']));
+
+  // Whether each submodule has uncommitted work inside it, from the outer repo in one call.
+  // porcelain=v2 carries a dedicated submodule field "S<c><m><u>": commit changed, modified
+  // content, untracked content. That distinguishes "the pointer moved" from "there are
+  // uncommitted files in there", which the v1 format conflates into a single " M" entry.
+  const insideDirty = new Set();
+  try {
+    const raw = await g.raw(['status', '--porcelain=v2']);
+    for (const line of String(raw || '').split('\n')) {
+      if (!line.startsWith('1 ')) continue;        // ordinary change; submodules aren't renames
+      const parts = line.split(' ');
+      const sub = parts[2] || '';
+      if (sub[0] !== 'S') continue;                // not a submodule
+      const subPath = parts.slice(8).join(' ').replace(/^"|"$/g, '');
+      if (sub[2] === 'M' || sub[3] === 'U') insideDirty.add(subPath);
+    }
+  } catch (e) { /* dirtiness is a nicety; the rest of the entry still stands */ }
+
+  return Promise.all(configured.map(async ({ key, path: subPath }) => {
+    const name = key.replace(/^submodule\./, '').replace(/\.path$/, '');
+    let url = null, branch = null;
+    try { url = (await g.raw(['config', '-f', '.gitmodules', `submodule.${name}.url`])).trim(); } catch (e) {}
+    try { branch = (await g.raw(['config', '-f', '.gitmodules', `submodule.${name}.branch`])).trim(); } catch (e) {}
+    const st = statusMap[subPath] || { state: '-', hash: null, describe: null };
+    return {
+      name, path: subPath, url, branch,
+      state: SUBMODULE_STATE_LABEL[st.state] || 'unknown',
+      initialized: st.state !== '-' && fs.existsSync(path.join(currentRepoPath, subPath, '.git')),
+      hash: st.hash,
+      describe: st.describe,
+      contentDirty: insideDirty.has(subPath)
+    };
+  }));
+}));
+
+// Everything needed to render one submodule's change as something a human can read: which
+// way the pointer moved, and the commits it moved across.
+ipcMain.handle('repo:submoduleSummary', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const subPath = opts && opts.path;
+  if (!subPath) throw new Error('A submodule path is required');
+  const abs = path.join(currentRepoPath, subPath);
+  const sub = (args) => makeGit(abs).raw(args);
+
+  const initialized = fs.existsSync(path.join(abs, '.git'));
+
+  // Three versions of the pointer: what HEAD committed, what the index has staged, and
+  // what the checked-out submodule is actually on.
+  const readGitlink = async (rev) => {
+    try {
+      const out = await g.raw(['ls-tree', rev, '--', subPath]);
+      const m = String(out || '').match(/^160000 commit ([0-9a-f]{40})/);
+      return m ? m[1] : null;
+    } catch (e) { return null; }
+  };
+  const headHash = await readGitlink('HEAD');
+  let indexHash = null;
+  try {
+    const out = await g.raw(['ls-files', '-s', '--', subPath]);
+    const m = String(out || '').match(/^160000 ([0-9a-f]{40})/);
+    indexHash = m ? m[1] : null;
+  } catch (e) {}
+  let workHash = null;
+  if (initialized) {
+    try { workHash = (await sub(['rev-parse', 'HEAD'])).trim(); } catch (e) {}
+  }
+
+  // Commits between two pointers, read from inside the submodule. Either end can be
+  // missing locally (the submodule was never fetched that far), which is not an error —
+  // it just means we can describe the move without listing it.
+  const commitsBetween = async (from, to) => {
+    if (!initialized || !from || !to || from === to) return { commits: [], truncated: false, unavailable: false };
+    const F = '\x1f';
+    try {
+      const raw = await sub(['log', '--no-merges', '-n', '51',
+        `--pretty=format:%H${F}%h${F}%s${F}%an${F}%aI`, `${from}..${to}`]);
+      const lines = String(raw || '').split('\n').filter(Boolean);
+      const truncated = lines.length > 50;
+      return {
+        commits: lines.slice(0, 50).map(l => {
+          const [hash, short, subject, author, date] = l.split(F);
+          return { hash, short, subject, author, date };
+        }),
+        truncated,
+        unavailable: false
+      };
+    } catch (e) {
+      return { commits: [], truncated: false, unavailable: true };
+    }
+  };
+
+  // How far apart the two pointers are, in each direction.
+  //
+  // Deliberately NOT `merge-base --is-ancestor`: that command answers entirely through its
+  // exit code, and simple-git RESOLVES rather than rejects when git exits non-zero without
+  // writing to stderr — so the answer is lost and every comparison looks true. (Same trap
+  // as `rev-parse --verify --quiet` earlier in this file.) rev-list --count puts the answer
+  // on stdout, where it can actually be read.
+  const countBetween = async (a, b) => {
+    if (!initialized || !a || !b) return null;
+    try {
+      const out = await sub(['rev-list', '--count', `${a}..${b}`]);
+      const n = parseInt(String(out || '').trim(), 10);
+      return Number.isNaN(n) ? null : n;
+    } catch (e) {
+      return null;      // one of the commits isn't in this clone
+    }
+  };
+
+  const from = indexHash || headHash;
+  const to = workHash;
+  let direction = 'unchanged';
+  let ahead = null, behind = null;
+  if (from && to && from !== to) {
+    ahead = await countBetween(from, to);    // commits this move brings in
+    behind = await countBetween(to, from);   // commits this move drops
+    if (ahead === null || behind === null) direction = 'unknown';
+    else if (ahead > 0 && behind === 0) direction = 'ahead';
+    else if (behind > 0 && ahead === 0) direction = 'behind';
+    else if (ahead > 0 && behind > 0) direction = 'diverged';
+  }
+
+  const log = direction === 'behind'
+    ? await commitsBetween(to, from)      // list what would be lost, newest first
+    : await commitsBetween(from, to);
+
+  // Uncommitted work inside the submodule is invisible from the outer repo's diff.
+  let dirtyFiles = [];
+  if (initialized) {
+    try {
+      const raw = await sub(['status', '--porcelain']);
+      dirtyFiles = String(raw || '').split('\n').filter(Boolean).slice(0, 100)
+        .map(l => ({ code: l.slice(0, 2).trim(), path: l.slice(3).trim() }));
+    } catch (e) {}
+  }
+
+  return {
+    path: subPath, initialized, headHash, indexHash, workHash,
+    direction, ahead, behind,
+    commits: log.commits, truncated: log.truncated, commitsUnavailable: log.unavailable,
+    dirtyFiles,
+    staged: !!(headHash && indexHash && headHash !== indexHash)
+  };
+}));
+
+ipcMain.handle('repo:submoduleUpdate', wrap(async (_, opts) => {
+  ensureGit();
+  const pg = makeProgressGit(currentRepoPath);
+  const args = ['submodule', 'update'];
+  if (!opts || opts.init !== false) args.push('--init');
+  if (opts && opts.recursive) args.push('--recursive');
+  // --remote moves the pointer to the branch tip instead of restoring the recorded commit;
+  // they are opposite intentions, so the caller has to ask for it explicitly.
+  if (opts && opts.remote) args.push('--remote');
+  if (opts && opts.path) args.push('--', opts.path);
+  try {
+    return await pg.raw(args);
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
+}));
+
+// ============================================
+// TAGS — PUBLISHING
+// ============================================
+// Creating and deleting tags was always local-only: a tag forged here never reached the
+// remote, and deleting one left it on the server for everyone else. Publishing a tag is a
+// separate refspec push, and `git push --follow-tags` deliberately carries only ANNOTATED
+// tags reachable from the pushed commits — so lightweight tags still need an explicit
+// push. Both paths exist below for that reason.
+//
+// Every push here goes through --porcelain. Plain `git push` writes its summary to
+// STDERR, which simple-git's raw() discards, so we could not tell "pushed" from "already
+// there". --porcelain puts a machine-readable line per ref on STDOUT with a leading flag.
+
+// Prefer "origin", else the first remote. Mirrors what the renderer's push flow picks, so
+// a tag lands on the same remote the branch did.
+async function defaultRemoteName(explicit) {
+  if (explicit) return explicit;
+  const g = ensureGit();
+  const remotes = await g.getRemotes(false);
+  if (!remotes.length) throw new Error('No remote is configured for this repository.');
+  return (remotes.find(r => r.name === 'origin') || remotes[0]).name;
+}
+
+// One line per ref: "<flag>\t<from>:<to>\t<summary>". The flag is the interesting part:
+//   ' ' fast-forward   '+' forced   '-' deleted   '*' new   '=' up to date   '!' rejected
+const PUSH_FLAG_MEANING = {
+  ' ': 'pushed', '+': 'force-pushed', '-': 'deleted', '*': 'new', '=': 'up-to-date', '!': 'rejected'
+};
+
+function parsePushPorcelain(stdout) {
+  const refs = [];
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line || /^To /.test(line) || /^Done$/.test(line)) continue;
+    const flag = line[0];
+    if (!(flag in PUSH_FLAG_MEANING)) continue;
+    const parts = line.slice(1).split('\t');
+    refs.push({
+      flag,
+      result: PUSH_FLAG_MEANING[flag],
+      refspec: (parts[0] || '').trim(),
+      summary: (parts[1] || '').trim()
+    });
+  }
+  return refs;
+}
+
+// List local tags, newest first. objecttype tells annotated ("tag") from lightweight
+// ("commit"); for an annotated tag `objectname` is the tag object, so the commit it points
+// at comes from the dereferenced `*objectname`.
+ipcMain.handle('repo:tags', wrap(async () => {
+  const g = ensureGit();
+  const F = '\x1f';
+  const raw = await g.raw(['for-each-ref', '--sort=-creatordate',
+    `--format=%(refname:short)${F}%(objecttype)${F}%(objectname)${F}%(*objectname)${F}%(creatordate:iso8601-strict)${F}%(contents:subject)`,
+    'refs/tags']);
+  return String(raw || '').split('\n').filter(Boolean).map(line => {
+    const [name, objectType, objectName, derefName, date, subject] = line.split(F);
+    return {
+      name,
+      annotated: objectType === 'tag',
+      hash: derefName || objectName,     // the commit, either way
+      tagObject: objectType === 'tag' ? objectName : null,
+      date: date || null,
+      subject: subject || ''
+    };
+  });
+}));
+
+// Which tags the remote already has. This is a network call (there is no local record of
+// remote tags — fetched tags land in the same refs/tags namespace as your own), so the
+// renderer asks for it explicitly rather than on every refresh.
+ipcMain.handle('repo:remoteTags', wrap(async (_, remote) => {
+  const g = ensureGit();
+  const name = await defaultRemoteName(remote);
+  // --refs drops the "^{}" peeled duplicates annotated tags would otherwise add.
+  const raw = await g.raw(['ls-remote', '--tags', '--refs', name]);
+  const tags = String(raw || '').split('\n').filter(Boolean).map(line => {
+    const [hash, ref] = line.split('\t');
+    return { name: (ref || '').replace(/^refs\/tags\//, ''), hash: (hash || '').trim() };
+  }).filter(t => t.name);
+  return { remote: name, tags };
+}));
+
+ipcMain.handle('repo:pushTag', wrap(async (_, opts) => {
+  ensureGit();
+  const tag = opts && opts.tag;
+  if (!tag) throw new Error('A tag name is required');
+  const remote = await defaultRemoteName(opts && opts.remote);
+  const pg = makeProgressGit(currentRepoPath);
+  const args = ['push', '--porcelain'];
+  if (opts && opts.force) args.push('--force');
+  args.push(remote, `refs/tags/${tag}`);
+  try {
+    const out = await pg.raw(args);
+    const refs = parsePushPorcelain(out);
+    const ref = refs[0] || null;
+    return { remote, tag, result: ref ? ref.result : 'pushed', summary: ref ? ref.summary : '', refs };
+  } catch (e) {
+    // The remote already has this name pointing somewhere else. Say so plainly — the
+    // renderer offers a force push from here, which is the only thing that can fix it.
+    const msg = String(e && e.message || e);
+    if (/already exists|cannot lock ref|stale info|non-fast-forward|rejected/i.test(msg)) {
+      const conflict = new Error(
+        `The remote "${remote}" already has a tag named "${tag}" pointing at a different commit.`);
+      conflict.tagConflict = true;
+      throw conflict;
+    }
+    throw e;
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
+}));
+
+ipcMain.handle('repo:deleteRemoteTag', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const tag = opts && opts.tag;
+  if (!tag) throw new Error('A tag name is required');
+  const remote = await defaultRemoteName(opts && opts.remote);
+
+  // Check the remote actually has it first. Deleting a ref that isn't there only makes git
+  // print "warning: deleting a non-existent ref" and exit 0, reporting "[deleted]" in the
+  // porcelain output — so without this we would tell the user we deleted something that
+  // was never there. Worth one extra round trip on a deliberate, destructive action.
+  const existing = await g.raw(['ls-remote', '--tags', '--refs', remote, `refs/tags/${tag}`]);
+  if (!String(existing || '').trim()) {
+    const gone = new Error(`The remote "${remote}" has no tag named "${tag}".`);
+    gone.tagMissing = true;
+    throw gone;
+  }
+
+  const pg = makeProgressGit(currentRepoPath);
+  try {
+    const out = await pg.raw(['push', '--porcelain', remote, '--delete', `refs/tags/${tag}`]);
+    const refs = parsePushPorcelain(out);
+    return { remote, tag, result: refs[0] ? refs[0].result : 'deleted', refs };
+  } finally {
+    emitOpProgress({ active: false, done: true });
+  }
 }));
 
 // Read a blob at a revision as raw bytes. simple-git decodes stdout as text, which

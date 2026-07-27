@@ -1195,7 +1195,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
 
   // Restore/track view state across re-renders (see _cfileBrowserState above). Re-insert
   // the entry so it counts as most-recently-used, then evict the oldest beyond the cap.
-  const browserKey = (panelEl.id || 'cfile') + ' ' + (opts.hash || '');
+  const browserKey = (panelEl.id || 'cfile') + '\u0000' + (opts.hash || '');
   const saved = _cfileBrowserState.get(browserKey);
   const store = saved || {};
   _cfileBrowserState.delete(browserKey);

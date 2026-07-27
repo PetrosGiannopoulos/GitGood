@@ -93,6 +93,8 @@ async function openRepoByPath(p) {
   state.graphFilter = "";
   state.historyFilter = "";
   state.detachedFrom = null;
+  state.remoteTags = null;          // the previous repo's remote tags mean nothing here
+  state.remoteTagsRemote = null;
   { const gs1 = document.getElementById('graph-search'); if (gs1) gs1.value = '';
     const hs1 = document.getElementById('history-search'); if (hs1) hs1.value = ''; }
   _diskState.loaded = false;

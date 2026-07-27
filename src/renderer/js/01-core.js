@@ -25,6 +25,11 @@ const state = {
   log: { all: [] },
   stashes: [],
   remotes: [],
+  // Tag names the remote is known to have, or null when we have never asked (see
+  // refreshRemoteTags). null and empty mean different things: null suppresses the
+  // "unpublished" marker entirely rather than claiming every tag is unpushed.
+  remoteTags: null,
+  remoteTagsRemote: null,
   selectedCommit: null,
   selectedFile: null,
   selectedFileStaged: false,

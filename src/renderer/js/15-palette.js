@@ -40,6 +40,9 @@ function paletteCommands() {
       available: hasRepo, run: () => document.getElementById('btn-close-repo').click() },
     { id: 'repo.refresh', title: 'Refresh Everything', group: 'Repository', icon: '⟳',
       available: hasRepo, run: () => refreshAll() },
+    { id: 'repo.submodules', title: 'Submodules…', group: 'Repository', icon: '⛨',
+      available: hasRepo, keywords: 'submodule gitlink init update nested',
+      run: () => showSubmodulesDialog() },
 
     // --- sync ---
     { id: 'sync.fetch', title: 'Fetch', group: 'Sync', icon: '⤓', available: hasRepo,
@@ -50,6 +53,8 @@ function paletteCommands() {
       keywords: 'rebase linear', run: () => pullRebase() },
     { id: 'sync.push', title: 'Push', group: 'Sync', icon: '↑', available: hasRepo,
       run: () => doPush() },
+    { id: 'sync.pushTags', title: 'Push with Tags', group: 'Sync', icon: '✠', available: hasRepo,
+      keywords: 'tag tags release publish follow-tags', run: () => doPush(true) },
 
     // --- changes ---
     { id: 'chg.stageAll', title: 'Stage All Changes', group: 'Changes', icon: '⇡',

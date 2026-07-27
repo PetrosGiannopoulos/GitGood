@@ -807,10 +807,18 @@ function renderFileList(container, files, staged) {
                      <button class="file-action-btn" data-action="discard" title="Discard">✕</button>`;
     }
 
+    // A submodule row looks exactly like a modified file otherwise, but "modified" means
+    // something quite different for it — the pointer moved, not the contents.
+    const isSubmodule = typeof isSubmodulePath === 'function' && isSubmodulePath(f.path);
+    if (isSubmodule) li.classList.add('is-submodule');
+
+    // The marker is its own grid cell, not part of .file-path: that cell is direction:rtl
+    // so long paths ellipsize at the start, which would drag an inline icon to the far end.
     li.innerHTML = `
       <div class="file-checkbox" title="Select"></div>
       <div class="file-status ${f.status}">${letter}</div>
-      <div class="file-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</div>
+      ${isSubmodule ? '<div class="file-submod-icon" title="Submodule">⛨</div>' : ''}
+      <div class="file-path" title="${escapeHtml(f.path)}${isSubmodule ? ' (submodule)' : ''}">${escapeHtml(f.path)}</div>
       <div class="file-actions">${actionsInner}</div>
     `;
 
@@ -1016,6 +1024,15 @@ async function selectFile(path, staged) {
 
   $('#diff-header-label').textContent = `${staged ? '⌃' : '⌄'} ${path}`;
   $('#diff-content').innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+
+  // A submodule is a single commit hash in the index, not file content. Its "diff" is two
+  // raw SHAs, and line-level staging on it is meaningless — discarding lines used to report
+  // success while changing nothing, because `git apply -R` cannot check out a commit inside
+  // a submodule. Show what actually moved instead.
+  if (typeof isSubmodulePath === 'function' && isSubmodulePath(path)) {
+    await renderSubmodulePanel(path, staged);
+    return;
+  }
 
   const wsOpts = { ignoreWhitespace: !!state.diffIgnoreWhitespace };
   const result = staged ? await gs.diffStaged(path, wsOpts) : await gs.diffUnstaged(path, wsOpts);
