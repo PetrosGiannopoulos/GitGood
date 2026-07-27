@@ -68,28 +68,43 @@ function parseUnifiedDiff(diffText) {
   const startFile = (raw) => {
     // Best-effort path from "diff --git a/X b/Y"; refined below from the +++/--- lines,
     // which each carry a single unambiguous path.
-    const m = raw.match(/ b\/(.+)$/);
+    const m = raw ? raw.match(/ b\/(.+)$/) : null;
     file = {
-      path: m ? m[1] : raw.replace('diff --git ', ''),
+      path: raw ? (m ? m[1] : raw.replace('diff --git ', '')) : '',
       pathLocked: false,
-      headerLines: [raw],
+      headerLines: raw ? [raw] : [],
       hunks: [],
       binary: false,
       isNew: false,
-      isDeleted: false
+      isDeleted: false,
+      // True when the chunk arrived without its "diff --git" line. splitDiffByFile strips
+      // that line from each per-file chunk, so commit previews feed us headerless diffs —
+      // they still have to render, they just have no filename row of their own.
+      headerless: !raw
     };
     files.push(file);
     hunk = null;
   };
+
+  // Does this line mark the start of a file's diff even though no "diff --git" preceded
+  // it? Used to recover from headerless chunks instead of swallowing them as preamble.
+  const startsHeaderlessFile = (raw) =>
+    raw.startsWith('@@') || raw.startsWith('--- ') || raw.startsWith('+++ ') ||
+    raw.startsWith('index ') || raw.startsWith('new file mode') ||
+    raw.startsWith('deleted file mode') || raw.startsWith('old mode ') ||
+    raw.startsWith('similarity index ') || raw.startsWith('rename from ') ||
+    raw.startsWith('Binary files') || raw.startsWith('GIT binary patch');
 
   for (let i = 0; i < src.length; i++) {
     const raw = src[i];
 
     if (raw.startsWith('diff --git')) { startFile(raw); continue; }
 
+    if (!file && startsHeaderlessFile(raw)) startFile(null);
+
     if (!file) {
-      // Content before the first "diff --git" — for `git show` this is the commit
-      // metadata. Keep it so callers can display it if they want to.
+      // Content before any file diff — for `git show` this is the commit metadata. Keep
+      // it so callers can display it if they want to.
       preamble.push(raw);
       continue;
     }
@@ -706,8 +721,12 @@ function renderDiffUnified(diffText, opts) {
 
   for (const file of parsed.files) {
     if (stop) break;
-    out.push(`<div class="diff-file-header">⚔ ${escapeHtml(file.path)}</div>`);
-    emitted++;
+    // A headerless chunk is a single file already named by the surrounding file list
+    // (the commit browser), so repeating the name here would only eat vertical space.
+    if (!file.headerless) {
+      out.push(`<div class="diff-file-header">⚔ ${escapeHtml(file.path)}</div>`);
+      emitted++;
+    }
     if (file.binary) {
       // Images get a real comparison instead of a "binary files differ" dead end.
       out.push(isImagePath(file.path)
@@ -834,8 +853,10 @@ function renderDiffSplit(diffText, opts) {
 
   for (const file of parsed.files) {
     if (stop) break;
-    parts.push(`<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(file.path)}</div></div>`);
-    emitted++;
+    if (!file.headerless) {
+      parts.push(`<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(file.path)}</div></div>`);
+      emitted++;
+    }
     if (file.binary) {
       parts.push(isImagePath(file.path)
         ? `<div class="dsplit-row meta">${imageDiffPlaceholderHtml(file.path, opts.imageRevs)}</div>`
