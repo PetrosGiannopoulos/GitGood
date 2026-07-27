@@ -45,7 +45,16 @@ async function openBlame(filePath, opts) {
 
   renderBlameOverlay();
   showBlameOverlay();
-  await loadBlameTab();
+  // Dispatch on the tab that was actually asked for. Always calling the blame loader
+  // would fetch blame data and then bail at its own "am I still the active tab?" guard,
+  // leaving the spinner up forever whenever the caller wanted history.
+  await loadActiveBlameTab();
+}
+
+// Load whichever tab is current. Used by openBlame and by the tab buttons, so there is
+// one place that maps blameView.tab to its loader.
+function loadActiveBlameTab() {
+  return blameView.tab === 'history' ? loadHistoryTab() : loadBlameTab();
 }
 
 function openFileHistory(filePath, opts) {
@@ -92,7 +101,7 @@ function renderBlameOverlay() {
       if (tab === blameView.tab) return;
       blameView.tab = tab;
       renderBlameOverlay();
-      if (tab === 'blame') loadBlameTab(); else loadHistoryTab();
+      loadActiveBlameTab();
     };
   });
 }
@@ -162,7 +171,7 @@ function renderBlameLines(bodyEl, data) {
       blameView.selectedHash = hash;
       blameView.tab = 'history';
       renderBlameOverlay();
-      loadHistoryTab();
+      loadActiveBlameTab();
     };
     row.oncontextmenu = (e) => {
       const hash = row.dataset.blameHash;
@@ -175,7 +184,7 @@ function renderBlameLines(bodyEl, data) {
             blameView.selectedHash = hash;
             blameView.tab = 'history';
             renderBlameOverlay();
-            loadHistoryTab();
+            loadActiveBlameTab();
           } },
         'sep',
         { label: 'Blame the parent of this commit', icon: '↩', action: () => {
@@ -185,7 +194,7 @@ function renderBlameLines(bodyEl, data) {
             blameView.blame = null;
             blameView.tab = 'blame';
             renderBlameOverlay();
-            loadBlameTab();
+            loadActiveBlameTab();
           } }
       ], e.pageX, e.pageY);
     };
@@ -256,7 +265,7 @@ async function loadHistoryTab() {
             blameView.blame = null;
             blameView.tab = 'blame';
             renderBlameOverlay();
-            loadBlameTab();
+            loadActiveBlameTab();
           } },
         'sep',
         { label: 'Restore this version to working tree', icon: '↩', action: () => {

@@ -449,8 +449,24 @@ function waitUntilIdle(maxWaitMs = 15000) {
     const NEEDED_SMOOTH_FRAMES = 4;   // require 4 consecutive smooth frames
     let smoothInARow = 0;
     let lastFrameTs = performance.now();
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      resolve();
+    };
+
+    // The deadline runs on a real timer, NOT only inside the rAF loop below. Chromium
+    // suspends requestAnimationFrame for a window that is hidden, minimized or fully
+    // occluded, so a deadline checked only inside tick() is never reached in those
+    // states — the blocking overlay would stay up forever and the app would look frozen
+    // to anyone who minimized it while a repo was opening. setTimeout keeps running.
+    const hardDeadline = setTimeout(finish, maxWaitMs);
 
     const tick = (now) => {
+      if (settled) return;
       const frameDur = now - lastFrameTs;
       lastFrameTs = now;
       if (frameDur <= SMOOTH_FRAME_MS) smoothInARow++;
@@ -460,12 +476,12 @@ function waitUntilIdle(maxWaitMs = 15000) {
       if (smoothInARow >= NEEDED_SMOOTH_FRAMES) {
         // We have a responsive thread; also yield once via setTimeout(0) so any pending
         // microtasks/promises queued by the last renders run before we hide the overlay.
-        setTimeout(resolve, 0);
+        setTimeout(finish, 0);
         return;
       }
       if (elapsed >= maxWaitMs) {
         // Safety valve: don't hold the overlay forever on pathological repos.
-        resolve();
+        finish();
         return;
       }
       requestAnimationFrame(tick);
