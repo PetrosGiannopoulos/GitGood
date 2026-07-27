@@ -106,6 +106,9 @@ async function openRepoByPath(p) {
   await withRepoOpen(`Opening “${result.data.name}”`, () => refreshAll());
   setStatus('Ready');
   showToast(`Opened "${result.data.name}"`, 'success');
+  // Start watching the working tree and the background fetch for THIS repo. Done after
+  // the initial load so the watcher can't fire a refresh into a half-built UI.
+  if (typeof startRepoWatch === 'function') startRepoWatch();
 }
 
 async function showInitDialog() {

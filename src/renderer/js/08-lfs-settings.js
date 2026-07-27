@@ -610,6 +610,23 @@ async function showSettingsDialog() {
           </div>
         </div>
         <div class="settings-row">
+          <div class="label">Watch the working tree<small>Notice edits made by a build, a script or another terminal, and refresh without waiting for window focus</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-watch-fs" ${appSettings.watchFileSystem ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="label">Background fetch<small>Quietly fetch from the remote on a timer so the ahead/behind counts stay honest. 0 disables it.</small></div>
+          <div class="control">
+            <input type="number" class="modal-input" id="set-auto-fetch-min" min="0" max="180" step="1"
+                   style="width:96px" value="${Number(appSettings.autoFetchMinutes) || 0}" />
+            <span class="text-muted" style="font-size:11px;margin-left:6px">minutes</span>
+          </div>
+        </div>
+        <div class="settings-row">
           <div class="label">Confirm destructive actions<small>Extra confirmation before discard, force-push, hard reset, etc.</small></div>
           <div class="control">
             <label class="medieval-toggle">
@@ -621,6 +638,11 @@ async function showSettingsDialog() {
       </div>
     `;
     panel.querySelector('#set-auto-focus').onchange = (e) => { appChanges.autoFetchOnFocus = e.target.checked; };
+    panel.querySelector('#set-watch-fs').onchange = (e) => { appChanges.watchFileSystem = e.target.checked; };
+    panel.querySelector('#set-auto-fetch-min').oninput = (e) => {
+      const n = parseInt(e.target.value, 10);
+      appChanges.autoFetchMinutes = isNaN(n) ? 0 : Math.max(0, Math.min(180, n));
+    };
     panel.querySelector('#set-confirm-destructive').onchange = (e) => { appChanges.confirmDestructive = e.target.checked; };
   }
 
@@ -628,6 +650,18 @@ async function showSettingsDialog() {
     const builtinCards = BUILTIN_THEMES.map(t => themeCardHtml(t, appSettings.theme)).join('');
     panel.innerHTML = `
       <div class="settings-panel-title">Appearance</div>
+      <div class="settings-group">
+        <div class="settings-group-title">Diffs</div>
+        <div class="settings-row">
+          <div class="label">Syntax highlighting<small>Colour code tokens inside diffs. Turn off for the plainest possible view.</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-diff-syntax" ${appSettings.diffSyntax !== false ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+      </div>
       <div class="settings-group">
         <div class="settings-group-title">Theme</div>
         <p class="modal-text text-muted" style="font-size:12px;margin-bottom:10px">Pick a theme. Changes apply immediately as a preview; Save to keep.</p>
@@ -674,6 +708,15 @@ async function showSettingsDialog() {
         </p>
       </div>
     `;
+    // Syntax highlighting applies live, like the theme preview, so the effect is visible
+    // while the Settings dialog is still open.
+    const synToggle = panel.querySelector('#set-diff-syntax');
+    if (synToggle) synToggle.onchange = (e) => {
+      appChanges.diffSyntax = e.target.checked;
+      if (typeof state !== 'undefined') state.diffSyntax = e.target.checked;
+      if (typeof repaintAllDiffs === 'function') repaintAllDiffs();
+    };
+
     // Theme cards: live preview on click (both built-in and Alacritty grids)
     const wireCards = () => panel.querySelectorAll('.theme-card').forEach(card => {
       card.onclick = () => {
@@ -1150,6 +1193,9 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   graphStripRemotePrefix: false,
   graphHideLocalCommits: false,
   autoFetchOnFocus: true,
+  watchFileSystem: true,
+  autoFetchMinutes: 10,
+  diffSyntax: true,
   confirmDestructive: true,
   defaultSshKeyPath: '',
   fontScale: 1.0,
@@ -1176,6 +1222,7 @@ async function applySavedAppSettings() {
         state.graphHideLocal = !!r.data.graphHideLocal;
         state.graphStripRemotePrefix = !!r.data.graphStripRemotePrefix;
         state.graphHideLocalCommits = !!r.data.graphHideLocalCommits;
+        state.diffSyntax = r.data.diffSyntax !== false;
         state.llmEnabled = !!r.data.llmAssistant;
         state.llmModel = r.data.llmModel || 'llama3.2:3b';
         state.llmEmbedModel = r.data.llmEmbedModel || 'nomic-embed-text';

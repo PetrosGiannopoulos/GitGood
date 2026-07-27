@@ -1017,7 +1017,8 @@ async function selectFile(path, staged) {
   $('#diff-header-label').textContent = `${staged ? '⌃' : '⌄'} ${path}`;
   $('#diff-content').innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
 
-  const result = staged ? await gs.diffStaged(path) : await gs.diffUnstaged(path);
+  const wsOpts = { ignoreWhitespace: !!state.diffIgnoreWhitespace };
+  const result = staged ? await gs.diffStaged(path, wsOpts) : await gs.diffUnstaged(path, wsOpts);
   if (!result.ok) {
     $('#diff-content').innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(result.error)}</p></div>`;
     return;
@@ -1030,9 +1031,26 @@ async function selectFile(path, staged) {
     // whole file as additions there would be actively misleading.
     const untracked = !staged && !!(state.status && (state.status.not_added || []).includes(path));
     if (untracked) {
+      // A brand-new image has no diff to show, but it does have a picture — which is the
+      // only thing anyone wants to see. Render it as an "added" image diff (the HEAD side
+      // simply won't exist) rather than dumping its bytes as text.
+      if (isImagePath(path)) {
+        $('#diff-content').innerHTML =
+          imageDiffPlaceholderHtml(path, { oldRev: 'HEAD', newRev: 'WORKTREE' });
+        hydrateImageDiffs($('#diff-content'));
+        return;
+      }
       const fileResult = await gs.fileContent(path);
       if (fileResult.ok && fileResult.data !== null) {
-        const lines = (fileResult.data || '').split('\n');
+        const content = fileResult.data || '';
+        // Non-image binaries would render as pages of replacement characters. A NUL byte
+        // is the same heuristic git itself uses to call a file binary.
+        if (content.indexOf('\u0000') !== -1) {
+          $('#diff-content').innerHTML =
+            '<div class="diff-notice">⚔ This is a new binary file — there is nothing textual to show.</div>';
+          return;
+        }
+        const lines = content.split('\n');
         const html = lines.map((l, i) =>
           `<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${i + 1}</div><div class="diff-text">+${escapeHtml(l)}</div></div>`
         ).join('');
@@ -1046,13 +1064,15 @@ async function selectFile(path, staged) {
   }
 
   // stageable turns on the per-hunk buttons and per-line selection. It only applies in
-  // the Changes tab, where a diff maps to a real working-tree file we can patch.
-  $('#diff-content').innerHTML = renderDiff(result.data, {
-    stageable: true,
-    filePath: path,
-    staged
-  });
-  updatePartialBar();
+  // the Changes tab, where a diff maps to a real working-tree file we can patch — and NOT
+  // while whitespace is being ignored, because a -w diff's hunks don't describe the real
+  // byte changes and `git apply` would reject (or worse, misapply) a patch built from them.
+  const canStage = !state.diffIgnoreWhitespace;
+  $('#diff-content').innerHTML =
+    (state.diffIgnoreWhitespace ? whitespaceNoticeHtml() : '') +
+    renderDiff(result.data, { stageable: canStage, filePath: path, staged });
+  if (canStage) updatePartialBar();
+  hydrateImageDiffs($('#diff-content'));
 }
 
 // Untracked files have no diff for git to split into hunks. Offer the one-click fix:

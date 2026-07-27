@@ -1822,3 +1822,163 @@
 .diff-popout-content::-webkit-scrollbar-track { background: var(--shadow-black); }
 .diff-popout-content::-webkit-scrollbar-thumb { background: var(--border-iron); border-radius: 6px; }
 .diff-popout-content::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ============================================
+   SYNTAX HIGHLIGHTING (diff content)
+   ============================================
+   Token colours are muted on purpose: the add/remove background and the word-diff wash are
+   the primary signals in a diff, and a full-saturation theme fights them. These read as
+   "structure" rather than "look at me". */
+.tk-com  { color: #6f665a; font-style: italic; }
+.tk-str  { color: #c39a6b; }
+.tk-kw   { color: #d1706f; }
+.tk-lit  { color: #c98fc0; }
+.tk-num  { color: #b0a06a; }
+.tk-typ  { color: #7fa8b8; }
+.tk-fn   { color: #d3b46a; }
+.tk-prop { color: #9fb87a; }
+.tk-var  { color: #b58ad4; }
+.tk-ann  { color: #8fa0b8; }
+
+/* Inside an add/remove line the background is already tinted, so lift the tokens slightly
+   to keep contrast without changing hue. */
+.diff-line.add .tk-com, .dsplit-side.add .tk-com,
+.diff-line.del .tk-com, .dsplit-side.del .tk-com { color: #8a8071; }
+
+/* The word-diff wash wins over token colour where they overlap: knowing WHAT changed
+   matters more than what kind of token it is. */
+.wd.tk-com, .wd.tk-str, .wd.tk-kw, .wd.tk-lit, .wd.tk-num,
+.wd.tk-typ, .wd.tk-fn, .wd.tk-prop, .wd.tk-var, .wd.tk-ann { color: inherit; }
+
+.diff-notice.ws-notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ============================================
+   IMAGE DIFF
+   ============================================ */
+.imgdiff {
+  padding: 12px;
+  background: var(--bg);
+  border-left: 3px solid var(--accent);
+  border-top: 1px solid var(--border);
+  white-space: normal;
+}
+.imgdiff-loading, .imgdiff-error {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted-text);
+  padding: 8px 0;
+}
+.imgdiff-error { color: var(--crusader-red-bright); }
+
+.imgdiff-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.imgdiff-kind {
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+.imgdiff-kind.added   { color: var(--added); border-color: var(--added); }
+.imgdiff-kind.deleted { color: var(--crusader-red-bright); border-color: var(--crusader-red); }
+.imgdiff-kind.changed { color: var(--gold-accent); border-color: var(--gold-accent); }
+.imgdiff-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.imgdiff-meta { color: var(--muted-text); margin-left: auto; }
+
+.imgdiff-modes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.imgdiff-mode {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 4px 9px;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.imgdiff-mode:hover { color: var(--gold-accent); border-color: var(--accent); }
+.imgdiff-mode.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 26%, var(--bg-panel));
+  border-color: var(--accent);
+}
+.imgdiff-slider-wrap { display: flex; align-items: center; margin-left: 6px; }
+.imgdiff-slider { width: 140px; accent-color: var(--crusader-red); cursor: pointer; }
+
+/* Side-by-side is the default: two independent panes.
+   Blend and Swipe stack them, so the "after" pane can be faded or clipped over "before". */
+.imgdiff-stage { display: grid; gap: 12px; }
+.imgdiff-stage.mode-side { grid-template-columns: 1fr 1fr; }
+.imgdiff-stage.mode-blend,
+.imgdiff-stage.mode-swipe {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  position: relative;
+}
+.imgdiff-stage.mode-blend .imgdiff-pane,
+.imgdiff-stage.mode-swipe .imgdiff-pane {
+  grid-area: 1 / 1;
+}
+/* Only the stacked modes hide the per-pane label — side by side needs both. */
+.imgdiff-stage.mode-blend .imgdiff-pane-label,
+.imgdiff-stage.mode-swipe .imgdiff-pane-label { display: none; }
+
+.imgdiff-pane { min-width: 0; }
+.imgdiff-pane-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted-text);
+  margin-bottom: 5px;
+}
+.imgdiff-pane.before .imgdiff-pane-label { color: color-mix(in srgb, var(--crusader-red) 70%, var(--muted-text)); }
+.imgdiff-pane.after  .imgdiff-pane-label { color: color-mix(in srgb, var(--added) 70%, var(--muted-text)); }
+
+.imgdiff-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  max-height: 52vh;
+  padding: 8px;
+  /* A checkerboard so transparent PNGs don't look like they have a black background. */
+  background-color: #1a1614;
+  background-image:
+    linear-gradient(45deg, rgba(255,255,255,0.035) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.035) 75%),
+    linear-gradient(45deg, rgba(255,255,255,0.035) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.035) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+  border: 1px solid var(--border);
+  overflow: auto;
+}
+.imgdiff-img {
+  max-width: 100%;
+  max-height: 48vh;
+  object-fit: contain;
+  image-rendering: pixelated;   /* sprites and icons should read crisply, not blurred */
+}
+.imgdiff-absent {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted-text);
+}
+
+@media (max-width: 900px) {
+  .imgdiff-stage.mode-side { grid-template-columns: 1fr; }
+}

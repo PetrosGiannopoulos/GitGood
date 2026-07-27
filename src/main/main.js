@@ -382,6 +382,10 @@ ipcMain.handle('repo:current', () => {
 });
 
 ipcMain.handle('repo:close', () => {
+  // Tear the watcher and the background fetch down with the repo, or they keep firing
+  // against a path the app is no longer showing.
+  try { stopRepoWatcher(); } catch (e) { /* defined later in this file; safe if absent */ }
+  try { stopAutoFetch(); } catch (e) { /* ditto */ }
   git = null;
   currentRepoPath = null;
   return { ok: true };
@@ -709,23 +713,31 @@ function parseRefs(refStr) {
   return result;
 }
 
-ipcMain.handle('repo:diff', wrap(async (_, filePath) => {
+// `-w` (--ignore-all-space) hides pure-whitespace edits. NOTE: a diff produced with it is
+// NOT applicable — its hunks no longer describe the real byte changes — so the renderer
+// disables partial staging whenever it is on.
+function wsArgs(opts) {
+  return (opts && opts.ignoreWhitespace) ? ['-w'] : [];
+}
+
+ipcMain.handle('repo:diff', wrap(async (_, filePath, opts) => {
   const g = ensureGit();
-  if (!filePath) return await g.diff();
+  const ws = wsArgs(opts);
+  if (!filePath) return await g.diff(ws);
   // Try staged first; if empty, get unstaged
-  const staged = await g.diff(['--cached', '--', filePath]);
+  const staged = await g.diff([...ws, '--cached', '--', filePath]);
   if (staged && staged.trim()) return staged;
-  return await g.diff(['--', filePath]);
+  return await g.diff([...ws, '--', filePath]);
 }));
 
-ipcMain.handle('repo:diffUnstaged', wrap(async (_, filePath) => {
+ipcMain.handle('repo:diffUnstaged', wrap(async (_, filePath, opts) => {
   const g = ensureGit();
-  return await g.diff(['--', filePath]);
+  return await g.diff([...wsArgs(opts), '--', filePath]);
 }));
 
-ipcMain.handle('repo:diffStaged', wrap(async (_, filePath) => {
+ipcMain.handle('repo:diffStaged', wrap(async (_, filePath, opts) => {
   const g = ensureGit();
-  return await g.diff(['--cached', '--', filePath]);
+  return await g.diff([...wsArgs(opts), '--cached', '--', filePath]);
 }));
 
 ipcMain.handle('repo:stage', wrap(async (_, files) => {
@@ -1548,7 +1560,7 @@ ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
   let diffTruncated = false;
   let diffBytes = 0;
   try {
-    diff = await g.show([hash]);
+    diff = await g.show([...wsArgs(opts), hash]);
     diffBytes = Buffer.byteLength(diff, 'utf8');
     if (diffBytes > maxBytes) {
       // Truncate at a line boundary
@@ -1565,14 +1577,14 @@ ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
 
 // Get the diff for a single file from a commit. Used for lazy-loading per-file
 // diffs when the full commit diff is too large to render at once.
-ipcMain.handle('repo:showCommitFileDiff', wrap(async (_, { hash, path: filePath, maxBytes }) => {
+ipcMain.handle('repo:showCommitFileDiff', wrap(async (_, { hash, path: filePath, maxBytes, ignoreWhitespace }) => {
   const g = ensureGit();
   if (!hash || !filePath) throw new Error('hash and path required');
   const cap = maxBytes || 1024 * 1024;
   let diff = '';
   let truncated = false;
   try {
-    diff = await g.show([hash, '--', filePath]);
+    diff = await g.show([...wsArgs({ ignoreWhitespace }), hash, '--', filePath]);
     if (Buffer.byteLength(diff, 'utf8') > cap) {
       const cut = diff.lastIndexOf('\n', cap);
       diff = diff.slice(0, cut > 0 ? cut : cap);
@@ -2730,6 +2742,9 @@ const DEFAULT_APP_SETTINGS = {
   graphStripRemotePrefix: false,      // show remote branches without their "<remote>/" prefix
   graphHideLocalCommits: false,       // hide commits not reachable from any remote (unpushed)
   autoFetchOnFocus: true,             // auto-refresh on window focus
+  watchFileSystem: true,              // watch the working tree and refresh when it changes
+  diffSyntax: true,                   // syntax-highlight diff content
+  autoFetchMinutes: 10,               // background fetch interval in minutes (0 = off)
   confirmDestructive: true,           // extra confirm on discard/force-push/etc.
   defaultSshKeyPath: '',              // pre-fill path for clone SSH key picker
   fontScale: 1.0,                     // UI font scale multiplier
@@ -2767,6 +2782,16 @@ ipcMain.handle('settings:getApp', wrap(async () => {
 ipcMain.handle('settings:setApp', wrap(async (_, prefs) => {
   if (!prefs || typeof prefs !== 'object') throw new Error('Invalid preferences');
   saveAppSettings(prefs);
+  // Apply watcher / auto-fetch preference changes immediately, so toggling them in
+  // Settings takes effect without reopening the repository.
+  if (currentRepoPath) {
+    if ('watchFileSystem' in prefs) {
+      try { prefs.watchFileSystem === false ? stopRepoWatcher() : startRepoWatcher(currentRepoPath); } catch (e) {}
+    }
+    if ('autoFetchMinutes' in prefs) {
+      try { restartAutoFetch(); } catch (e) {}
+    }
+  }
   return getAppSettings();
 }));
 
@@ -3845,10 +3870,425 @@ ipcMain.handle('repo:fileHistory', wrap(async (_, { path: filePath, limit, follo
 
 // The diff one commit made to one file — used by the file-history view so clicking a
 // commit shows just that file's change rather than the whole commit.
-ipcMain.handle('repo:fileDiffAtCommit', wrap(async (_, { hash, path: filePath }) => {
+ipcMain.handle('repo:fileDiffAtCommit', wrap(async (_, { hash, path: filePath, ignoreWhitespace }) => {
   const g = ensureGit();
   if (!hash || !filePath) throw new Error('A commit and a file path are required');
   // `<hash>^!` means "this commit against its first parent", and still works for a root
   // commit (where it degenerates to the full tree).
-  return await g.raw(['show', '--format=', '--patch', `${hash}^!`, '--', filePath]);
+  return await g.raw(['show', '--format=', '--patch', ...wsArgs({ ignoreWhitespace }), `${hash}^!`, '--', filePath]);
 }));
+
+// ============================================
+// REFLOG / UNDO
+// ============================================
+// The reflog is git's record of every value HEAD has held, which makes it the app's undo
+// stack: entry N is the state HEAD was left in by operation N, so restoring entry 1 undoes
+// the most recent operation. Everything the UI needs to *act* on an entry already exists
+// (reset / branch), so these handlers only have to read and classify.
+
+// Turn a reflog subject ("commit (amend): fix typo", "reset: moving to HEAD~1") into a
+// coarse operation type plus a human-readable detail. The type drives the icon and colour
+// in the panel; the detail is what the user reads.
+function classifyReflogSubject(gs) {
+  const s = String(gs || '');
+  const after = (prefix) => s.slice(prefix.length).trim();
+
+  if (s.startsWith('commit (amend):')) return { type: 'amend', detail: after('commit (amend):') };
+  if (s.startsWith('commit (initial):')) return { type: 'commit', detail: after('commit (initial):') };
+  if (s.startsWith('commit (merge):')) return { type: 'merge', detail: after('commit (merge):') };
+  if (s.startsWith('commit (cherry-pick):')) return { type: 'cherry-pick', detail: after('commit (cherry-pick):') };
+  if (s.startsWith('commit:')) return { type: 'commit', detail: after('commit:') };
+  if (s.startsWith('reset:')) return { type: 'reset', detail: after('reset:') };
+  if (s.startsWith('checkout:')) return { type: 'checkout', detail: after('checkout:') };
+  if (s.startsWith('clone:')) return { type: 'clone', detail: after('clone:') };
+  if (s.startsWith('pull')) return { type: 'pull', detail: s };
+  if (s.startsWith('merge ')) return { type: 'merge', detail: s };
+  if (s.startsWith('revert:')) return { type: 'revert', detail: after('revert:') };
+  if (s.startsWith('cherry-pick')) return { type: 'cherry-pick', detail: s };
+  // Rebase entries come in many shapes: "rebase (start)", "rebase -i (pick)",
+  // "rebase (finish): returning to refs/heads/main", "rebase (squash)"…
+  if (/^rebase\b/.test(s)) return { type: 'rebase', detail: s };
+  if (/^branch:/.test(s)) return { type: 'branch', detail: after('branch:') };
+  if (/^Branch:/.test(s)) return { type: 'branch', detail: after('Branch:') };
+  if (/^stash|^applying stash|^WIP on/i.test(s)) return { type: 'stash', detail: s };
+  return { type: 'other', detail: s || '(unknown)' };
+}
+
+// HEAD's reflog, newest first. The ordinal is the array position, which is exactly the N
+// in HEAD@{N} because `git log -g` walks the entries in order — we don't try to parse it
+// out of %gd, since --date=iso replaces the index with a timestamp there.
+ipcMain.handle('repo:reflog', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const limit = Math.max(1, Math.min(1000, (opts && opts.limit) || 200));
+
+  const SEP = '\x1f';
+  let raw = '';
+  try {
+    raw = await g.raw([
+      'log', '-g', '--date=iso',
+      `--pretty=format:%H${SEP}%gd${SEP}%gs${SEP}%gn${SEP}%s%x1e`,
+      `-n`, String(limit)
+    ]);
+  } catch (e) {
+    // A repo with no commits yet has no reflog at all.
+    return { entries: [], current: null, headHash: null };
+  }
+
+  const entries = (raw || '').split(/\x1e\r?\n?/).map(s => s.trim()).filter(Boolean).map((line, i) => {
+    const [hash, selector, gs, who, subject] = line.split(SEP);
+    const { type, detail } = classifyReflogSubject(gs);
+    // %gd under --date=iso looks like "HEAD@{2026-07-27 17:56:09 +0300}".
+    const m = /@\{(.+)\}$/.exec(selector || '');
+    const date = m ? m[1] : '';
+    return {
+      ordinal: i,
+      selector: `HEAD@{${i}}`,
+      hash,
+      short: (hash || '').slice(0, 7),
+      date,
+      raw: gs || '',
+      type,
+      detail,
+      who: who || '',
+      subject: subject || ''
+    };
+  });
+
+  const status = await g.status();
+  let headHash = null;
+  try { headHash = (await g.revparse(['HEAD'])).trim(); } catch (e) {}
+
+  return {
+    entries,
+    current: status.current || null,
+    detached: !!status.detached,
+    headHash,
+    dirty: (status.files || []).length > 0
+  };
+}));
+
+// Move the current branch to a commit from the reflog. This is a reset, so it is the one
+// genuinely destructive action in the panel — hence the optional backup branch, stamped at
+// the current HEAD before anything moves, using the same naming scheme as squash so both
+// features leave recognisable escape hatches.
+ipcMain.handle('repo:reflogRestore', wrap(async (_, { hash, mode, backup }) => {
+  const g = ensureGit();
+  if (!hash) throw new Error('A commit to restore to is required');
+  const resetMode = ['hard', 'mixed', 'soft'].includes(mode) ? mode : 'hard';
+
+  // Refuse mid-operation: resetting during a rebase or merge leaves a mess that is much
+  // harder to explain than the error.
+  const inProgress =
+    fs.existsSync(path.join(currentRepoPath, 'MERGE_HEAD')) ||
+    fs.existsSync(path.join(currentRepoPath, '.git', 'MERGE_HEAD')) ||
+    fs.existsSync(path.join(currentRepoPath, '.git', 'CHERRY_PICK_HEAD')) ||
+    fs.existsSync(path.join(currentRepoPath, '.git', 'REVERT_HEAD')) ||
+    fs.existsSync(path.join(currentRepoPath, '.git', 'rebase-merge')) ||
+    fs.existsSync(path.join(currentRepoPath, '.git', 'rebase-apply'));
+  if (inProgress) {
+    throw new Error('An operation (merge, rebase, cherry-pick or revert) is in progress. Finish or abort it before restoring from the reflog.');
+  }
+
+  const status = await g.status();
+  let backupRef = null;
+  if (backup) {
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+    const safeBranch = (status.current || 'detached').replace(/[^A-Za-z0-9._-]/g, '-');
+    backupRef = `gitgood-backup/${safeBranch}/${stamp}`;
+    await g.raw(['branch', backupRef, 'HEAD']);
+  }
+
+  await g.raw(['reset', `--${resetMode}`, hash]);
+  let newHead = null;
+  try { newHead = (await g.revparse(['HEAD'])).trim(); } catch (e) {}
+  return { restored: true, mode: resetMode, backupRef, newHead };
+}));
+
+// ============================================
+// WORKING-TREE WATCHER
+// ============================================
+// Until now the app only refreshed when the window regained focus, so edits made by a
+// build, a script, or another terminal stayed invisible until you alt-tabbed. That got
+// more costly with partial staging, where people sit inside the diff pane for minutes and
+// a stale diff makes `git apply` reject their hunks.
+//
+// One recursive fs.watch covers the working tree. Most of the work here is deciding what
+// to IGNORE: .git/objects churns on every operation, .git/logs churns on every ref update,
+// and node_modules can be enormous — watching those produces a storm of useless events.
+
+let _watcher = null;
+let _watcherRepo = null;
+let _watchDebounce = null;
+let _watchPending = { worktree: false, gitDir: false };
+let _watcherDisabled = false;   // set after an unrecoverable watch error (e.g. inotify limits)
+
+// Directory names never worth watching. `.git` is handled separately — some paths inside
+// it matter a great deal (HEAD, refs, index) and others are pure noise.
+const WATCH_IGNORE_DIRS = new Set([
+  'node_modules', '.gitgood-tmp', 'dist', 'build', 'out', 'target',
+  '.next', '.nuxt', '.turbo', '.cache', '.gradle', '.idea', '.vs', '__pycache__',
+  // Unity-shaped repos live under this project's parent folder; these are generated and
+  // change constantly during an editor session.
+  'Library', 'Temp', 'Obj', 'Logs'
+]);
+
+// Inside .git, only these tell us something the UI cares about: which branch we're on,
+// where refs point, what's staged, and whether an operation is mid-flight.
+function gitDirPathMatters(rel) {
+  const p = rel.replace(/\\/g, '/');
+  if (p === '.git' || p === '.git/') return false;
+  if (/^\.git\/(objects|logs|lfs|modules|hooks|info|filter-repo)\//.test(p)) return false;
+  if (/^\.git\/(COMMIT_EDITMSG|index\.lock|\S*\.lock)$/.test(p)) return false;
+  return /^\.git\/(HEAD|ORIG_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|index|packed-refs)$/.test(p)
+      || /^\.git\/refs\//.test(p)
+      || /^\.git\/(rebase-merge|rebase-apply)(\/|$)/.test(p);
+}
+
+function shouldIgnoreWatchPath(rel) {
+  if (!rel) return true;
+  const p = rel.replace(/\\/g, '/');
+  if (p.startsWith('.git/') || p === '.git') return !gitDirPathMatters(p);
+  // Any ignored directory anywhere in the path.
+  for (const seg of p.split('/')) {
+    if (WATCH_IGNORE_DIRS.has(seg)) return true;
+  }
+  // Editor scratch files that appear and vanish.
+  if (/(^|\/)(\.#|~\$)/.test(p)) return true;
+  if (/\.(swp|swx|tmp|temp|partial)$/i.test(p)) return true;
+  if (/(^|\/)4913$/.test(p)) return true;   // vim's atomic-write probe file
+  return false;
+}
+
+function emitFsChanged(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('repo:fsChanged', payload);
+  }
+}
+
+function stopRepoWatcher() {
+  if (_watcher) {
+    try { _watcher.close(); } catch (e) { /* already gone */ }
+  }
+  _watcher = null;
+  _watcherRepo = null;
+  clearTimeout(_watchDebounce);
+  _watchDebounce = null;
+  _watchPending = { worktree: false, gitDir: false };
+}
+
+function startRepoWatcher(repoPath) {
+  stopRepoWatcher();
+  if (_watcherDisabled || !repoPath) return;
+  const prefs = getAppSettings();
+  if (prefs.watchFileSystem === false) return;
+
+  try {
+    // recursive:true is supported on Windows and macOS, and on Linux from Node 20 (which
+    // is what Electron 31 ships). If the platform refuses, we fall back below.
+    _watcher = fs.watch(repoPath, { recursive: true, persistent: false }, (eventType, filename) => {
+      if (!filename) return;
+      const rel = String(filename).replace(/\\/g, '/');
+      if (shouldIgnoreWatchPath(rel)) return;
+      if (rel.startsWith('.git/')) _watchPending.gitDir = true;
+      else _watchPending.worktree = true;
+      scheduleWatchFlush();
+    });
+  } catch (err) {
+    // Common causes: inotify watch limit on Linux, or recursive watching unavailable.
+    // Fall back to watching just the repo root and .git (non-recursive) so branch
+    // switches and top-level edits are still noticed, and never retry the recursive form.
+    try {
+      _watcher = fs.watch(repoPath, { persistent: false }, (eventType, filename) => {
+        const rel = String(filename || '').replace(/\\/g, '/');
+        if (shouldIgnoreWatchPath(rel)) return;
+        _watchPending.worktree = true;
+        scheduleWatchFlush();
+      });
+    } catch (err2) {
+      _watcherDisabled = true;
+      emitFsChanged({ unavailable: true, error: err2.message || String(err2) });
+      return;
+    }
+  }
+
+  if (_watcher) {
+    _watcher.on('error', (err) => {
+      // A watcher that has errored is not coming back; stop rather than leak events.
+      _watcherDisabled = true;
+      stopRepoWatcher();
+      emitFsChanged({ unavailable: true, error: err.message || String(err) });
+    });
+  }
+  _watcherRepo = repoPath;
+}
+
+// Coalesce a burst of events into one notification. Builds and checkouts touch hundreds of
+// files; the renderer only needs to know that *something* changed.
+function scheduleWatchFlush() {
+  if (_watchDebounce) return;
+  _watchDebounce = setTimeout(() => {
+    _watchDebounce = null;
+    const payload = { worktree: _watchPending.worktree, gitDir: _watchPending.gitDir };
+    _watchPending = { worktree: false, gitDir: false };
+    if (payload.worktree || payload.gitDir) emitFsChanged(payload);
+  }, 500);
+}
+
+// ============================================
+// PERIODIC AUTO-FETCH
+// ============================================
+// A quiet background `git fetch` so the ahead/behind counts mean something without the
+// user having to remember to fetch. Deliberately silent: no progress bar, no toast on
+// success, and it gives up for the session after repeated failures rather than retrying a
+// broken remote (or a credential prompt) every few minutes.
+let _autoFetchTimer = null;
+let _autoFetchFailures = 0;
+let _autoFetchSuspended = false;
+const AUTO_FETCH_MAX_FAILURES = 2;
+
+function stopAutoFetch() {
+  if (_autoFetchTimer) clearInterval(_autoFetchTimer);
+  _autoFetchTimer = null;
+}
+
+function restartAutoFetch() {
+  stopAutoFetch();
+  _autoFetchSuspended = false;
+  _autoFetchFailures = 0;
+  const prefs = getAppSettings();
+  const minutes = Number(prefs.autoFetchMinutes);
+  if (!minutes || minutes <= 0) return;
+  const ms = Math.max(1, Math.min(180, minutes)) * 60 * 1000;
+  _autoFetchTimer = setInterval(runAutoFetch, ms);
+}
+
+async function runAutoFetch() {
+  if (_autoFetchSuspended || !git || !currentRepoPath) return;
+
+  // Never fetch in the middle of an operation — the user is mid-conflict and a fetch
+  // moving remote refs underneath them is at best confusing.
+  const gitDir = path.join(currentRepoPath, '.git');
+  const midOperation = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']
+    .some(f => fs.existsSync(path.join(gitDir, f)));
+  if (midOperation) return;
+
+  try {
+    const remotes = await git.getRemotes(false);
+    if (!remotes || !remotes.length) return;   // nothing to fetch from
+  } catch (e) { return; }
+
+  try {
+    // A plain instance with prompting disabled: no progress events, so the status-bar
+    // widget stays quiet for a fetch the user didn't ask for.
+    const qg = simpleGit(currentRepoPath).env(
+      Object.assign({}, rebaseSafeEnv(), { GIT_TERMINAL_PROMPT: '0' })
+    );
+    await qg.raw(['fetch', '--all', '--prune', '--tags']);
+    _autoFetchFailures = 0;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('repo:autoFetched', { at: Date.now() });
+    }
+  } catch (err) {
+    _autoFetchFailures++;
+    if (_autoFetchFailures >= AUTO_FETCH_MAX_FAILURES) {
+      _autoFetchSuspended = true;
+      stopAutoFetch();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('repo:autoFetched', {
+          suspended: true,
+          error: err.message || String(err)
+        });
+      }
+    }
+  }
+}
+
+// Repo lifecycle hooks. repo:open / repo:init / repo:clone all end up switching
+// currentRepoPath, so the renderer calls this once the repo is actually open.
+ipcMain.handle('repo:startWatching', wrap(async () => {
+  if (!currentRepoPath) return { watching: false };
+  startRepoWatcher(currentRepoPath);
+  restartAutoFetch();
+  const prefs = getAppSettings();
+  return {
+    watching: !!_watcher,
+    watcherDisabled: _watcherDisabled,
+    autoFetchMinutes: Number(prefs.autoFetchMinutes) || 0
+  };
+}));
+
+ipcMain.handle('repo:stopWatching', wrap(async () => {
+  stopRepoWatcher();
+  stopAutoFetch();
+  return { stopped: true };
+}));
+
+// ============================================
+// FILE BLOBS (image diff)
+// ============================================
+// Binary files previously showed only "Binary files ... differ". For images that's a
+// wasted opportunity, so the renderer asks for both sides as data URIs and shows them.
+// `rev` null/'WORKTREE' means the file on disk; anything else is resolved as <rev>:<path>.
+const IMAGE_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', webp: 'image/webp', ico: 'image/x-icon', svg: 'image/svg+xml',
+  avif: 'image/avif'
+};
+
+// Cap what we're willing to inline. A data URI is ~33% larger than the bytes, and this
+// crosses the IPC boundary as a string, so a huge asset would stall the renderer.
+const MAX_BLOB_BYTES = 12 * 1024 * 1024;
+
+ipcMain.handle('repo:fileBlob', wrap(async (_, { rev, path: filePath }) => {
+  const g = ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+  const ext = (filePath.split('.').pop() || '').toLowerCase();
+  const mime = IMAGE_MIME[ext] || 'application/octet-stream';
+
+  let buf = null;
+  if (!rev || rev === 'WORKTREE') {
+    const abs = path.join(currentRepoPath, filePath);
+    if (!fs.existsSync(abs)) return { exists: false };
+    const stat = fs.statSync(abs);
+    if (stat.size > MAX_BLOB_BYTES) return { exists: true, tooLarge: true, bytes: stat.size, mime };
+    buf = fs.readFileSync(abs);
+  } else {
+    // `git show <rev>:<path>` writes raw bytes; simple-git hands back a string, so go
+    // through a binary-safe spawn instead of letting it decode as UTF-8 and corrupt them.
+    try {
+      buf = await gitShowBinary(rev, filePath);
+    } catch (e) {
+      return { exists: false };   // the file didn't exist at that revision
+    }
+    if (!buf) return { exists: false };
+    if (buf.length > MAX_BLOB_BYTES) return { exists: true, tooLarge: true, bytes: buf.length, mime };
+  }
+
+  return {
+    exists: true,
+    mime,
+    bytes: buf.length,
+    dataUri: `data:${mime};base64,${buf.toString('base64')}`
+  };
+}));
+
+// Read a blob at a revision as raw bytes. simple-git decodes stdout as text, which
+// mangles binary content, so this spawns git directly and collects Buffers.
+function gitShowBinary(rev, filePath) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const proc = spawn('git', ['show', `${rev}:${filePath}`], {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' })
+    });
+    const chunks = [];
+    let err = '';
+    proc.stdout.on('data', d => chunks.push(d));
+    proc.stderr.on('data', d => { err += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(err.trim() || `git show exited ${code}`));
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}

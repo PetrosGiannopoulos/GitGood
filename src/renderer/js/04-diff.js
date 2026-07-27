@@ -27,9 +27,11 @@ let _historyDetailDiff = null;
 function diffModeToggleHtml() {
   const u = state.diffMode === 'split' ? '' : ' active';
   const s = state.diffMode === 'split' ? ' active' : '';
+  const w = state.diffIgnoreWhitespace ? ' active' : '';
   return `<span class="diff-view-toggle">` +
     `<button class="diff-view-btn${u}" data-diffmode="unified" title="Unified view">☰ Unified</button>` +
     `<button class="diff-view-btn${s}" data-diffmode="split" title="Side-by-side view">◫ Split</button>` +
+    `<button class="diff-view-btn${w}" data-diffws="1" title="Ignore whitespace-only changes (partial staging is unavailable while this is on)">⇥ Whitespace</button>` +
     `<button class="diff-view-btn diff-popout-btn" data-diffpopout="1" title="Pop the diff out into a large window">⤢ Pop Out</button>` +
   `</span>`;
 }
@@ -168,25 +170,47 @@ function parsedDiffLineCount(parsed) {
 // When a removed line is paired with an added line, highlighting only the tokens that
 // actually changed makes the edit readable at a glance instead of forcing a character
 // hunt across two near-identical lines.
+//
+// This produces CHARACTER RANGES rather than HTML, because syntax highlighting needs to
+// mark the same text at the same time. Both range sets are merged in renderCodeLine, so a
+// changed keyword can be both "keyword" and "changed" without either wrapper losing out.
 
-// Split into word-ish tokens: identifiers, whitespace runs, and single symbols. Keeping
-// whitespace as its own token means indentation changes show up rather than being
-// silently folded into the neighbouring word.
+// Split into word-ish tokens, keeping each token's offset. Whitespace is its own token so
+// indentation changes show up instead of being folded into the neighbouring word.
 function tokenizeForWordDiff(s) {
-  return s.match(/[A-Za-z0-9_$]+|\s+|[^\sA-Za-z0-9_$]/g) || [];
+  const re = /[A-Za-z0-9_$]+|\s+|[^\sA-Za-z0-9_$]/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    out.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  return out;
 }
 
-// Above this many tokens on either side we skip the pairwise LCS and fall back to
-// marking the whole changed span — the cost isn't worth it on machine-generated lines.
+// Above this many tokens on either side we skip the pairwise LCS and fall back to marking
+// the whole changed span — the cost isn't worth it on machine-generated lines.
 const WORD_DIFF_MAX_TOKENS = 200;
 const WORD_DIFF_LCS_MAX = 60;
-// Lines that share less than this fraction of their tokens are treated as unrelated
-// rewrites; marking every token would be pure noise, so we mark nothing.
+// Lines sharing less than this fraction of their tokens are treated as unrelated rewrites;
+// marking every token would be pure noise, so we mark nothing.
 const WORD_DIFF_MIN_SIMILARITY = 0.25;
 
-// Compare two lines and return { oldHtml, newHtml } with changed runs wrapped in
-// <span class="wd">, or null when word-level highlighting shouldn't apply.
-function wordDiffPair(oldText, newText) {
+// Merge touching/overlapping ranges so the renderer emits one span per run.
+function mergeRanges(ranges) {
+  if (!ranges.length) return ranges;
+  ranges.sort((a, b) => a[0] - b[0]);
+  const out = [ranges[0].slice()];
+  for (let i = 1; i < ranges.length; i++) {
+    const last = out[out.length - 1];
+    if (ranges[i][0] <= last[1]) last[1] = Math.max(last[1], ranges[i][1]);
+    else out.push(ranges[i].slice());
+  }
+  return out;
+}
+
+// Compare two lines and return { oldRanges, newRanges } of changed character spans, or
+// null when intra-line highlighting shouldn't apply at all.
+function wordDiffRanges(oldText, newText) {
   if (oldText === newText) return null;
   const a = tokenizeForWordDiff(oldText);
   const b = tokenizeForWordDiff(newText);
@@ -196,15 +220,14 @@ function wordDiffPair(oldText, newText) {
   // Trim the common head and tail first. For a typical edit this leaves a tiny middle,
   // which is what keeps the LCS below affordable.
   let head = 0;
-  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  while (head < a.length && head < b.length && a[head].text === b[head].text) head++;
   let tail = 0;
   while (tail < a.length - head && tail < b.length - head &&
-         a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+         a[a.length - 1 - tail].text === b[b.length - 1 - tail].text) tail++;
 
   const aMid = a.slice(head, a.length - tail);
   const bMid = b.slice(head, b.length - tail);
 
-  // Nothing common at all → unrelated lines; let the +/- colouring speak for itself.
   const commonTokens = head + tail;
   const maxLen = Math.max(a.length, b.length);
   if (commonTokens / maxLen < WORD_DIFF_MIN_SIMILARITY) return null;
@@ -219,28 +242,18 @@ function wordDiffPair(oldText, newText) {
     aMarks = aMid.map(() => true);
     bMarks = bMid.map(() => true);
   } else {
-    const aligned = lcsMarks(aMid, bMid);
+    const aligned = lcsMarks(aMid.map(t => t.text), bMid.map(t => t.text));
     aMarks = aligned.aMarks;
     bMarks = aligned.bMarks;
   }
 
-  const build = (tokens, mid, marks) => {
-    const out = [];
-    for (let i = 0; i < head; i++) out.push(escapeHtml(tokens[i]));
-    let run = [];
-    const flush = () => {
-      if (run.length) { out.push(`<span class="wd">${escapeHtml(run.join(''))}</span>`); run = []; }
-    };
-    for (let i = 0; i < mid.length; i++) {
-      if (marks[i]) run.push(mid[i]);
-      else { flush(); out.push(escapeHtml(mid[i])); }
-    }
-    flush();
-    for (let i = tokens.length - tail; i < tokens.length; i++) out.push(escapeHtml(tokens[i]));
-    return out.join('');
+  const toRanges = (mid, marks) => {
+    const r = [];
+    for (let i = 0; i < mid.length; i++) if (marks[i]) r.push([mid[i].start, mid[i].end]);
+    return mergeRanges(r);
   };
 
-  return { oldHtml: build(a, aMid, aMarks), newHtml: build(b, bMid, bMarks) };
+  return { oldRanges: toRanges(aMid, aMarks), newRanges: toRanges(bMid, bMarks) };
 }
 
 // Classic LCS table over two short token arrays. Returns a boolean per token saying
@@ -267,17 +280,222 @@ function lcsMarks(a, b) {
   return { aMarks, bMarks };
 }
 
-// Given a run of consecutive removed lines and added lines inside one hunk, decide which
-// pairs should get intra-line highlighting and precompute the HTML for them. Pairing is
-// positional (the k-th removal with the k-th addition), which is what a reader expects
-// for an edited block and what the split view already does structurally.
+// Pair a run of removed lines with a run of added lines inside one hunk. Pairing is
+// positional (the k-th removal with the k-th addition), which is what a reader expects for
+// an edited block and what the split view already does structurally.
 function computeWordDiffs(delLines, addLines) {
   const n = Math.min(delLines.length, addLines.length);
   const pairs = new Array(n);
   for (let k = 0; k < n; k++) {
-    pairs[k] = wordDiffPair(delLines[k].text, addLines[k].text);
+    pairs[k] = wordDiffRanges(delLines[k].text, addLines[k].text);
   }
   return pairs;
+}
+
+// ============================================
+// SYNTAX HIGHLIGHTING
+// ============================================
+// Self-contained on purpose: the renderer has no bundler and no network, so pulling in a
+// highlighting library isn't an option. This is a single-pass, per-line lexer — good enough
+// to make code readable, and deliberately not a parser. Being line-local means a block
+// comment's interior lines aren't dimmed (a diff shows discontiguous lines, so carrying
+// state across them would be wrong as often as it was right).
+
+// Longest extension match wins, so ".d.ts" style suffixes resolve sensibly.
+const SYNTAX_LANG_BY_EXT = {
+  js: 'clike', mjs: 'clike', cjs: 'clike', jsx: 'clike', ts: 'clike', tsx: 'clike',
+  c: 'clike', h: 'clike', cpp: 'clike', cc: 'clike', cxx: 'clike', hpp: 'clike',
+  cs: 'clike', java: 'clike', go: 'clike', rs: 'clike', swift: 'clike', kt: 'clike',
+  kts: 'clike', scala: 'clike', php: 'clike', m: 'clike', mm: 'clike', dart: 'clike',
+  glsl: 'clike', hlsl: 'clike', shader: 'clike', cginc: 'clike', compute: 'clike',
+  py: 'python', pyw: 'python',
+  sh: 'shell', bash: 'shell', zsh: 'shell', fish: 'shell', ps1: 'shell',
+  css: 'css', scss: 'css', sass: 'css', less: 'css',
+  html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup', vue: 'markup', xaml: 'markup',
+  json: 'json', jsonc: 'json',
+  yml: 'yaml', yaml: 'yaml', toml: 'yaml', ini: 'yaml', cfg: 'yaml',
+  md: 'markdown', markdown: 'markdown',
+  sql: 'sql'
+};
+
+function detectLanguage(filePath) {
+  if (!filePath) return null;
+  const base = String(filePath).split('/').pop().toLowerCase();
+  const ext = base.includes('.') ? base.split('.').pop() : '';
+  return SYNTAX_LANG_BY_EXT[ext] || null;
+}
+
+const CLIKE_KEYWORDS = 'abstract|as|async|await|base|break|case|catch|class|const|constexpr|continue|def|default|defer|delegate|delete|do|dynamic|elif|else|enum|event|explicit|export|extends|extern|final|finally|fn|for|foreach|friend|from|func|function|get|go|goto|if|impl|implements|import|in|inline|instanceof|interface|internal|is|lateinit|let|lock|loop|match|mod|module|mut|mutable|namespace|new|noexcept|object|operator|out|override|package|params|private|protected|pub|public|range|readonly|record|ref|register|return|sealed|select|set|sizeof|stackalloc|static|struct|super|switch|synchronized|template|throw|throws|trait|transient|try|type|typedef|typename|typeof|union|unsafe|use|using|var|virtual|void|volatile|when|where|while|with|yield';
+const CLIKE_TYPES = 'bool|boolean|byte|char|decimal|double|float|int|int8|int16|int32|int64|long|sbyte|short|signed|size_t|string|uint|uint8|uint16|uint32|uint64|ulong|unsigned|ushort|usize|isize|str|String|Vec|Option|Result|List|Dictionary|Map|Set|Array|Task|Promise|number|any|unknown|never|object|symbol|bigint|Vector2|Vector3|Vector4|Quaternion|GameObject|Transform|MonoBehaviour';
+const CLIKE_LITERALS = 'true|false|null|nullptr|undefined|NaN|Infinity|this|self|nil|None|True|False|base';
+
+const PY_KEYWORDS = 'and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield|match|case';
+const SHELL_KEYWORDS = 'if|then|elif|else|fi|for|while|until|do|done|case|esac|function|return|in|select|time|coproc|local|export|readonly|declare|typeset|unset|shift|source|alias|trap|set|echo|exit|cd';
+const SQL_KEYWORDS = 'add|all|alter|and|as|asc|begin|between|by|case|cast|check|column|commit|constraint|create|cross|database|default|delete|desc|distinct|drop|else|end|exists|foreign|from|full|group|having|if|in|index|inner|insert|into|is|join|key|left|like|limit|not|null|offset|on|or|order|outer|primary|references|right|rollback|select|set|table|then|transaction|truncate|union|unique|update|values|view|when|where|with';
+
+// Each language is one ordered alternation. Order matters: comments and strings come first
+// so a keyword inside a string is never highlighted as a keyword.
+const SYNTAX_PATTERNS = {
+  clike: [
+    ['com', /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/],
+    ['str', /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`/],
+    ['ann', /@[A-Za-z_]\w*|#\s*(?:include|define|ifdef|ifndef|endif|pragma|if|else|elif|undef|region|endregion)\b/],
+    ['num', /\b0[xXbBoO][0-9a-fA-F_]+\b|\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?[fFdDlLuUmM]?\b/],
+    ['lit', new RegExp('\\b(?:' + CLIKE_LITERALS + ')\\b')],
+    ['kw', new RegExp('\\b(?:' + CLIKE_KEYWORDS + ')\\b')],
+    ['typ', new RegExp('\\b(?:' + CLIKE_TYPES + ')\\b')],
+    ['fn', /\b[A-Za-z_$][\w$]*(?=\s*\()/],
+    ['typ', /\b[A-Z][A-Za-z0-9_]*\b/]
+  ],
+  python: [
+    ['com', /#[^\n]*/],
+    ['str', /[fFrRbBuU]{0,2}(?:"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')/],
+    ['ann', /@[A-Za-z_][\w.]*/],
+    ['num', /\b0[xXbBoO][0-9a-fA-F_]+\b|\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?j?\b/],
+    ['lit', /\b(?:True|False|None|self|cls)\b/],
+    ['kw', new RegExp('\\b(?:' + PY_KEYWORDS + ')\\b')],
+    ['fn', /\b[A-Za-z_]\w*(?=\s*\()/],
+    ['typ', /\b(?:int|float|str|bool|bytes|list|dict|tuple|set|frozenset|object|type)\b|\b[A-Z][A-Za-z0-9_]*\b/]
+  ],
+  shell: [
+    ['com', /#[^\n]*/],
+    ['str', /"(?:\\[\s\S]|[^"\\])*"|'[^']*'/],
+    ['var', /\$\{[^}]*\}|\$[A-Za-z_]\w*|\$[0-9@*#?$!-]/],
+    ['num', /\b\d+\b/],
+    ['kw', new RegExp('\\b(?:' + SHELL_KEYWORDS + ')\\b')],
+    ['ann', /(?:^|\s)-{1,2}[A-Za-z][\w-]*/]
+  ],
+  css: [
+    ['com', /\/\*[\s\S]*?(?:\*\/|$)/],
+    ['str', /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/],
+    ['ann', /@[\w-]+/],
+    ['lit', /#[0-9a-fA-F]{3,8}\b/],
+    ['num', /\b\d*\.?\d+(?:px|em|rem|%|vh|vw|vmin|vmax|s|ms|deg|fr|pt|ch|ex)?\b/],
+    ['prop', /[-a-zA-Z]+(?=\s*:)/],
+    ['fn', /\b[a-zA-Z-]+(?=\()/],
+    ['typ', /[.#][-\w]+|::?[-\w]+/]
+  ],
+  markup: [
+    ['com', /<!--[\s\S]*?(?:-->|$)/],
+    ['str', /"(?:[^"]*)"|'(?:[^']*)'/],
+    ['kw', /<\/?[A-Za-z][\w:.-]*|\/?>/],
+    ['prop', /\b[A-Za-z_:][\w:.-]*(?==)/],
+    ['ann', /&[a-zA-Z#]\w*;/]
+  ],
+  json: [
+    ['prop', /"(?:\\[\s\S]|[^"\\])*"(?=\s*:)/],
+    ['str', /"(?:\\[\s\S]|[^"\\])*"/],
+    ['num', /-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/],
+    ['lit', /\b(?:true|false|null)\b/]
+  ],
+  yaml: [
+    ['com', /#[^\n]*/],
+    ['str', /"(?:\\[\s\S]|[^"\\])*"|'[^']*'/],
+    ['prop', /^\s*-?\s*[\w.$-]+(?=\s*:)|^\s*\[[\w.$-]+\]/],
+    ['num', /\b-?\d+(?:\.\d+)?\b/],
+    ['lit', /\b(?:true|false|null|yes|no|on|off|~)\b/],
+    ['ann', /^\s*-\s/]
+  ],
+  markdown: [
+    ['kw', /^#{1,6}\s.*$/],
+    ['str', /`[^`]*`|```.*$/],
+    ['ann', /^\s*(?:[-*+]|\d+\.)\s|^\s*>\s?/],
+    ['fn', /\[[^\]]*\]\([^)]*\)/],
+    ['lit', /\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_/]
+  ],
+  sql: [
+    ['com', /--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/],
+    ['str', /'(?:''|[^'])*'|"(?:[^"])*"/],
+    ['num', /\b\d+(?:\.\d+)?\b/],
+    ['kw', new RegExp('\\b(?:' + SQL_KEYWORDS + ')\\b', 'i')],
+    ['fn', /\b[A-Za-z_]\w*(?=\s*\()/]
+  ]
+};
+
+// One combined regex per language, built lazily and cached. Group N+1 corresponds to
+// pattern N, so the matching class is found by asking which group is defined.
+const _syntaxRegexCache = new Map();
+function syntaxRegexFor(lang) {
+  if (_syntaxRegexCache.has(lang)) return _syntaxRegexCache.get(lang);
+  const patterns = SYNTAX_PATTERNS[lang];
+  if (!patterns) { _syntaxRegexCache.set(lang, null); return null; }
+  // `i` is only wanted where the language declares it (SQL); combining is simpler if we
+  // apply it uniformly to languages whose patterns are all case-insensitive-safe.
+  const anyInsensitive = patterns.some(([, re]) => re.flags.includes('i'));
+  const source = patterns.map(([, re]) => '(' + re.source + ')').join('|');
+  const combined = { re: new RegExp(source, 'gm' + (anyInsensitive ? 'i' : '')), classes: patterns.map(p => p[0]) };
+  _syntaxRegexCache.set(lang, combined);
+  return combined;
+}
+
+// Lines longer than this skip highlighting: minified bundles and data blobs are where the
+// regex cost blows up, and they're unreadable either way.
+const SYNTAX_MAX_LINE = 400;
+
+// Token ranges for one line: [[start, end, className], ...], non-overlapping, in order.
+function syntaxRanges(text, lang) {
+  const combined = syntaxRegexFor(lang);
+  if (!combined || !text || text.length > SYNTAX_MAX_LINE) return [];
+  const out = [];
+  const re = combined.re;
+  re.lastIndex = 0;
+  let m;
+  let guard = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (guard++ > 500) break;                 // pathological line; stop tokenizing
+    if (m[0] === '') { re.lastIndex++; continue; }
+    // Which alternative matched?
+    let cls = null;
+    for (let i = 1; i < m.length; i++) {
+      if (m[i] !== undefined) { cls = combined.classes[i - 1]; break; }
+    }
+    if (cls) out.push([m.index, m.index + m[0].length, 'tk-' + cls]);
+  }
+  return out;
+}
+
+// ============================================
+// CODE LINE RENDERING
+// ============================================
+// The one place where syntax tokens and word-diff ranges are combined. Both are expressed
+// as character ranges over the same text, so we walk the line once and emit a span per run
+// of characters that share the same (syntax class, changed) pair. That's what lets a
+// changed keyword be styled as both, instead of one wrapper clobbering the other.
+function renderCodeLine(text, changedRanges, lang) {
+  const n = text.length;
+  if (!n) return '';
+  const useSyntax = lang && state.diffSyntax !== false;
+  const syn = useSyntax ? syntaxRanges(text, lang) : [];
+  const hasChanged = changedRanges && changedRanges.length;
+
+  // Fast path: nothing to mark at all.
+  if (!syn.length && !hasChanged) return escapeHtml(text);
+
+  const cls = new Array(n).fill('');
+  for (const [s, e, c] of syn) {
+    for (let i = Math.max(0, s); i < Math.min(e, n); i++) cls[i] = c;
+  }
+  const chg = new Array(n).fill(false);
+  if (hasChanged) {
+    for (const [s, e] of changedRanges) {
+      for (let i = Math.max(0, s); i < Math.min(e, n); i++) chg[i] = true;
+    }
+  }
+
+  let out = '';
+  let i = 0;
+  while (i < n) {
+    const c = cls[i], k = chg[i];
+    let j = i + 1;
+    while (j < n && cls[j] === c && chg[j] === k) j++;
+    const seg = escapeHtml(text.slice(i, j));
+    if (c && k) out += `<span class="${c} wd">${seg}</span>`;
+    else if (c) out += `<span class="${c}">${seg}</span>`;
+    else if (k) out += `<span class="wd">${seg}</span>`;
+    else out += seg;
+    i = j;
+  }
+  return out;
 }
 
 // ============================================
@@ -291,6 +509,9 @@ const partialStaging = {
   path: null,
   staged: false,
   parsedFile: null,
+  // Fingerprint of the diff the selection was made against. Selections are hunk/line
+  // indices, so a changed diff invalidates them (see partialStagingBind).
+  diffHash: null,
   selected: new Set(),
   // Flat list of "<h>:<l>" keys in visual order, for shift-click range selection.
   order: [],
@@ -302,15 +523,35 @@ function partialStagingReset() {
   partialStaging.lastClicked = null;
 }
 
+// A cheap, order-sensitive string hash. Only used to notice that a diff's *content*
+// changed between renders — not for anything security-related.
+function cheapHash(s) {
+  let h = 5381;
+  const str = String(s || '');
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36) + ':' + str.length;
+}
+
 // Prepare the selection state for a newly rendered stageable diff. Clears the selection
 // when the file (or its staged/unstaged side) changed, and keeps it otherwise so a
 // re-render — e.g. flipping unified/split — doesn't lose what you had ticked.
-function partialStagingBind(parsedFile, opts) {
+//
+// It also clears when the diff TEXT changed for the same file. Selections are stored as
+// hunk/line indices, so if the file was edited underneath us those indices now address
+// different lines and acting on them would stage something the user never picked. The
+// working-tree watcher makes that a routine occurrence rather than a rare one.
+function partialStagingBind(parsedFile, opts, diffText) {
   const fileKey = (opts.staged ? 'staged:' : 'unstaged:') + opts.filePath;
+  const diffHash = cheapHash(diffText);
   if (partialStaging.fileKey !== fileKey) {
     partialStaging.fileKey = fileKey;
     partialStagingReset();
+  } else if (partialStaging.diffHash && partialStaging.diffHash !== diffHash) {
+    const had = partialStaging.selected.size;
+    partialStagingReset();
+    if (had) showToast('The file changed on disk — line selection cleared', 'info', 4000);
   }
+  partialStaging.diffHash = diffHash;
   partialStaging.path = opts.filePath;
   partialStaging.staged = !!opts.staged;
   partialStaging.parsedFile = parsedFile;
@@ -455,7 +696,7 @@ function renderDiffUnified(diffText, opts) {
 
   // Partial staging only makes sense for a single working-tree file.
   const stageable = !!(opts.stageable && parsed.files.length === 1 && !parsed.files[0].binary);
-  if (stageable) partialStagingBind(parsed.files[0], opts);
+  if (stageable) partialStagingBind(parsed.files[0], opts, diffText);
 
   const out = [];
   if (stageable) out.push(partialBarHtml(!!opts.staged));
@@ -468,10 +709,14 @@ function renderDiffUnified(diffText, opts) {
     out.push(`<div class="diff-file-header">⚔ ${escapeHtml(file.path)}</div>`);
     emitted++;
     if (file.binary) {
-      out.push(`<div class="diff-notice">${escapeHtml(file.binaryNotice || 'Binary file differs')}</div>`);
+      // Images get a real comparison instead of a "binary files differ" dead end.
+      out.push(isImagePath(file.path)
+        ? imageDiffPlaceholderHtml(file.path, opts.imageRevs)
+        : `<div class="diff-notice">${escapeHtml(file.binaryNotice || 'Binary file differs')}</div>`);
       continue;
     }
 
+    const lang = detectLanguage(file.path);
     file.hunks.forEach((hunk, hi) => {
       if (stop) return;
       const actions = stageable
@@ -504,7 +749,7 @@ function renderDiffUnified(diffText, opts) {
           out.push(
             `<div class="diff-line">` +
               `<div class="diff-gutter">${oldLine}</div><div class="diff-gutter">${newLine}</div>` +
-              `<div class="diff-text">${escapeHtml(line.raw)}</div>` +
+              `<div class="diff-text"> ${renderCodeLine(line.text, null, lang)}</div>` +
             `</div>`);
           oldLine++; newLine++; emitted++; i++;
           continue;
@@ -523,7 +768,7 @@ function renderDiffUnified(diffText, opts) {
         delRun.forEach((d, k) => {
           const key = hi + ':' + d.idx;
           const sel = stageable && partialStaging.selected.has(key);
-          const html = pairs[k] ? pairs[k].oldHtml : escapeHtml(d.line.text);
+          const html = renderCodeLine(d.line.text, pairs[k] ? pairs[k].oldRanges : null, lang);
           out.push(
             `<div class="diff-line del${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
               (stageable ? ` data-dkey="${key}"` : '') + `>` +
@@ -537,7 +782,7 @@ function renderDiffUnified(diffText, opts) {
         addRun.forEach((a, k) => {
           const key = hi + ':' + a.idx;
           const sel = stageable && partialStaging.selected.has(key);
-          const html = pairs[k] ? pairs[k].newHtml : escapeHtml(a.line.text);
+          const html = renderCodeLine(a.line.text, pairs[k] ? pairs[k].newRanges : null, lang);
           out.push(
             `<div class="diff-line add${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
               (stageable ? ` data-dkey="${key}"` : '') + `>` +
@@ -581,7 +826,7 @@ function renderDiffSplit(diffText, opts) {
   const truncatedByCap = totalLines > cap;
 
   const stageable = !!(opts.stageable && parsed.files.length === 1 && !parsed.files[0].binary);
-  if (stageable) partialStagingBind(parsed.files[0], opts);
+  if (stageable) partialStagingBind(parsed.files[0], opts, diffText);
 
   const parts = [];
   let emitted = 0;
@@ -592,10 +837,13 @@ function renderDiffSplit(diffText, opts) {
     parts.push(`<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(file.path)}</div></div>`);
     emitted++;
     if (file.binary) {
-      parts.push(`<div class="dsplit-row meta"><div class="dsplit-meta">${escapeHtml(file.binaryNotice || 'Binary file differs')}</div></div>`);
+      parts.push(isImagePath(file.path)
+        ? `<div class="dsplit-row meta">${imageDiffPlaceholderHtml(file.path, opts.imageRevs)}</div>`
+        : `<div class="dsplit-row meta"><div class="dsplit-meta">${escapeHtml(file.binaryNotice || 'Binary file differs')}</div></div>`);
       continue;
     }
 
+    const lang = detectLanguage(file.path);
     file.hunks.forEach((hunk, hi) => {
       if (stop) return;
       const actions = stageable
@@ -624,8 +872,8 @@ function renderDiffSplit(diffText, opts) {
         if (line.type === ' ') {
           parts.push(
             `<div class="dsplit-row">` +
-              `<div class="dsplit-side"><span class="dsplit-num">${oldLine}</span><span class="dsplit-text">${escapeHtml(line.text)}</span></div>` +
-              `<div class="dsplit-side"><span class="dsplit-num">${newLine}</span><span class="dsplit-text">${escapeHtml(line.text)}</span></div>` +
+              `<div class="dsplit-side"><span class="dsplit-num">${oldLine}</span><span class="dsplit-text">${renderCodeLine(line.text, null, lang)}</span></div>` +
+              `<div class="dsplit-side"><span class="dsplit-num">${newLine}</span><span class="dsplit-text">${renderCodeLine(line.text, null, lang)}</span></div>` +
             `</div>`);
           oldLine++; newLine++; emitted++; i++;
           continue;
@@ -651,7 +899,7 @@ function renderDiffSplit(diffText, opts) {
           if (d) {
             const key = hi + ':' + d.idx;
             const sel = stageable && partialStaging.selected.has(key);
-            const html = pairs[k] ? pairs[k].oldHtml : escapeHtml(d.line.text);
+            const html = renderCodeLine(d.line.text, pairs[k] ? pairs[k].oldRanges : null, lang);
             left = `<div class="dsplit-side del${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
               (stageable ? ` data-dkey="${key}"` : '') + `>` +
               `<span class="dsplit-num">${oldLine + k}</span><span class="dsplit-text">${html}</span></div>`;
@@ -663,7 +911,7 @@ function renderDiffSplit(diffText, opts) {
           if (a) {
             const key = hi + ':' + a.idx;
             const sel = stageable && partialStaging.selected.has(key);
-            const html = pairs[k] ? pairs[k].newHtml : escapeHtml(a.line.text);
+            const html = renderCodeLine(a.line.text, pairs[k] ? pairs[k].newRanges : null, lang);
             right = `<div class="dsplit-side add${stageable ? ' dsel' : ''}${sel ? ' selected' : ''}"` +
               (stageable ? ` data-dkey="${key}"` : '') + `>` +
               `<span class="dsplit-num">${newLine + k}</span><span class="dsplit-text">${html}</span></div>`;
@@ -948,7 +1196,11 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
     if (!f || !diffEl) return;
     panelEl._cfileActive = idx;
     try {
-      diffEl.innerHTML = renderDiff(f.diff, opts);
+      diffEl.innerHTML = renderDiff(f.diff, Object.assign({}, opts, {
+        // A commit's image is compared against its first parent.
+        imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined
+      }));
+      hydrateImageDiffs(diffEl);
     } catch (err) {
       diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
     }
@@ -1132,7 +1384,11 @@ function rerenderActiveCommitFile(panelEl) {
   if (!f) return false;
   const prevScroll = diffEl.scrollTop;
   try {
-    diffEl.innerHTML = renderDiff(f.diff, panelEl._cfileOpts || {});
+    const rrOpts = panelEl._cfileOpts || {};
+    diffEl.innerHTML = renderDiff(f.diff, Object.assign({}, rrOpts, {
+      imageRevs: rrOpts.hash ? { oldRev: rrOpts.hash + '^', newRev: rrOpts.hash } : undefined
+    }));
+    hydrateImageDiffs(diffEl);
   } catch (err) {
     diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ ${escapeHtml(err.message || String(err))}</p></div>`;
   }
@@ -1163,3 +1419,188 @@ function classifyFile(file) {
 }
 
 // ============================================
+
+// ============================================
+// IGNORE-WHITESPACE NOTICE
+// ============================================
+// Partial staging is unavailable while -w is on, and silently missing buttons is worse
+// than a one-line explanation of why.
+function whitespaceNoticeHtml() {
+  return `<div class="diff-notice ws-notice">` +
+    `⇥ Whitespace-only changes are hidden. Hunk and line staging are unavailable in this mode, ` +
+    `because a whitespace-ignoring diff doesn't describe the real byte changes. ` +
+    `<button class="dhunk-btn" data-diffws="1">Show whitespace</button>` +
+  `</div>`;
+}
+
+// ============================================
+// IMAGE DIFF
+// ============================================
+// Binary files used to render as nothing but "Binary files … differ". For images that
+// throws away the one thing the user actually wants, so we show both versions instead —
+// side by side, as an opacity blend, or under a swipe divider.
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'svg', 'avif']);
+
+function isImagePath(p) {
+  if (!p) return false;
+  const ext = String(p).split('.').pop().toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
+// Emitted synchronously by the renderers in place of the binary notice; the actual bytes
+// are fetched afterwards by hydrateImageDiffs, because renderDiff has to stay synchronous.
+function imageDiffPlaceholderHtml(filePath, revs) {
+  const oldRev = (revs && revs.oldRev) || 'HEAD';
+  const newRev = (revs && revs.newRev) || 'WORKTREE';
+  return `<div class="imgdiff" data-imgdiff="1"` +
+    ` data-path="${escapeHtml(filePath)}"` +
+    ` data-oldrev="${escapeHtml(oldRev)}"` +
+    ` data-newrev="${escapeHtml(newRev)}">` +
+    `<div class="imgdiff-loading"><span class="loading"></span> Loading image…</div>` +
+  `</div>`;
+}
+
+// Fetch both sides for every un-hydrated image-diff container inside `root`. Safe to call
+// after any innerHTML assignment; containers already loaded are skipped.
+async function hydrateImageDiffs(root) {
+  if (!root) return;
+  const nodes = Array.from(root.querySelectorAll('.imgdiff[data-imgdiff="1"]:not(.loaded)'));
+  for (const node of nodes) {
+    node.classList.add('loaded');   // claim it before awaiting, so a re-entrant call skips it
+    const filePath = node.dataset.path;
+    const oldRev = node.dataset.oldrev;
+    const newRev = node.dataset.newrev;
+    try {
+      const [oldR, newR] = await Promise.all([
+        gs.fileBlob({ rev: oldRev, path: filePath }),
+        gs.fileBlob({ rev: newRev, path: filePath })
+      ]);
+      renderImageDiff(node, {
+        path: filePath,
+        before: oldR && oldR.ok ? oldR.data : null,
+        after: newR && newR.ok ? newR.data : null
+      });
+    } catch (err) {
+      node.innerHTML = `<div class="imgdiff-error">Could not load the image: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+}
+
+function formatBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function renderImageDiff(node, data) {
+  const before = data.before && data.before.exists ? data.before : null;
+  const after = data.after && data.after.exists ? data.after : null;
+
+  if (!before && !after) {
+    node.innerHTML = `<div class="imgdiff-error">Neither version of this image could be read.</div>`;
+    return;
+  }
+  const tooLarge = (before && before.tooLarge) || (after && after.tooLarge);
+  if (tooLarge) {
+    node.innerHTML = `<div class="imgdiff-error">This image is too large to preview ` +
+      `(${escapeHtml(formatBytes((after || before).bytes))}).</div>`;
+    return;
+  }
+
+  // Added / deleted images only have one side, so the comparison modes are meaningless —
+  // show the single version with a clear label instead of an empty pane beside it.
+  const single = !before || !after;
+  const kind = !before ? 'added' : (!after ? 'deleted' : 'changed');
+
+  const beforeImg = before ? `<img class="imgdiff-img" src="${before.dataUri}" alt="before" />` : '';
+  const afterImg = after ? `<img class="imgdiff-img" src="${after.dataUri}" alt="after" />` : '';
+
+  const modeBar = single ? '' : `
+    <div class="imgdiff-modes">
+      <button class="imgdiff-mode active" data-imgmode="side">◫ Side by side</button>
+      <button class="imgdiff-mode" data-imgmode="blend">◐ Blend</button>
+      <button class="imgdiff-mode" data-imgmode="swipe">⇹ Swipe</button>
+      <label class="imgdiff-slider-wrap">
+        <input type="range" class="imgdiff-slider" min="0" max="100" value="50" />
+      </label>
+    </div>`;
+
+  node.innerHTML = `
+    <div class="imgdiff-head">
+      <span class="imgdiff-kind ${kind}">${kind}</span>
+      <span class="imgdiff-name">${escapeHtml(data.path)}</span>
+      <span class="imgdiff-meta" id="imgdiff-dims"></span>
+    </div>
+    ${modeBar}
+    <div class="imgdiff-stage mode-side">
+      <div class="imgdiff-pane before">
+        <div class="imgdiff-pane-label">before ${before ? '· ' + escapeHtml(formatBytes(before.bytes)) : '· absent'}</div>
+        <div class="imgdiff-frame">${beforeImg || '<div class="imgdiff-absent">did not exist</div>'}</div>
+      </div>
+      <div class="imgdiff-pane after">
+        <div class="imgdiff-pane-label">after ${after ? '· ' + escapeHtml(formatBytes(after.bytes)) : '· absent'}</div>
+        <div class="imgdiff-frame">${afterImg || '<div class="imgdiff-absent">deleted</div>'}</div>
+      </div>
+    </div>`;
+
+  const stage = node.querySelector('.imgdiff-stage');
+  const slider = node.querySelector('.imgdiff-slider');
+  const dims = node.querySelector('#imgdiff-dims');
+
+  // Report the pixel dimensions once the images decode — a resize is often the whole
+  // point of the change and is invisible otherwise.
+  const measured = {};
+  const report = () => {
+    const parts = [];
+    if (measured.before) parts.push(`before ${measured.before}`);
+    if (measured.after) parts.push(`after ${measured.after}`);
+    if (dims) dims.textContent = parts.join('  →  ');
+  };
+  node.querySelectorAll('.imgdiff-img').forEach(img => {
+    const which = img.getAttribute('alt');
+    const done = () => {
+      measured[which] = `${img.naturalWidth}×${img.naturalHeight}`;
+      report();
+    };
+    if (img.complete && img.naturalWidth) done();
+    else img.addEventListener('load', done, { once: true });
+  });
+
+  if (single) return;
+
+  const applyMode = (mode) => {
+    stage.classList.remove('mode-side', 'mode-blend', 'mode-swipe');
+    stage.classList.add('mode-' + mode);
+    applySlider();
+  };
+
+  // In blend mode the slider is the "after" layer's opacity; in swipe mode it's the
+  // position of the reveal edge. Side-by-side ignores it.
+  const applySlider = () => {
+    if (!slider) return;
+    const v = Number(slider.value);
+    const afterPane = node.querySelector('.imgdiff-pane.after');
+    if (stage.classList.contains('mode-blend')) {
+      afterPane.style.opacity = String(v / 100);
+      afterPane.style.clipPath = '';
+    } else if (stage.classList.contains('mode-swipe')) {
+      afterPane.style.opacity = '1';
+      afterPane.style.clipPath = `inset(0 0 0 ${v}%)`;
+    } else {
+      afterPane.style.opacity = '';
+      afterPane.style.clipPath = '';
+    }
+  };
+
+  node.querySelectorAll('.imgdiff-mode').forEach(btn => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      node.querySelectorAll('.imgdiff-mode').forEach(b => b.classList.toggle('active', b === btn));
+      applyMode(btn.dataset.imgmode);
+    };
+  });
+  if (slider) slider.oninput = applySlider;
+  applyMode('side');
+}

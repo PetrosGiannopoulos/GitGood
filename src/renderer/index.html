@@ -157,6 +157,9 @@
         <button class="tool-btn" id="btn-squash" title="Combine your branch's commits into a single commit (non-destructive)">
           <span class="tool-icon">⚒</span><span>Squash</span>
         </button>
+        <button class="tool-btn" id="btn-undo" title="Undo — every operation that moved HEAD, with one-click recovery">
+          <span class="tool-icon">↩</span><span>Undo</span>
+        </button>
         <div class="tool-sep"></div>
         <button class="tool-btn" id="btn-terminal" title="Open Git terminal">
           <span class="tool-icon">⌨</span><span>Terminal</span>
@@ -536,6 +539,7 @@
                 <span class="diff-view-toggle" id="diff-view-toggle">
                   <button class="diff-view-btn active" data-diffmode="unified" title="Unified view">☰ Unified</button>
                   <button class="diff-view-btn" data-diffmode="split" title="Side-by-side view">◫ Split</button>
+                  <button class="diff-view-btn" data-diffws="1" title="Ignore whitespace-only changes (partial staging is unavailable while this is on)">⇥ Whitespace</button>
                   <button class="diff-view-btn diff-popout-btn" data-diffpopout="1" title="Pop the diff out into a large window">⤢ Pop Out</button>
                 </span>
               </div>
@@ -598,6 +602,9 @@
       <div class="modal-footer" id="modal-footer"></div>
     </div>
   </div>
+
+  <!-- ============== COMMAND PALETTE ============== -->
+  <div id="palette-overlay" class="palette-overlay hidden"></div>
 
   <!-- ============== BLAME / FILE HISTORY OVERLAY ============== -->
   <div id="blame-overlay" class="blame-overlay hidden"></div>
@@ -679,5 +686,8 @@
   <script src="js/10-llm-assistant.js"></script>
   <script src="js/11-rebase.js"></script>
   <script src="js/12-blame.js"></script>
+  <script src="js/13-undo.js"></script>
+  <script src="js/14-watch.js"></script>
+  <script src="js/15-palette.js"></script>
 </body>
 </html>

@@ -34,10 +34,12 @@ const api = {
   remotes: () => ipcRenderer.invoke('repo:remotes'),
   stashList: () => ipcRenderer.invoke('repo:stashList'),
 
-  // Diffs
-  diff: (file) => ipcRenderer.invoke('repo:diff', file),
-  diffUnstaged: (file) => ipcRenderer.invoke('repo:diffUnstaged', file),
-  diffStaged: (file) => ipcRenderer.invoke('repo:diffStaged', file),
+  // Diffs. `opts.ignoreWhitespace` adds -w; note that a -w diff cannot be applied, so
+  // the renderer turns partial staging off while it is active.
+  diff: (file, opts) => ipcRenderer.invoke('repo:diff', file, opts),
+  diffUnstaged: (file, opts) => ipcRenderer.invoke('repo:diffUnstaged', file, opts),
+  diffStaged: (file, opts) => ipcRenderer.invoke('repo:diffStaged', file, opts),
+  fileBlob: (opts) => ipcRenderer.invoke('repo:fileBlob', opts),
 
   // Staging
   stage: (files) => ipcRenderer.invoke('repo:stage', files),
@@ -74,6 +76,24 @@ const api = {
   squash: (opts) => ipcRenderer.invoke('repo:squash', opts),
   rebaseTodo: (opts) => ipcRenderer.invoke('repo:rebaseTodo', opts),
   rebase: (opts) => ipcRenderer.invoke('repo:rebase', opts),
+
+  // Working-tree watcher + background fetch
+  startWatching: () => ipcRenderer.invoke('repo:startWatching'),
+  stopWatching: () => ipcRenderer.invoke('repo:stopWatching'),
+  onFsChanged: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('repo:fsChanged', handler);
+    return () => ipcRenderer.removeListener('repo:fsChanged', handler);
+  },
+  onAutoFetched: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('repo:autoFetched', handler);
+    return () => ipcRenderer.removeListener('repo:autoFetched', handler);
+  },
+
+  // Reflog / undo
+  reflog: (opts) => ipcRenderer.invoke('repo:reflog', opts),
+  reflogRestore: (opts) => ipcRenderer.invoke('repo:reflogRestore', opts),
 
   // Blame & file history
   blame: (opts) => ipcRenderer.invoke('repo:blame', opts),

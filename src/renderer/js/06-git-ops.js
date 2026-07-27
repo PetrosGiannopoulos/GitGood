@@ -1045,6 +1045,7 @@ $('#btn-open-folder').onclick = () => {
 };
 
 $('#btn-close-repo').onclick = async () => {
+  if (typeof stopRepoWatch === 'function') await stopRepoWatch();
   await gs.closeRepo();
   state.repo = null;
   state.status = null;
@@ -1400,11 +1401,70 @@ function setDiffMode(mode) {
 // One delegated listener handles every diff-view toggle (Changes pane + Graph/History
 // detail headers + the popout header), since those headers are re-created dynamically.
 document.addEventListener('click', (e) => {
+  // The whitespace toggle also appears on the notice inside the diff body, which is a
+  // .dhunk-btn rather than a .diff-view-btn — match on the data attribute so one handler
+  // covers both.
+  const wsBtn = e.target.closest('[data-diffws]');
+  if (wsBtn) { e.preventDefault(); e.stopPropagation(); toggleDiffWhitespace(); return; }
   const btn = e.target.closest('.diff-view-btn');
   if (!btn) return;
   if (btn.dataset.diffpopout) { openDiffPopout(); return; }
   setDiffMode(btn.dataset.diffmode);
 });
+
+// Restore the persisted whitespace preference before the first diff renders.
+try {
+  if (localStorage.getItem('gitgood:diff-ws') === '1') state.diffIgnoreWhitespace = true;
+} catch (err) {}
+
+// Flip -w on or off. Every diff has to be REFETCHED (not just re-rendered) because the
+// flag changes what git emits, so this reuses the same repaint paths as setDiffMode.
+function toggleDiffWhitespace() {
+  state.diffIgnoreWhitespace = !state.diffIgnoreWhitespace;
+  try { localStorage.setItem('gitgood:diff-ws', state.diffIgnoreWhitespace ? '1' : '0'); } catch (err) {}
+  document.querySelectorAll('.diff-view-toggle .diff-view-btn[data-diffws]').forEach(b =>
+    b.classList.toggle('active', state.diffIgnoreWhitespace));
+
+  // Turning it on invalidates any line selection — those indices belong to the other diff.
+  if (typeof partialStagingReset === 'function') partialStagingReset();
+
+  repaintAllDiffs();
+  showToast(state.diffIgnoreWhitespace
+    ? 'Ignoring whitespace-only changes'
+    : 'Showing whitespace changes', 'info', 2500);
+}
+
+// Refetch and repaint every diff currently on screen. Shared by the whitespace toggle and
+// the syntax-highlighting preference.
+function repaintAllDiffs() {
+  const changesDiffEl = document.getElementById('diff-content');
+  if (changesDiffEl && state.selectedFile) {
+    const prev = changesDiffEl.scrollTop;
+    Promise.resolve(selectFile(state.selectedFile, state.selectedFileStaged))
+      .then(() => { try { changesDiffEl.scrollTop = prev; } catch (e) {} });
+  }
+
+  // Commit previews cache their diff per whitespace mode, so re-selecting refetches.
+  const graphDiff = document.getElementById('graph-diff-content');
+  if (graphDiff && state.selectedGraphHash) {
+    const c = ((state.graph && state.graph.commits) || []).find(x => x.hash === state.selectedGraphHash);
+    if (c && typeof renderGraphDetail === 'function') {
+      getCommitDetails(c.hash).then(d => renderGraphDetail(c, d)).catch(() => {});
+    }
+  }
+  if (document.getElementById('hist-diff-content') && state.selectedCommit) {
+    const sel = state.selectedCommit;
+    getCommitDetails(sel.hash).then(d => renderHistoryDetail(sel, d)).catch(() => {});
+  }
+
+  // The blame overlay's file-history pane, if it's open on a commit.
+  if (typeof blameView !== 'undefined' && blameView.selectedHash &&
+      document.getElementById('fh-diff')) {
+    if (typeof selectFileHistoryCommit === 'function') selectFileHistoryCommit(blameView.selectedHash);
+  }
+
+  refreshPopoutDiff();
+}
 
 // ============================================
 // POP-OUT DIFF VIEWER — a large overlay with its own file list + filter + diff area,
@@ -1429,7 +1489,8 @@ function buildPopoutModel() {
       files: files.map(f => ({ path: f.path, status: f.status, staged: f.staged })),
       render: async (file, into) => {
         into.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
-        const result = file.staged ? await gs.diffStaged(file.path) : await gs.diffUnstaged(file.path);
+        const wsOpts = { ignoreWhitespace: !!state.diffIgnoreWhitespace };
+        const result = file.staged ? await gs.diffStaged(file.path, wsOpts) : await gs.diffUnstaged(file.path, wsOpts);
         if (!result.ok) { into.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(result.error)}</p></div>`; return; }
         if (!result.data || !result.data.trim()) {
           if (!file.staged) {

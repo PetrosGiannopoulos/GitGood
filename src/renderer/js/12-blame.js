@@ -293,7 +293,7 @@ async function selectFileHistoryCommit(hash) {
   if (!diffEl) return;
   diffEl.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
 
-  const r = await gs.fileDiffAtCommit({ hash, path: blameView.path });
+  const r = await gs.fileDiffAtCommit({ hash, path: blameView.path, ignoreWhitespace: !!state.diffIgnoreWhitespace });
   // Guard against a slower request landing after the user clicked something else.
   if (blameView.selectedHash !== hash) return;
   if (!r.ok) {
@@ -304,7 +304,8 @@ async function selectFileHistoryCommit(hash) {
     diffEl.innerHTML = '<div class="empty-state"><p>No textual change to this file in that commit (it may be a rename or a binary file).</p></div>';
     return;
   }
-  diffEl.innerHTML = renderDiff(r.data);
+  diffEl.innerHTML = renderDiff(r.data, { imageRevs: { oldRev: hash + '^', newRev: hash } });
+  hydrateImageDiffs(diffEl);
 }
 
 // Esc closes the overlay. Registered as a capture-phase listener so it runs before the

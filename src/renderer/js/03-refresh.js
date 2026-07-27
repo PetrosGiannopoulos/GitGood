@@ -578,11 +578,14 @@ function clearCommitCache() { _commitCache.clear(); }
 // Fetch commit details, using the in-memory cache when possible. Returns the same
 // shape as gs.showCommit's .data (or throws on error).
 async function getCommitDetails(hash) {
-  const cached = _commitCacheGet(hash);
+  // The cache key carries the whitespace mode: the same commit yields a different diff
+  // with -w, so keying by hash alone would serve the wrong variant after a toggle.
+  const key = hash + (state.diffIgnoreWhitespace ? '#w' : '');
+  const cached = _commitCacheGet(key);
   if (cached) return cached;
-  const result = await gs.showCommit(hash);
+  const result = await gs.showCommit({ hash, ignoreWhitespace: !!state.diffIgnoreWhitespace });
   if (result && result.ok) {
-    _commitCacheSet(hash, result.data);
+    _commitCacheSet(key, result.data);
     return result.data;
   }
   throw new Error(result && result.error ? result.error : 'Failed to load commit');

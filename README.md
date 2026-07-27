@@ -50,6 +50,13 @@ GitGood is a fully functional **Electron** desktop Git client wrapped in a medie
 - **Word-level diff highlighting** — when a removed line pairs with an added line, only the
   tokens that actually changed are marked, so an edit reads at a glance instead of forcing a
   character hunt across two near-identical lines
+- **Syntax highlighting** in diffs for ~30 languages, self-contained (no bundler, no network).
+  Composes with word-diff, so a changed keyword reads as both
+- **Ignore-whitespace toggle** (`⇥ Whitespace`) hides whitespace-only edits. Partial staging
+  is disabled while it's on, with a note explaining why — a `-w` diff can't be applied
+- **Image diff** — changed images show before/after side by side, as an opacity **blend**, or
+  under a **swipe** divider, with pixel dimensions and file sizes. New images preview too,
+  instead of "Binary files differ"
 - **Unified / Split (side-by-side) diff** toggle — choice persists across sessions and applies everywhere
 - Split view shows two clearly separated panes with a center divider and aligned add/remove rows
 - **Per-file browser** in commit previews: a file list (with A / M / D / R status badges) + a single-file diff
@@ -78,6 +85,33 @@ GitGood is a fully functional **Electron** desktop Git client wrapped in a medie
 - **Pull (rebase)** in the sync menu — fetch, then replay your work on top, no merge commit
 - Conflicts hand off to the existing resolver, now with **Skip** alongside Continue and Abort
 - Optional auto-stash so a dirty working tree doesn't block the rebase
+
+### Undo
+- **Undo panel** (toolbar `↩ Undo`) — every operation that moved `HEAD`, newest first, read
+  from the reflog and labelled by what it was: commit, amend, rebase, reset, merge, checkout…
+- **Undo Last Operation** in one click, or restore any earlier entry
+- Choose what happens to your working tree: discard changes, keep them unstaged, or keep them
+  staged — in plain language rather than `--hard`/`--mixed`/`--soft`
+- Stamps a **backup branch** at the current position first (so you can undo the undo), and
+  refuses to run mid-merge or mid-rebase
+- Right-click any entry to branch from it instead — the non-destructive route
+
+### Live Refresh
+- **Working-tree watcher** — edits from a build, a script or another terminal show up without
+  waiting for window focus. Ignores the noise (`.git/objects`, `node_modules`, Unity's
+  `Library`/`Temp`, editor scratch files)
+- Refreshes are **deferred while you're mid-task**: writing a commit message, picking lines to
+  stage, or with a dialog open
+- **Background fetch** on a timer keeps the ahead/behind counts honest; pauses itself for the
+  session after repeated failures instead of retrying a broken remote forever
+- Both configurable in **Settings → General**
+
+### Command Palette
+- **`Ctrl+Shift+P`** (or `Ctrl+K`) for every action in the app — opens even while you're typing
+  in the commit box
+- Fuzzy matching on initials and keywords: `gtc` → *Go to Changes*, `reflog` → *Undo*
+- **Dynamic entries**: checkout or rebase onto any branch, jump to any changed file
+- Commands that don't apply right now simply aren't listed
 
 ### Blame & File History
 - **Blame** any tracked file — per-line author, commit and date, with a colour stripe per
@@ -173,11 +207,14 @@ GitGood/
 
 | Shortcut | Action |
 | --- | --- |
+| `Ctrl+Shift+P` / `Ctrl+K` | **Command palette** — every action, fuzzy-searchable |
 | `Ctrl+O` | Open repository |
 | `Ctrl+Shift+O` | Clone repository |
 | `Ctrl+Enter` | Commit (when the commit summary is focused) |
 | `Ctrl+B` | Toggle the sidebar |
-| `Esc` | Close a modal / context menu / clear a search filter |
+| `Esc` | Close the palette / a modal / context menu / clear a search filter |
+
+Everything else is reachable from the palette, so there's nothing else to memorize.
 
 ## ✦ Tech Stack
 

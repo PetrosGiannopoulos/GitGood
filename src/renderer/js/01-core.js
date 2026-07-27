@@ -53,6 +53,8 @@ const state = {
   historyFilterMode: 'message',
   detachedFrom: null,      // branch name we were on before checking out a commit (detached HEAD)
   diffMode: 'unified',     // 'unified' | 'split' — diff display style
+  diffIgnoreWhitespace: false, // -w: hide whitespace-only changes (disables partial staging)
+  diffSyntax: true,        // syntax-highlight diff content
   // Branches tab state
   branchesFilter: '',
   checkoutTarget: null,
