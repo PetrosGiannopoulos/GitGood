@@ -422,7 +422,10 @@ body::before {
   gap: 4px;
 }
 
-.toolbar-left { flex: 1; gap: 16px; }
+/* min-width:0 defeats the automatic min-content floor on a flex item: without it the repo
+   path (one unbreakable string) sets this group's minimum width, so the group grows past
+   its share and shoves the centred button row to the right. */
+.toolbar-left { flex: 1; gap: 16px; min-width: 0; }
 .toolbar-center { flex: 0; }
 .toolbar-right { flex: 1; justify-content: flex-end; }
 
@@ -452,20 +455,57 @@ body::before {
 .repo-info {
   display: flex;
   flex-direction: column;
+  justify-content: flex-start;
   line-height: 1.2;
+  min-width: 0;
+  /* Anchor for the hover-expanded path below. */
+  position: relative;
 }
+
+/* Fixed height only in the name+path case (not the "No realm" placeholder), so the name
+   doesn't jump up when hovering lifts the path out of the flow. 30px ≈ both lines. */
+.repo-info:has(.repo-path) { height: 30px; }
 
 .repo-name {
   font-family: var(--font-display);
   font-size: 14px;
   letter-spacing: 0.1em;
   color: var(--bone-white);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .repo-path {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--muted-text);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Hover shows the path in full. It goes out of the flow on purpose: expanding it in place
+   would widen the left group and shove the button row across the moment the pointer passed
+   over it — the exact thing the clamp above exists to prevent. Hover still holds while the
+   pointer is over the expanded box (it's a descendant), so the path stays selectable. */
+.repo-info:hover .repo-path {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 300;
+  max-width: 52vw;
+  width: max-content;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-all;
+  padding: 4px 8px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
 }
 
 .repo-label {
