@@ -717,6 +717,7 @@ function renderChanges() {
     const exists = list.find(f => f.path === state.selectedFile);
     if (!exists) {
       state.selectedFile = null;
+      state.diffRenderedKey = null;
       $('#diff-content').innerHTML = `
         <div class="empty-state">
           <div class="empty-icon">⚔</div>
@@ -1023,7 +1024,15 @@ async function selectFile(path, staged) {
   updateSelectionBar();
 
   $('#diff-header-label').textContent = `${staged ? '⌃' : '⌄'} ${path}`;
-  $('#diff-content').innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+  // Only fall back to the spinner when the pane is about to show a *different* file. The
+  // working-tree watcher re-selects the open file after every filesystem event, and blanking
+  // the pane for the duration of the git call each time is what the user sees as flicker.
+  // Keeping the stale content up for those extra milliseconds is the lesser evil.
+  const renderKey = `${staged ? 'staged' : 'unstaged'}:${path}`;
+  if (state.diffRenderedKey !== renderKey) {
+    $('#diff-content').innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+  }
+  state.diffRenderedKey = renderKey;
 
   // A submodule is a single commit hash in the index, not file content. Its "diff" is two
   // raw SHAs, and line-level staging on it is meaningless — discarding lines used to report

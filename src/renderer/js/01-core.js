@@ -33,6 +33,11 @@ const state = {
   selectedCommit: null,
   selectedFile: null,
   selectedFileStaged: false,
+  // Which file the diff pane is currently *showing* ("staged:path"/"unstaged:path", or null
+  // when it holds the empty state). selectFile uses it to tell a fresh selection from a
+  // re-render of the file already on screen — the watcher does the latter on every save,
+  // and blanking the pane to a spinner each time reads as a flicker.
+  diffRenderedKey: null,
   currentTab: 'graph',
   // Multi-selection state (keyed "staged:path" or "unstaged:path" to handle a path in both lists)
   multiSelected: new Set(),

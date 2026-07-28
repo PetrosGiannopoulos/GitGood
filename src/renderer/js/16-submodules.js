@@ -27,13 +27,38 @@ const SUBMODULE_STATE_TEXT = {
 
 // ---- the diff-pane panel -------------------------------------------------------------
 
+// Write `html` into the diff pane only if it isn't already exactly what's there. The
+// working-tree watcher re-selects the open file on every filesystem event, and a submodule
+// with its own churning working tree produces a steady stream of them — so this panel gets
+// re-rendered constantly with identical content. Assigning innerHTML anyway would tear down
+// and rebuild the buttons under the pointer each time, which is visible as a flicker (and
+// loses a click that lands mid-swap). The previous HTML is stashed on the element itself, so
+// it goes away with the panel: after any other file has been shown, the marker is gone and
+// this repaints unconditionally.
+function paintSubmodulePanel(host, subPath, html) {
+  const cur = host.firstElementChild;
+  if (cur && cur.__submodPath === subPath && cur.__submodHtml === html) return;
+  host.innerHTML = html;
+  const el = host.firstElementChild;
+  if (el) { el.__submodPath = subPath; el.__submodHtml = html; }
+}
+
 // Rendered in place of a gitlink's two-SHA diff. Shows which way the pointer moved and the
 // commits it crossed, read from inside the submodule.
 async function renderSubmodulePanel(subPath, staged) {
   const host = $('#diff-content');
-  host.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+  // Same reasoning as the spinner in selectFile: only blank the pane when what's on it now
+  // isn't this submodule's panel. submoduleSummary runs several git commands inside the
+  // submodule, so this is a long time to show a spinner over content that rarely changes.
+  const showingThis = !!(host.firstElementChild && host.firstElementChild.__submodPath === subPath);
+  if (!showingThis) host.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
 
   const r = await gs.submoduleSummary({ path: subPath });
+
+  // The selection can move while the git calls above are running (a click, or the watcher
+  // dropping a file that was staged away). Don't paint over whatever replaced us.
+  if (state.selectedFile !== subPath) return;
+
   if (!r.ok) {
     host.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(r.error)}</p></div>`;
     return;
@@ -41,7 +66,7 @@ async function renderSubmodulePanel(subPath, staged) {
   const s = r.data;
 
   if (!s.initialized) {
-    host.innerHTML = `
+    paintSubmodulePanel(host, subPath, `
       <div class="submod-panel">
         <div class="submod-head">
           <span class="submod-icon">⛨</span>
@@ -54,7 +79,7 @@ async function renderSubmodulePanel(subPath, staged) {
           <button class="btn-medieval primary" data-submod-action="update" data-submod-path="${escapeHtml(subPath)}">
             <span class="btn-icon">⤓</span> Initialize &amp; Update</button>
         </div>
-      </div>`;
+      </div>`);
     return;
   }
 
@@ -105,7 +130,7 @@ async function renderSubmodulePanel(subPath, staged) {
       </div>
     </div>` : '';
 
-  host.innerHTML = `
+  paintSubmodulePanel(host, subPath, `
     <div class="submod-panel">
       <div class="submod-head">
         <span class="submod-icon">⛨</span>
@@ -132,7 +157,7 @@ async function renderSubmodulePanel(subPath, staged) {
         <button class="btn-medieval" data-submod-action="open" data-submod-path="${escapeHtml(subPath)}">
           <span class="btn-icon">⛨</span> Open submodule</button>
       </div>
-    </div>`;
+    </div>`);
 }
 
 // ---- actions --------------------------------------------------------------------------

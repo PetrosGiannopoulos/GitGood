@@ -1085,6 +1085,7 @@ $('#btn-close-repo').onclick = async () => {
   state.status = null;
   state.selectedCommit = null;
   state.selectedFile = null;
+  state.diffRenderedKey = null;
   state.remoteTags = null;          // belongs to the repo we just closed
   state.remoteTagsRemote = null;
   clearCommitCache();
