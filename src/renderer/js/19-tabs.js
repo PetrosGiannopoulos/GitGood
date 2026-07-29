@@ -187,8 +187,10 @@ async function closeCurrentRepo() {
 function renderRepoTabs() {
   const bar = document.getElementById('repo-tabs');
   if (!bar) return;
-  // One repository is the ordinary case; a tab strip showing a single tab is just clutter.
-  const show = repoTabs.tabs.length > 1;
+  // Shown whenever a repository is open, including the single-tab case. Hiding the strip
+  // until a *second* repository is open also hides the + that opens one, which is the only
+  // obvious way to get there.
+  const show = repoTabs.tabs.length > 0;
   bar.classList.toggle('hidden', !show);
   if (!show) { bar.innerHTML = ''; return; }
 
@@ -198,7 +200,7 @@ function renderRepoTabs() {
       <span class="repo-tab-name">${escapeHtml(t.name)}</span>
       <span class="repo-tab-close" data-close-tab="${escapeHtml(t.path)}" title="Close (Ctrl+W)">✕</span>
     </button>
-  `).join('') + `<button class="repo-tab-add" id="repo-tab-add" title="Open another repository">+</button>`;
+  `).join('') + `<button class="repo-tab-add" id="repo-tab-add" title="Open another repository in a new tab (Ctrl+O)">+</button>`;
 }
 
 document.addEventListener('click', (e) => {
