@@ -35,7 +35,10 @@ async function refreshAll() {
     tap(refreshLog(), 'Reading the chronicle…'),
     tap(refreshGraph(), 'Drawing the lineage…'),
     tap(refreshStashes(), 'Checking the reserves…'),
-    tap(refreshRemotes(), 'Contacting distant realms…')
+    tap(refreshRemotes(), 'Contacting distant realms…'),
+    // Cheap (one `git worktree list`) and it feeds the "already checked out elsewhere"
+    // warnings, so it rides along with every full refresh.
+    typeof refreshWorktrees === 'function' ? tap(refreshWorktrees(), 'Counting the outposts…') : Promise.resolve()
   ]);
   // NOTE: Disk Management is intentionally NOT recalculated here. Disk scans can be
   // expensive on large repos, so they only run when the user explicitly asks for them
@@ -637,6 +640,8 @@ function renderHistoryDetail(commit, details) {
     <div class="detail-section">
       <div class="detail-header">⚜ Hash</div>
       <div class="detail-meta text-mono" style="word-break:break-all">${escapeHtml(commit.hash)}</div>
+      <div class="sig-slot" data-sig-hash="${escapeHtml(commit.hash)}"></div>
+      <div class="checks-slot" data-checks-sha="${escapeHtml(commit.hash)}"></div>
     </div>
     <div class="detail-section">
       <div class="detail-header detail-header-row">
@@ -646,6 +651,15 @@ function renderHistoryDetail(commit, details) {
       <div class="diff-content" id="hist-diff-content" style="border:1px solid var(--border);max-height:50vh"><div class="empty-state"><span class="loading"></span></div></div>
     </div>
   `;
+
+  // Verify on demand — one commit, once (17-signing.js caches by hash). Unsigned commits
+  // leave the slot empty, so an unsigned repo shows no signing chrome at all.
+  if (typeof hydrateSignatureBadge === 'function') {
+    hydrateSignatureBadge(panel.querySelector('.sig-slot'), commit.hash);
+  }
+  if (typeof hydrateChecksBadge === 'function') {
+    hydrateChecksBadge(panel.querySelector('.checks-slot'), commit.hash);
+  }
 
   if (!details) return;
 

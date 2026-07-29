@@ -457,7 +457,10 @@ body::before {
   flex-direction: column;
   justify-content: flex-start;
   line-height: 1.2;
-  min-width: 0;
+  /* Shrinks (min-width:0 defeats the min-content floor) but not to nothing: on a narrow
+     window the left group's share can be smaller than the repo name, and a name clipped to
+     four characters is worse than nudging the button row by a few pixels. */
+  min-width: 90px;
   /* Anchor for the hover-expanded path below. */
   position: relative;
 }
@@ -514,6 +517,68 @@ body::before {
   color: var(--muted-text);
   letter-spacing: 0.1em;
 }
+
+/* ============================================
+   REPOSITORY TABS
+   ============================================ */
+/* Only rendered once a second repository is open — one tab is not a tab strip. */
+.repo-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--shadow-black);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+}
+
+.repo-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 12px;
+  max-width: 220px;
+  background: transparent;
+  border: none;
+  border-top: 2px solid transparent;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.repo-tab:hover { color: var(--parchment); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.repo-tab.active {
+  color: var(--bone-white);
+  background: var(--bg-panel);
+  border-top-color: var(--crusader-red);
+}
+.repo-tab-name { overflow: hidden; text-overflow: ellipsis; }
+
+.repo-tab-close {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 3px;
+  color: var(--text-muted);
+  opacity: 0;
+}
+.repo-tab:hover .repo-tab-close,
+.repo-tab.active .repo-tab-close { opacity: 1; }
+.repo-tab-close:hover { color: var(--crusader-red-bright); }
+
+.repo-tab-add {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.repo-tab-add:hover { color: var(--bone-white); }
 
 .tool-btn {
   background: transparent;
@@ -676,6 +741,31 @@ body.sidebar-is-collapsed .sidebar-toggle-icon {
   border-radius: 8px;
   border: 1px solid var(--border);
 }
+
+/* Small action buttons living in a section header (worktrees: add / prune). The first one
+   takes the auto margin so the buttons and the count travel together on the right. */
+.sidebar-header-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.sidebar-header-btn:first-of-type { margin-left: auto; }
+.sidebar-header-btn:hover { color: var(--bone-white); border-color: var(--crusader-red); }
+.sidebar-header .sidebar-header-btn + .count { margin-left: 0; }
+
+/* Worktrees. A repository always has at least one, so a lone entry is not worth a list —
+   the header (with its + button) says everything. */
+#section-worktrees.single-worktree .sidebar-list { opacity: 0.65; }
+.worktree-item .wt-icon { color: var(--crusader-red); font-size: 11px; }
+.worktree-item .wt-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worktree-item .wt-flag { font-size: 10px; color: var(--gold-accent); }
+.worktree-item .wt-flag.bad { color: var(--crusader-red-bright); }
+.worktree-item.missing .wt-label { text-decoration: line-through; opacity: 0.7; }
 
 .current-branch {
   padding: 4px 14px 12px;

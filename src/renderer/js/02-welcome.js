@@ -81,12 +81,16 @@ async function openRepoDialog() {
 }
 
 async function openRepoByPath(p) {
+  // Switching away from a repository parks its view state on its tab first; opening a new
+  // one has nothing to park. Both go through here (see 19-tabs.js).
+  if (typeof saveActiveTabUi === 'function' && state.repo && state.repo.path !== p) saveActiveTabUi();
   const result = await withLoading('Opening repository', () => gs.openRepo(p));
   if (!result.ok) {
     showToast(result.error || 'Failed to open repository', 'error', 5000);
     return;
   }
   state.repo = result.data;
+  if (typeof noteRepoOpened === 'function') noteRepoOpened(result.data);
   clearCommitCache();
   state.collapsedCommits = null;
   state.graphCollapsed = false;
@@ -105,7 +109,16 @@ async function openRepoByPath(p) {
   updateRepoInfo();
   // Block interaction behind the overlay until the full initial load completes, so the
   // user can't click into a half-rendered graph or changes list.
+  // Signing config is per-repo (local config can override global) and cached verification
+  // results belong to the repo they were read from.
+  if (typeof resetSigningState === 'function') resetSigningState();
+  // Forge data (host, token status, PR list, CI results) belongs to the repo we are leaving.
+  if (typeof forgeReset === 'function') forgeReset();
   await withRepoOpen(`Opening “${result.data.name}”`, () => refreshAll());
+  if (typeof initCommitSignToggle === 'function') initCommitSignToggle();
+  // Put back whatever this tab was showing last time (filters, selected commit/file, which
+  // centre tab). Runs after the load so every list it touches already holds real data.
+  if (typeof restoreTabUi === 'function') await restoreTabUi(result.data.path);
   setStatus('Ready');
   showToast(`Opened "${result.data.name}"`, 'success');
   // Start watching the working tree and the background fetch for THIS repo. Done after

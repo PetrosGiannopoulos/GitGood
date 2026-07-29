@@ -2553,3 +2553,182 @@ body.resizing-panes * {
   font-size: 11px;
   text-align: center;
 }
+
+/* ============================================
+   FORGE TAB (GitHub / GitLab)
+   ============================================ */
+/* .tab-panel.active is display:flex (a row); this panel is a toolbar stacked on a list. */
+[data-panel="forge"].active { flex-direction: column; }
+
+.forge-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+
+.forge-repo-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.forge-tabs { display: flex; gap: 2px; }
+.forge-tabs .mini-btn.active {
+  color: var(--bone-white);
+  border-color: var(--crusader-red);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.forge-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.forge-list { list-style: none; padding: 0; margin: 0; }
+
+.forge-item {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.forge-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+/* The request opened from the branch you are standing on is the one you came here for. */
+.forge-item.current-branch-pr { border-left: 3px solid var(--crusader-red); }
+
+.forge-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.forge-title {
+  color: var(--bone-white);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.forge-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.forge-item-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.forge-state {
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.forge-state-open   { color: var(--added); border-color: var(--added); }
+.forge-state-draft  { color: var(--text-muted); }
+.forge-state-merged { color: var(--gold-accent); border-color: var(--gold-accent); }
+.forge-state-closed { color: var(--crusader-red-bright); border-color: var(--crusader-red-deep); }
+
+.forge-flag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--crusader-red-bright);
+  flex-shrink: 0;
+}
+
+.forge-label {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Token / host setup, shown in place of the list until the forge can be reached. */
+.forge-setup {
+  max-width: 620px;
+  margin: 40px auto;
+  padding: 0 20px;
+}
+.forge-setup h3 {
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.1em;
+  color: var(--bone-white);
+  margin-bottom: 12px;
+}
+.forge-setup .modal-field { margin: 14px 0; }
+
+/* ============================================
+   CI CHECKS
+   ============================================ */
+.checks-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  background: var(--bg);
+}
+.checks-badge .checks-icon { font-size: 12px; }
+.checks-badge .checks-label { flex: 1; }
+.checks-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.checks-toggle:hover { color: var(--bone-white); border-color: var(--crusader-red); }
+
+.checks-success  { border-left-color: var(--added); color: var(--added); }
+.checks-failure  { border-left-color: var(--crusader-red-bright); color: var(--crusader-red-bright); }
+.checks-running  { border-left-color: var(--gold-accent); color: var(--gold-accent); }
+.checks-neutral  { border-left-color: var(--border-strong); color: var(--text-dim); }
+
+.checks-runs {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-top: none;
+}
+.checks-runs.hidden { display: none; }
+.checks-run {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.checks-run:last-child { border-bottom: none; }
+.checks-run-name { color: var(--text-dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.checks-run-name[data-forge-url] { cursor: pointer; text-decoration: underline dotted; }
+.checks-run-name[data-forge-url]:hover { color: var(--bone-white); }
+.checks-run-detail { color: var(--text-muted); font-size: 10px; }

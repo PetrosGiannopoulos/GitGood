@@ -73,6 +73,32 @@ const api = {
   pushTag: (opts) => ipcRenderer.invoke('repo:pushTag', opts),
   deleteRemoteTag: (opts) => ipcRenderer.invoke('repo:deleteRemoteTag', opts),
 
+  // Forge (GitHub / GitLab). Tokens live in the main process only — nothing here returns
+  // one, and `hasToken` is the most the renderer ever learns.
+  forgeInfo: (opts) => ipcRenderer.invoke('forge:info', opts),
+  forgeSetToken: (opts) => ipcRenderer.invoke('forge:setToken', opts),
+  forgeClearToken: (opts) => ipcRenderer.invoke('forge:clearToken', opts),
+  forgePullRequests: (opts) => ipcRenderer.invoke('forge:pullRequests', opts),
+  forgeIssues: (opts) => ipcRenderer.invoke('forge:issues', opts),
+  forgeCreatePullRequest: (opts) => ipcRenderer.invoke('forge:createPullRequest', opts),
+  forgeChecks: (opts) => ipcRenderer.invoke('forge:checks', opts),
+
+  // Worktrees. Opening one is just openRepo(path) — a linked worktree is a repository as
+  // far as every other handler is concerned.
+  worktreeList: () => ipcRenderer.invoke('worktree:list'),
+  worktreeAdd: (opts) => ipcRenderer.invoke('worktree:add', opts),
+  worktreeRemove: (opts) => ipcRenderer.invoke('worktree:remove', opts),
+  worktreeLock: (opts) => ipcRenderer.invoke('worktree:lock', opts),
+  worktreePrune: () => ipcRenderer.invoke('worktree:prune'),
+
+  // Commit & tag signing. Verification is per-commit and on demand — never in bulk, since
+  // every check spawns gpg/ssh-keygen (see the signing section in main.js).
+  signingStatus: () => ipcRenderer.invoke('signing:status'),
+  signingConfigure: (opts) => ipcRenderer.invoke('signing:configure', opts),
+  signingTest: () => ipcRenderer.invoke('signing:test'),
+  signingAddAllowedSigner: (opts) => ipcRenderer.invoke('signing:addAllowedSigner', opts),
+  verifyCommit: (opts) => ipcRenderer.invoke('repo:verifyCommit', opts),
+
   // Branches
   checkout: (b) => ipcRenderer.invoke('repo:checkout', b),
   createBranch: (opts) => ipcRenderer.invoke('repo:createBranch', opts),

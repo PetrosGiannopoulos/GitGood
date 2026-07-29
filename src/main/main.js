@@ -234,6 +234,11 @@ function wrap(fn) {
         msg = 'HTTPS authentication failed.\n• Use a Personal Access Token as the password (not your account password).\n• Or set up a git credential helper.\n\nOriginal error: ' + msg;
       } else if (/Could not resolve host|unable to access/i.test(msg)) {
         msg = 'Network error: could not reach the remote host. Check your internet connection and the URL.\n\nOriginal error: ' + msg;
+      } else if (/gpg failed to sign|failed to write commit object|error: cannot run gpg|Inappropriate ioctl for device/i.test(msg)) {
+        // Signing failures reach here from commit, tag, merge and rebase alike. The usual
+        // cause is a passphrase prompt with nowhere to appear — see signingErrorHelp.
+        const help = typeof signingErrorHelp === 'function' ? signingErrorHelp(msg) : '';
+        msg = 'The commit could not be signed.\n\n' + (help ? help + '\n\n' : '') + 'Original error: ' + msg;
       }
       return { ok: false, error: msg };
     }
@@ -860,16 +865,24 @@ ipcMain.handle('repo:restoreFromCommit', wrap(async (_, { hash, files }) => {
   return { restored: fileList.length };
 }));
 
-ipcMain.handle('repo:commit', wrap(async (_, { message, description, amend }) => {
+ipcMain.handle('repo:commit', wrap(async (_, { message, description, amend, sign }) => {
   const g = ensureGit();
   if (!message || !message.trim()) throw new Error('Commit message required');
   const fullMsg = description && description.trim() ? `${message}\n\n${description}` : message;
+  // `sign` is a per-commit override of commit.gpgsign: true forces a signature, false
+  // forces none, undefined (the normal case) leaves the decision to the config.
+  const signArgs = sign === true ? ['-S'] : (sign === false ? ['--no-gpg-sign'] : []);
   // Amend rewrites HEAD instead of adding a commit. Unlike a normal commit it is allowed
   // to have nothing staged — editing only the message is a valid use — so we pass
   // --allow-empty to stop git rejecting a message-only amend as an empty commit.
   if (amend) {
-    const result = await g.raw(['commit', '--amend', '--allow-empty', '-m', fullMsg]);
+    const result = await g.raw(['commit', '--amend', '--allow-empty', ...signArgs, '-m', fullMsg]);
     return { amended: true, output: result };
+  }
+  // simple-git's commit() has no signing option, so a forced signature goes through raw.
+  if (signArgs.length) {
+    const result = await g.raw(['commit', ...signArgs, '-m', fullMsg]);
+    return { output: result };
   }
   const result = await g.commit(fullMsg);
   return result;
@@ -2776,6 +2789,11 @@ const DEFAULT_APP_SETTINGS = {
   llmEmbedModel: 'nomic-embed-text',  // Ollama embedding model used to index the repo for retrieval
   llmRetrieval: true,                 // feed retrieved diffs/content into answers (needs a built index)
   llmIndexMaxCommits: 300,            // how many recent commits to index for retrieval
+  // Repository tabs. The renderer owns tabs entirely (main still holds one repo at a
+  // time); these are just the paths to put back on the strip next launch.
+  openRepos: [],                      // paths currently on the tab strip
+  activeRepo: '',                     // which of them was in front
+  restoreTabsOnStart: true,           // reopen that set on launch instead of the welcome screen
 };
 
 function getAppSettings() {
@@ -4667,4 +4685,987 @@ function gitShowBinary(rev, filePath) {
       resolve(Buffer.concat(chunks));
     });
   });
+}
+
+// ============================================
+// COMMIT & TAG SIGNING (OpenPGP / SSH / X.509)
+// ============================================
+// Signing is entirely git's own machinery: we never hold a key or a passphrase. What this
+// section does is (a) read and write the config keys that turn it on, (b) tell the user
+// *before* they commit whether their setup actually works, and (c) verify signatures on
+// demand.
+//
+// Two things shape the design:
+//
+// • Verification is NOT free. `%G?` runs the whole signature check — a gpg or ssh-keygen
+//   process per commit — so it must never go into repo:graphLog, which asks for hundreds
+//   of commits at once. The renderer verifies one commit at a time, when it is selected.
+//
+// • gpg can block forever. If the key has a passphrase and no graphical pinentry is
+//   reachable, gpg sits waiting on a tty this process does not have. Every command here
+//   runs through runSignCmd with a timeout for exactly that reason, and the error text
+//   for it is rewritten into something a user can act on (see signingErrorHelp).
+
+// Run a command to completion, capturing both streams. Never rejects: signing tools use
+// exit codes as answers ("no such key", "bad signature"), and a throw would lose the
+// stderr that says which. `timeout` kills the child — the pinentry deadlock above.
+function runSignCmd(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    const { execFile } = require('child_process');
+    const child = execFile(cmd, args, {
+      cwd: opts.cwd,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...(opts.env || {}) },
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+      timeout: opts.timeout || 25000
+    }, (err, stdout, stderr) => {
+      resolve({
+        ok: !err,
+        code: err && typeof err.code === 'number' ? err.code : (err ? 1 : 0),
+        killed: !!(err && err.killed),
+        stdout: stdout || '',
+        stderr: stderr || '',
+        message: err ? (err.message || String(err)) : ''
+      });
+    });
+    if (opts.input !== undefined && child.stdin) {
+      try { child.stdin.end(opts.input); } catch (e) { /* child already gone */ }
+    }
+  });
+}
+
+// Turn a raw signing failure into something the user can act on. These account for nearly
+// every "it works in my terminal but not in the app" report: a GUI process has no
+// controlling terminal, so a passphrase prompt that works in a shell has nowhere to appear.
+function signingErrorHelp(text) {
+  const t = String(text || '');
+  if (/Inappropriate ioctl for device|No pinentry|pinentry.*(not found|failed)/i.test(t)) {
+    return 'gpg could not ask for your passphrase. GitGood has no terminal to prompt in, so gpg needs a *graphical* pinentry.\n' +
+      '• Windows: install Gpg4win (it ships pinentry-w32) and make sure gpg-agent is running.\n' +
+      '• macOS: `brew install pinentry-mac`, then add `pinentry-program /opt/homebrew/bin/pinentry-mac` to ~/.gnupg/gpg-agent.conf.\n' +
+      '• Linux: install pinentry-gtk2 or pinentry-qt.\n' +
+      'Then run `gpgconf --kill gpg-agent` and try again.';
+  }
+  if (/secret key not available|No secret key|failed to sign the data/i.test(t)) {
+    return 'git could not sign with that key. Check that user.signingkey names a key you hold the *secret* half of (`gpg --list-secret-keys`), and that gpg.format matches the key type.';
+  }
+  if (/timed out|ETIMEDOUT/i.test(t)) {
+    return 'The signing command never finished. That usually means gpg is waiting on a passphrase prompt which never appeared — see the pinentry notes above.';
+  }
+  return '';
+}
+
+// Read one config scope as a flat map. Deliberately not ensureGit(): global config must be
+// readable with no repository open, which is when most people set signing up.
+async function signConfigScope(scope) {
+  const out = {};
+  const r = await runSignCmd('git', ['config', `--${scope}`, '--list'], {
+    cwd: scope === 'local' ? currentRepoPath : undefined,
+    timeout: 10000
+  });
+  // A missing config file exits 1 with no output — an empty map is the right answer.
+  String(r.stdout || '').split('\n').filter(Boolean).forEach(line => {
+    const eq = line.indexOf('=');
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  });
+  return out;
+}
+
+const SIGN_TRUE = /^(true|yes|on|1)$/i;
+
+// The secret keys gpg can actually sign with. --with-colons is the only stable gpg output
+// format; the human-readable one changes between versions. A `sec` record starts a key and
+// the `fpr`/`uid` records that follow belong to it until the next `sec`.
+async function listGpgKeys() {
+  const r = await runSignCmd('gpg', ['--list-secret-keys', '--with-colons', '--keyid-format=long'], { timeout: 15000 });
+  if (!r.ok && !r.stdout) return [];
+  const keys = [];
+  let cur = null;
+  for (const line of String(r.stdout || '').split('\n')) {
+    const f = line.split(':');
+    if (f[0] === 'sec') {
+      cur = {
+        keyId: f[4] || '',
+        fingerprint: '',
+        uid: '',
+        created: f[5] ? Number(f[5]) * 1000 : null,
+        expires: f[6] ? Number(f[6]) * 1000 : null,
+        expired: f[1] === 'e',
+        revoked: f[1] === 'r',
+        // Capability field: an 's' means this key can sign. Encryption-only keys can't.
+        canSign: /s/.test(f[11] || 's')
+      };
+      keys.push(cur);
+    } else if (f[0] === 'fpr' && cur && !cur.fingerprint) {
+      cur.fingerprint = f[9] || '';
+    } else if (f[0] === 'uid' && cur && !cur.uid) {
+      cur.uid = (f[9] || '').replace(/\\x3a/gi, ':');   // gpg escapes ':' in uids
+    }
+  }
+  return keys.filter(k => k.canSign && !k.revoked);
+}
+
+// Public keys in ~/.ssh that could be used for SSH signing. git wants the *public* key path
+// in user.signingkey; the private half has to sit beside it or be loaded in an agent, so
+// `hasPrivate` is reported rather than filtered on — agent-only keys are legitimate.
+function listSshSigningKeys() {
+  const dir = path.join(os.homedir(), '.ssh');
+  const out = [];
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.pub')) continue;
+      const pub = path.join(dir, name);
+      let content = '';
+      try { content = fs.readFileSync(pub, 'utf8').trim(); } catch (e) { continue; }
+      const parts = content.split(/\s+/);
+      const type = parts[0] || '';
+      if (!/^(ssh-|sk-|ecdsa-)/.test(type)) continue;
+      out.push({
+        path: pub,
+        type,
+        comment: parts.slice(2).join(' '),
+        hasPrivate: fs.existsSync(pub.slice(0, -4))
+      });
+    }
+  } catch (e) { /* no ~/.ssh at all */ }
+  return out;
+}
+
+// Everything the Signing settings panel needs, in one round trip.
+ipcMain.handle('signing:status', wrap(async () => {
+  const [globalCfg, localCfg] = await Promise.all([
+    signConfigScope('global'),
+    currentRepoPath ? signConfigScope('local') : Promise.resolve({})
+  ]);
+  const effective = { ...globalCfg, ...localCfg };
+
+  const format = (effective['gpg.format'] || 'openpgp').toLowerCase();
+  const [gpgVer, sshHelp, gitVer] = await Promise.all([
+    runSignCmd('gpg', ['--version'], { timeout: 10000 }),
+    runSignCmd('ssh-keygen', ['-Y', 'sign'], { timeout: 10000 }),
+    runSignCmd('git', ['--version'], { timeout: 10000 })
+  ]);
+  // ssh-keygen has no --version and no help flag: `-Y sign` with no arguments exits
+  // non-zero but prints a usage line naming -Y on any build that supports signing, which
+  // is exactly the capability being probed.
+  const sshSigns = /-Y\s|namespace/i.test(sshHelp.stderr + sshHelp.stdout);
+
+  // git lowercases config keys on read, but a hand-edited file may hold either casing.
+  const allowedPath = effective['gpg.ssh.allowedsignersfile'] || effective['gpg.ssh.allowedSignersFile'] || '';
+  const expandedAllowed = allowedPath ? allowedPath.replace(/^~(?=[\\/])/, os.homedir()) : '';
+  let allowedEntries = 0;
+  if (expandedAllowed && fs.existsSync(expandedAllowed)) {
+    try {
+      allowedEntries = fs.readFileSync(expandedAllowed, 'utf8')
+        .split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+    } catch (e) { /* unreadable — report 0 rather than failing the whole panel */ }
+  }
+
+  return {
+    hasRepo: !!currentRepoPath,
+    effective: {
+      commitSign: SIGN_TRUE.test(effective['commit.gpgsign'] || ''),
+      tagSign: SIGN_TRUE.test(effective['tag.gpgsign'] || ''),
+      format,
+      key: effective['user.signingkey'] || '',
+      program: effective['gpg.program'] || effective['gpg.' + format + '.program'] || '',
+      email: effective['user.email'] || ''
+    },
+    // Which scope each value came from, so the panel can say what it is about to override.
+    scopes: {
+      global: {
+        commitSign: globalCfg['commit.gpgsign'], tagSign: globalCfg['tag.gpgsign'],
+        format: globalCfg['gpg.format'], key: globalCfg['user.signingkey']
+      },
+      local: {
+        commitSign: localCfg['commit.gpgsign'], tagSign: localCfg['tag.gpgsign'],
+        format: localCfg['gpg.format'], key: localCfg['user.signingkey']
+      }
+    },
+    gpg: {
+      available: gpgVer.ok,
+      version: (gpgVer.stdout || '').split('\n')[0] || '',
+      keys: gpgVer.ok ? await listGpgKeys() : []
+    },
+    ssh: {
+      available: sshSigns,
+      keys: listSshSigningKeys(),
+      allowedSignersFile: allowedPath,
+      allowedSignersExists: !!(expandedAllowed && fs.existsSync(expandedAllowed)),
+      allowedSignersEntries: allowedEntries,
+      defaultAllowedSignersPath: path.join(os.homedir(), '.ssh', 'allowed_signers')
+    },
+    gitVersion: (gitVer.stdout || '').trim()
+  };
+}));
+
+// Write the signing config. Every field is optional: `undefined` leaves the key alone,
+// `null` or '' unsets it in that scope (which is how you fall back to global).
+ipcMain.handle('signing:configure', wrap(async (_, opts) => {
+  const o = opts || {};
+  const scope = o.scope === 'local' ? 'local' : 'global';
+  if (scope === 'local' && !currentRepoPath) throw new Error('No repository is open — cannot write local config');
+
+  const writes = [];
+  const add = (key, value) => { if (value !== undefined) writes.push({ key, value }); };
+  if (o.commitSign !== undefined) add('commit.gpgsign', o.commitSign === null ? null : (o.commitSign ? 'true' : 'false'));
+  if (o.tagSign !== undefined) add('tag.gpgsign', o.tagSign === null ? null : (o.tagSign ? 'true' : 'false'));
+  add('gpg.format', o.format);
+  add('user.signingkey', o.key);
+  add('gpg.ssh.allowedSignersFile', o.allowedSignersFile);
+  add('gpg.program', o.program);
+
+  const failed = [];
+  for (const w of writes) {
+    const args = (w.value === null || w.value === '')
+      ? ['config', '--' + scope, '--unset', w.key]
+      : ['config', '--' + scope, w.key, String(w.value)];
+    const r = await runSignCmd('git', args, { cwd: scope === 'local' ? currentRepoPath : undefined, timeout: 10000 });
+    // --unset on a key that was never set exits 5. That is the state we asked for.
+    if (!r.ok && r.code !== 5) failed.push(w.key + ' (' + (r.stderr || r.message || '').trim() + ')');
+  }
+  if (failed.length) throw new Error('Could not write: ' + failed.join('; '));
+  return { scope, wrote: writes.map(w => w.key) };
+}));
+
+// Prove the setup works *before* the user stakes a commit on it. `commit-tree` performs a
+// real signature over a real object using the repo's own config, but writes a dangling
+// object and touches no ref, no index and no working tree — nothing to undo afterwards.
+ipcMain.handle('signing:test', wrap(async () => {
+  const cwd = currentRepoPath;
+  if (!cwd) throw new Error('Open a repository first — signing config is read from it.');
+
+  // The empty tree, computed rather than hardcoded: its hash differs in a SHA-256 repo.
+  const empty = await runSignCmd('git', ['hash-object', '-t', 'tree', '--stdin'], { cwd, input: '', timeout: 10000 });
+  const tree = String(empty.stdout || '').trim();
+  if (!tree) throw new Error('Could not create a test object: ' + (empty.stderr || empty.message));
+
+  const r = await runSignCmd('git', ['commit-tree', '-S', '-m', 'GitGood signing test', tree], { cwd, timeout: 40000 });
+  if (r.ok) {
+    const hash = String(r.stdout || '').trim();
+    // Read back what git makes of its own signature: signing can succeed while verifying
+    // comes back "cannot check" (no public key locally), and that distinction matters.
+    const F = '\x1f';
+    const v = await runSignCmd('git', ['log', '-1', '--format=%G?' + F + '%GS' + F + '%GK', hash], { cwd, timeout: 25000 });
+    const [status, signer, keyId] = String(v.stdout || '').trim().split(F);
+    return { ok: true, hash, status: status || '?', signer: signer || '', keyId: keyId || '' };
+  }
+  const raw = (r.stderr || r.message || '').trim();
+  return { ok: false, error: raw || 'Signing failed', help: signingErrorHelp(raw + (r.killed ? ' timed out' : '')) };
+}));
+
+// git's own single-letter verdicts (%G?), mapped once here so the renderer never has to
+// know them. Order of severity matters to the UI: bad > warn > unknown > none > good.
+const SIG_STATUS = {
+  G: { level: 'good',    label: 'Good signature' },
+  U: { level: 'warn',    label: 'Good signature, untrusted key' },
+  X: { level: 'warn',    label: 'Good signature, now expired' },
+  Y: { level: 'warn',    label: 'Good signature by an expired key' },
+  R: { level: 'bad',     label: 'Good signature by a REVOKED key' },
+  B: { level: 'bad',     label: 'BAD signature' },
+  E: { level: 'unknown', label: 'Signature cannot be checked (key not available)' },
+  N: { level: 'none',    label: 'Not signed' }
+};
+
+ipcMain.handle('repo:verifyCommit', wrap(async (_, opts) => {
+  const cwd = currentRepoPath;
+  if (!cwd) throw new Error('No repository opened.');
+  const hash = opts && opts.hash;
+  if (!hash) throw new Error('A commit hash is required');
+  const F = '\x1f';
+  // %GT (trust level) is deliberately absent: older git prints the placeholder back
+  // verbatim instead of expanding it, and nothing in the UI uses it.
+  const r = await runSignCmd('git',
+    ['log', '-1', '--format=%G?' + F + '%GS' + F + '%GK' + F + '%GF', hash],
+    { cwd, timeout: 30000 });
+  if (!r.ok && !r.stdout) throw new Error((r.stderr || r.message || 'git log failed').trim());
+  const [code, signer, keyId, fingerprint] = String(r.stdout || '').trim().split(F);
+  const meta = SIG_STATUS[code] || SIG_STATUS.N;
+  return {
+    hash,
+    code: code || 'N',
+    level: meta.level,
+    label: meta.label,
+    signer: signer || '',
+    keyId: keyId || '',
+    fingerprint: fingerprint || ''
+  };
+}));
+
+// Append an SSH public key to the allowed_signers file, creating it — and pointing git at
+// it — if needed. Without this file every SSH signature verifies as "cannot check": the
+// file *is* the trust store for SSH signing, and nothing creates it for you.
+ipcMain.handle('signing:addAllowedSigner', wrap(async (_, opts) => {
+  const o = opts || {};
+  const identity = String(o.identity || '').trim();
+  if (!identity) throw new Error('An identity (usually your commit email) is required');
+
+  let keyLine = String(o.publicKey || '').trim();
+  if (!keyLine && o.publicKeyPath) keyLine = fs.readFileSync(o.publicKeyPath, 'utf8').trim();
+  if (!/^(ssh-|sk-|ecdsa-)/.test(keyLine)) throw new Error('That does not look like an SSH public key');
+  // The trailing comment is free-form noise here; the type + blob are what identify a key.
+  const [type, blob] = keyLine.split(/\s+/);
+
+  let file = String(o.file || '').trim();
+  if (!file) {
+    const cfg = await signConfigScope('global');
+    file = cfg['gpg.ssh.allowedsignersfile'] || path.join(os.homedir(), '.ssh', 'allowed_signers');
+  }
+  const expanded = file.replace(/^~(?=[\\/])/, os.homedir());
+  fs.mkdirSync(path.dirname(expanded), { recursive: true });
+
+  const existing = fs.existsSync(expanded) ? fs.readFileSync(expanded, 'utf8') : '';
+  if (blob && existing.includes(blob)) return { file: expanded, added: false, reason: 'That key is already listed.' };
+
+  const entry = identity + ' namespaces="git" ' + type + ' ' + blob;
+  fs.writeFileSync(expanded, existing + (existing && !existing.endsWith('\n') ? '\n' : '') + entry + '\n');
+
+  // Point git at the file if nothing has yet. git wants a real path, not a ~ path.
+  const cfg = await signConfigScope('global');
+  if (!cfg['gpg.ssh.allowedsignersfile']) {
+    await runSignCmd('git', ['config', '--global', 'gpg.ssh.allowedSignersFile', expanded], { timeout: 10000 });
+  }
+  return { file: expanded, added: true };
+}));
+
+// ============================================
+// WORKTREES
+// ============================================
+// A linked worktree is a second checkout of the same repository: its own working tree and
+// HEAD, sharing one object store and one set of refs. That sharing is the whole point and
+// also the whole hazard — a branch can only be checked out in one worktree at a time, which
+// is why `git worktree add` refuses branches that are already out somewhere else.
+//
+// GitGood treats every worktree as an ordinary repository (repo:open works on one: its
+// `.git` is a *file* pointing into the parent's .git/worktrees/<name>, and fs.existsSync
+// is true for a file just as for a directory). So "open" here is just repo:open.
+
+// `git worktree list --porcelain` emits a blank-line-separated record per worktree:
+//   worktree /path/to/tree
+//   HEAD deadbeef…
+//   branch refs/heads/main        (absent when detached, replaced by a bare `detached` line)
+//   locked <reason>               (only when locked; reason may be empty)
+//   prunable <reason>             (only when the tree is gone from disk)
+// The porcelain form is used rather than the human one because paths with spaces make the
+// default output ambiguous.
+function parseWorktreeList(text) {
+  const out = [];
+  let cur = null;
+  for (const rawLine of String(text || '').split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (!line.trim()) { if (cur) { out.push(cur); cur = null; } continue; }
+    const sp = line.indexOf(' ');
+    const key = sp === -1 ? line : line.slice(0, sp);
+    const value = sp === -1 ? '' : line.slice(sp + 1);
+    if (key === 'worktree') {
+      if (cur) out.push(cur);
+      cur = { path: value, head: '', branch: '', detached: false, bare: false, locked: false, lockReason: '', prunable: false, prunableReason: '' };
+    } else if (!cur) {
+      continue;
+    } else if (key === 'HEAD') {
+      cur.head = value;
+    } else if (key === 'branch') {
+      cur.branch = value.replace(/^refs\/heads\//, '');
+    } else if (key === 'detached') {
+      cur.detached = true;
+    } else if (key === 'bare') {
+      cur.bare = true;
+    } else if (key === 'locked') {
+      cur.locked = true; cur.lockReason = value;
+    } else if (key === 'prunable') {
+      cur.prunable = true; cur.prunableReason = value;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+ipcMain.handle('worktree:list', wrap(async () => {
+  const g = ensureGit();
+  const raw = await g.raw(['worktree', 'list', '--porcelain']);
+  const trees = parseWorktreeList(raw);
+
+  // Which one are we looking at? Comparing resolved paths, because currentRepoPath came
+  // from a file dialog (`D:\repo`) while git reports its own normalised form.
+  const norm = (p) => {
+    try { return fs.realpathSync.native(p).replace(/[\\/]+$/, '').toLowerCase(); }
+    catch (e) { return path.resolve(p).replace(/[\\/]+$/, '').toLowerCase(); }
+  };
+  const here = currentRepoPath ? norm(currentRepoPath) : '';
+  // The first record is always the main worktree; the rest are linked.
+  trees.forEach((t, i) => {
+    t.main = i === 0;
+    t.current = !!here && norm(t.path) === here;
+    t.name = path.basename(t.path);
+    t.exists = fs.existsSync(t.path);
+  });
+  return trees;
+}));
+
+ipcMain.handle('worktree:add', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const o = opts || {};
+  const target = String(o.path || '').trim();
+  if (!target) throw new Error('A folder for the new worktree is required');
+  if (fs.existsSync(target) && fs.readdirSync(target).length) {
+    throw new Error(`"${target}" already exists and is not empty. git worktree add needs a new or empty folder.`);
+  }
+
+  const args = ['worktree', 'add'];
+  if (o.newBranch) {
+    // -B rather than -b so re-creating a worktree for a branch name that already exists
+    // is not a hard error; the caller has already confirmed the intent.
+    args.push(o.force ? '-B' : '-b', o.newBranch);
+  } else if (o.detach) {
+    args.push('--detach');
+  }
+  if (o.noCheckout) args.push('--no-checkout');
+  args.push(target);
+  // The commit-ish to base it on: a branch name, a tag, a hash, or nothing (HEAD).
+  if (o.ref) args.push(o.ref);
+
+  try {
+    const out = await g.raw(args);
+    return { path: target, output: String(out || '').trim() };
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    // The single most common failure, and git's own wording buries the fix.
+    if (/already (checked out|used by worktree)/i.test(msg)) {
+      throw new Error(
+        `That branch is already checked out in another worktree. A branch can only be out in one place at a time — ` +
+        `either switch to that worktree, or create the new one on a new branch.\n\nOriginal error: ${msg}`);
+    }
+    throw e;
+  }
+}));
+
+ipcMain.handle('worktree:remove', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const o = opts || {};
+  const target = String(o.path || '').trim();
+  if (!target) throw new Error('Which worktree?');
+  // Refusing here rather than letting git do it: removing the tree you are looking at
+  // would leave the app pointed at a deleted folder.
+  if (currentRepoPath && path.resolve(target) === path.resolve(currentRepoPath)) {
+    throw new Error('That is the worktree GitGood currently has open. Switch to another one first.');
+  }
+  const args = ['worktree', 'remove'];
+  if (o.force) args.push('--force');
+  args.push(target);
+  try {
+    await g.raw(args);
+    return { removed: target };
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/contains modified or untracked files/i.test(msg)) {
+      const err = new Error(`"${path.basename(target)}" has uncommitted changes or untracked files. Removing it deletes them.`);
+      err.needsForce = true;
+      throw err;
+    }
+    throw e;
+  }
+}));
+
+ipcMain.handle('worktree:lock', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const o = opts || {};
+  if (!o.path) throw new Error('Which worktree?');
+  // Locking marks a worktree as "do not prune" — for trees on removable drives or network
+  // shares, which look deleted (and so prunable) whenever the volume is not mounted.
+  const args = ['worktree', o.unlock ? 'unlock' : 'lock'];
+  if (!o.unlock && o.reason) args.push('--reason', o.reason);
+  args.push(o.path);
+  await g.raw(args);
+  return { path: o.path, locked: !o.unlock };
+}));
+
+ipcMain.handle('worktree:prune', wrap(async () => {
+  const g = ensureGit();
+  // --dry-run first so the caller can report what it is about to do; the administrative
+  // files being pruned are all that is left of worktrees whose folders are already gone.
+  const preview = await g.raw(['worktree', 'prune', '--dry-run', '-v']);
+  const out = await g.raw(['worktree', 'prune', '-v']);
+  const lines = String(preview || out || '').split('\n').map(s => s.trim()).filter(Boolean);
+  return { pruned: lines.length, detail: lines };
+}));
+
+// ============================================
+// FORGE INTEGRATION (GitHub & GitLab)
+// ============================================
+// Everything here talks to a *hosting* API — pull/merge requests, issues, CI — which is the
+// one part of this app that is not git. Three rules keep that contained:
+//
+// • The token never reaches the renderer. It is stored encrypted (Electron safeStorage,
+//   which is the OS keychain/DPAPI) under a top-level settings key that getAppSettings does
+//   not expose, and only ever leaves this file inside an Authorization header.
+// • Which forge you are on is derived from the remote URL, not configured. A host that is
+//   neither github.com nor obviously GitLab can be pinned per host (forgeHosts) — that is
+//   the only manual step, and only for self-hosted installs.
+// • Every response is normalised before it crosses IPC. GitHub's "pull request" and
+//   GitLab's "merge request" differ in name, shape and vocabulary; the renderer sees one
+//   shape and one word.
+
+const https = require('https');
+const { URL } = require('url');
+
+// ---- token storage -------------------------------------------------------------------
+
+// safeStorage is unavailable on a Linux box with no keyring. Falling back to plaintext
+// would quietly downgrade a credential the user believes is protected, so instead the
+// token is refused and the failure is explained.
+function forgeStorageAvailable() {
+  try {
+    const { safeStorage } = require('electron');
+    return !!(safeStorage && safeStorage.isEncryptionAvailable());
+  } catch (e) { return false; }
+}
+
+function loadForgeTokens() {
+  const all = loadSettings();
+  return all.forgeTokens || {};
+}
+
+function saveForgeToken(host, token) {
+  const { safeStorage } = require('electron');
+  const all = loadSettings();
+  all.forgeTokens = all.forgeTokens || {};
+  all.forgeTokens[host] = { enc: safeStorage.encryptString(token).toString('base64') };
+  saveSettings(all);
+}
+
+function readForgeToken(host) {
+  const rec = loadForgeTokens()[host];
+  if (!rec || !rec.enc) return '';
+  try {
+    const { safeStorage } = require('electron');
+    return safeStorage.decryptString(Buffer.from(rec.enc, 'base64'));
+  } catch (e) {
+    // Encrypted on another machine, or the OS key changed. Treat as absent — the user is
+    // told to re-enter it rather than being shown a decryption stack trace.
+    return '';
+  }
+}
+
+// ---- remote parsing ------------------------------------------------------------------
+
+// Pull { host, path } out of any of the URL shapes git accepts. scp-like syntax
+// (git@host:owner/repo) is not a URL, which is why this is hand-parsed.
+function parseRemoteUrl(url) {
+  if (!url) return null;
+  let u = String(url).trim().replace(/\.git\/?$/, '');
+  const scp = /^([^@/]+@)?([^:/]+):(?!\/)(.+)$/.exec(u);
+  if (scp && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) {
+    return { host: scp[2].toLowerCase(), path: scp[3].replace(/^\/+/, '') };
+  }
+  try {
+    const parsed = new URL(u);
+    return { host: parsed.hostname.toLowerCase(), path: parsed.pathname.replace(/^\/+/, '') };
+  } catch (e) { return null; }
+}
+
+// github.com and gitlab.com identify themselves; anything else is a self-hosted install
+// that can be pinned in settings. Guessing from the hostname beyond "it says gitlab" would
+// be wrong often enough to be worse than asking.
+function providerForHost(host) {
+  const all = loadSettings();
+  const pinned = (all.forgeHosts || {})[host];
+  if (pinned) return pinned;
+  if (host === 'github.com' || host === 'www.github.com') return 'github';
+  if (host === 'gitlab.com') return 'gitlab';
+  if (/(^|\.)gitlab\./.test(host) || /^gitlab\./.test(host)) return 'gitlab';
+  if (/(^|\.)github\./.test(host)) return 'github';
+  return '';
+}
+
+function apiBaseFor(provider, host) {
+  if (provider === 'github') {
+    return host === 'github.com' || host === 'www.github.com'
+      ? 'https://api.github.com'
+      : `https://${host}/api/v3`;          // GitHub Enterprise Server
+  }
+  if (provider === 'gitlab') return `https://${host}/api/v4`;
+  return '';
+}
+
+// The repository this window is pointed at, as the forge understands it.
+async function forgeRepoContext(remoteName) {
+  if (!currentRepoPath) throw new Error('No repository opened.');
+  const g = ensureGit();
+  const remotes = await g.getRemotes(true);
+  if (!remotes.length) throw new Error('This repository has no remotes, so there is no forge to talk to.');
+  const chosen = (remoteName && remotes.find(r => r.name === remoteName))
+    || remotes.find(r => r.name === 'origin')
+    || remotes[0];
+  const url = (chosen.refs && (chosen.refs.fetch || chosen.refs.push)) || '';
+  const parsed = parseRemoteUrl(url);
+  if (!parsed) throw new Error(`Could not read the remote URL: ${url}`);
+
+  const provider = providerForHost(parsed.host);
+  const owner = parsed.path.split('/')[0] || '';
+  // GitLab groups nest, so everything after the host is the project path; GitHub is always
+  // exactly owner/repo.
+  const repo = provider === 'gitlab' ? parsed.path : parsed.path.split('/').slice(1).join('/');
+  return {
+    remote: chosen.name,
+    url,
+    host: parsed.host,
+    provider,
+    owner,
+    repo,
+    projectPath: parsed.path,
+    apiBase: apiBaseFor(provider, parsed.host),
+    webUrl: `https://${parsed.host}/${parsed.path}`
+  };
+}
+
+// ---- HTTP ----------------------------------------------------------------------------
+
+function forgeRequest(ctx, method, urlPath, body) {
+  const token = readForgeToken(ctx.host);
+  const full = urlPath.startsWith('http') ? urlPath : ctx.apiBase + urlPath;
+  const u = new URL(full);
+  const payload = body ? Buffer.from(JSON.stringify(body)) : null;
+
+  const headers = {
+    'User-Agent': 'GitGood',
+    'Accept': ctx.provider === 'github' ? 'application/vnd.github+json' : 'application/json'
+  };
+  if (payload) {
+    headers['Content-Type'] = 'application/json';
+    headers['Content-Length'] = payload.length;
+  }
+  if (token) {
+    if (ctx.provider === 'gitlab') headers['PRIVATE-TOKEN'] = token;
+    else headers['Authorization'] = 'Bearer ' + token;
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      method,
+      headers,
+      timeout: 20000
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = text ? JSON.parse(text) : null; } catch (e) { /* not JSON — keep text */ }
+        resolve({ status: res.statusCode, headers: res.headers, json, text });
+      });
+    });
+    req.on('timeout', () => { req.destroy(new Error(`${ctx.host} did not respond within 20s`)); });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// One place to turn an HTTP status into something worth showing a user. The distinction
+// that matters most: 404 on a private repository means "your token cannot see it", which
+// looks nothing like "not found" from the outside.
+function forgeCheck(res, ctx, what) {
+  if (res.status >= 200 && res.status < 300) return res.json;
+  const apiMsg = (res.json && (res.json.message || res.json.error || res.json.error_description)) || '';
+  if (res.status === 401) {
+    throw new Error(`${ctx.host} rejected the token (401). It may be expired or revoked — add a new one in Settings → Forge.`);
+  }
+  if (res.status === 403) {
+    const rl = res.headers && res.headers['x-ratelimit-remaining'];
+    if (rl === '0') throw new Error(`${ctx.host} rate limit reached. It resets within the hour; adding a token raises the limit substantially.`);
+    throw new Error(`${ctx.host} refused the request (403). The token is missing a scope — ${ctx.provider === 'github' ? '"repo" covers private repositories, pull requests and issues' : '"api" is the scope GitLab needs'}. ${apiMsg}`);
+  }
+  if (res.status === 404) {
+    throw new Error(readForgeToken(ctx.host)
+      ? `${what} not found on ${ctx.host}. If the repository is private, the token needs access to it.`
+      : `${what} not found on ${ctx.host}. Private repositories need a token — add one in Settings → Forge.`);
+  }
+  if (res.status === 422 && res.json && res.json.errors) {
+    throw new Error(apiMsg + ': ' + res.json.errors.map(e => e.message || `${e.field} ${e.code}`).join('; '));
+  }
+  throw new Error(`${ctx.host} returned ${res.status}${apiMsg ? ': ' + apiMsg : ''}`);
+}
+
+// ---- normalisation -------------------------------------------------------------------
+
+function normalizeGithubPr(p) {
+  return {
+    number: p.number,
+    title: p.title,
+    author: (p.user && p.user.login) || '',
+    state: p.draft ? 'draft' : (p.state === 'closed' ? (p.merged_at ? 'merged' : 'closed') : 'open'),
+    draft: !!p.draft,
+    source: (p.head && p.head.ref) || '',
+    target: (p.base && p.base.ref) || '',
+    url: p.html_url,
+    createdAt: p.created_at,
+    updatedAt: p.updated_at,
+    comments: p.comments || 0,
+    sha: (p.head && p.head.sha) || ''
+  };
+}
+
+function normalizeGitlabMr(m) {
+  return {
+    number: m.iid,                        // iid is the per-project number shown in the UI
+    title: m.title,
+    author: (m.author && m.author.username) || '',
+    state: m.draft || m.work_in_progress ? 'draft'
+      : (m.state === 'merged' ? 'merged' : m.state === 'closed' ? 'closed' : 'open'),
+    draft: !!(m.draft || m.work_in_progress),
+    source: m.source_branch,
+    target: m.target_branch,
+    url: m.web_url,
+    createdAt: m.created_at,
+    updatedAt: m.updated_at,
+    comments: m.user_notes_count || 0,
+    sha: m.sha || ''
+  };
+}
+
+// ---- handlers ------------------------------------------------------------------------
+
+ipcMain.handle('forge:info', wrap(async (_, opts) => {
+  const ctx = await forgeRepoContext(opts && opts.remote);
+  const hasToken = !!readForgeToken(ctx.host);
+  const out = {
+    remote: ctx.remote, host: ctx.host, provider: ctx.provider, owner: ctx.owner,
+    repo: ctx.repo, projectPath: ctx.projectPath, webUrl: ctx.webUrl,
+    hasToken, storageAvailable: forgeStorageAvailable(),
+    user: null, defaultBranch: '', supported: !!ctx.provider
+  };
+  if (!ctx.provider || !hasToken) return out;
+
+  // One call that proves the token works and one that gives us the default branch, which
+  // the create-PR dialog needs as its base.
+  try {
+    const who = await forgeRequest(ctx, 'GET', ctx.provider === 'github' ? '/user' : '/user');
+    if (who.status >= 200 && who.status < 300 && who.json) {
+      out.user = { login: who.json.login || who.json.username || '', name: who.json.name || '' };
+    } else if (who.status === 401) {
+      out.tokenInvalid = true;
+    }
+  } catch (e) { out.offline = true; }
+
+  try {
+    const path = ctx.provider === 'github'
+      ? `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}`
+      : `/projects/${encodeURIComponent(ctx.projectPath)}`;
+    const r = await forgeRequest(ctx, 'GET', path);
+    if (r.json) out.defaultBranch = r.json.default_branch || '';
+  } catch (e) { /* non-fatal: the dialog falls back to the local HEAD */ }
+
+  return out;
+}));
+
+// Validate before storing: a token that does not work should fail here, in a dialog with a
+// text field, rather than later inside an unrelated action.
+ipcMain.handle('forge:setToken', wrap(async (_, opts) => {
+  const o = opts || {};
+  const host = String(o.host || '').trim().toLowerCase();
+  const token = String(o.token || '').trim();
+  if (!host) throw new Error('Which host is this token for?');
+  if (!token) throw new Error('Paste a token');
+  if (!forgeStorageAvailable()) {
+    throw new Error('This system has no secure credential store available, so GitGood will not save the token. On Linux this usually means no keyring (gnome-keyring / kwallet) is running.');
+  }
+
+  let provider = o.provider || providerForHost(host);
+  if (!provider) throw new Error('Tell GitGood whether this host is GitHub or GitLab first.');
+
+  const ctx = { host, provider, apiBase: apiBaseFor(provider, host) };
+  // readForgeToken is what forgeRequest consults, so stash it first and roll back on
+  // failure — simpler than threading a candidate token through the request helper.
+  const previous = loadForgeTokens()[host];
+  saveForgeToken(host, token);
+  try {
+    const res = await forgeRequest(ctx, 'GET', '/user');
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`${host} rejected that token (${res.status}). Check it was copied whole, and that it has the ${provider === 'github' ? '"repo"' : '"api"'} scope.`);
+    }
+    if (res.status >= 400) throw new Error(`${host} returned ${res.status} when checking the token.`);
+    const all = loadSettings();
+    all.forgeHosts = all.forgeHosts || {};
+    all.forgeHosts[host] = provider;
+    saveSettings(all);
+    const user = res.json || {};
+    return { host, provider, user: { login: user.login || user.username || '', name: user.name || '' } };
+  } catch (e) {
+    const all = loadSettings();
+    all.forgeTokens = all.forgeTokens || {};
+    if (previous) all.forgeTokens[host] = previous; else delete all.forgeTokens[host];
+    saveSettings(all);
+    throw e;
+  }
+}));
+
+ipcMain.handle('forge:clearToken', wrap(async (_, opts) => {
+  const host = String((opts && opts.host) || '').trim().toLowerCase();
+  const all = loadSettings();
+  if (all.forgeTokens) delete all.forgeTokens[host];
+  saveSettings(all);
+  return { host, cleared: true };
+}));
+
+ipcMain.handle('forge:pullRequests', wrap(async (_, opts) => {
+  const o = opts || {};
+  const ctx = await forgeRepoContext(o.remote);
+  if (!ctx.provider) throw new Error(`GitGood does not know whether ${ctx.host} is GitHub or GitLab. Set it in Settings → Forge.`);
+  const wantState = o.state || 'open';
+
+  if (ctx.provider === 'github') {
+    const state = wantState === 'all' ? 'all' : wantState === 'closed' ? 'closed' : 'open';
+    const res = await forgeRequest(ctx, 'GET',
+      `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/pulls?state=${state}&per_page=50&sort=updated&direction=desc`);
+    return (forgeCheck(res, ctx, 'Pull requests') || []).map(normalizeGithubPr);
+  }
+  const state = wantState === 'all' ? 'all' : wantState === 'closed' ? 'closed' : 'opened';
+  const res = await forgeRequest(ctx, 'GET',
+    `/projects/${encodeURIComponent(ctx.projectPath)}/merge_requests?state=${state}&per_page=50&order_by=updated_at`);
+  return (forgeCheck(res, ctx, 'Merge requests') || []).map(normalizeGitlabMr);
+}));
+
+ipcMain.handle('forge:issues', wrap(async (_, opts) => {
+  const o = opts || {};
+  const ctx = await forgeRepoContext(o.remote);
+  if (!ctx.provider) throw new Error(`Unknown forge for ${ctx.host}.`);
+
+  if (ctx.provider === 'github') {
+    const state = o.state === 'closed' ? 'closed' : o.state === 'all' ? 'all' : 'open';
+    const res = await forgeRequest(ctx, 'GET',
+      `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/issues?state=${state}&per_page=50&sort=updated`);
+    // GitHub returns pull requests from the issues endpoint too — they are issues under the
+    // hood — and listing them twice in two panels is confusing, so drop them here.
+    return (forgeCheck(res, ctx, 'Issues') || []).filter(i => !i.pull_request).map(i => ({
+      number: i.number, title: i.title, author: (i.user && i.user.login) || '',
+      state: i.state, url: i.html_url, updatedAt: i.updated_at, comments: i.comments || 0,
+      labels: (i.labels || []).map(l => (typeof l === 'string' ? l : l.name))
+    }));
+  }
+  const state = o.state === 'closed' ? 'closed' : o.state === 'all' ? 'all' : 'opened';
+  const res = await forgeRequest(ctx, 'GET',
+    `/projects/${encodeURIComponent(ctx.projectPath)}/issues?state=${state}&per_page=50&order_by=updated_at`);
+  return (forgeCheck(res, ctx, 'Issues') || []).map(i => ({
+    number: i.iid, title: i.title, author: (i.author && i.author.username) || '',
+    state: i.state === 'opened' ? 'open' : i.state, url: i.web_url,
+    updatedAt: i.updated_at, comments: i.user_notes_count || 0, labels: i.labels || []
+  }));
+}));
+
+ipcMain.handle('forge:createPullRequest', wrap(async (_, opts) => {
+  const o = opts || {};
+  const ctx = await forgeRepoContext(o.remote);
+  if (!ctx.provider) throw new Error(`Unknown forge for ${ctx.host}.`);
+  if (!readForgeToken(ctx.host)) throw new Error(`Add a ${ctx.host} token in Settings → Forge first — creating a request needs one.`);
+  const title = String(o.title || '').trim();
+  const head = String(o.head || '').trim();
+  const base = String(o.base || '').trim();
+  if (!title) throw new Error('A title is required');
+  if (!head || !base) throw new Error('Both a source and a target branch are required');
+  if (head === base) throw new Error('The source and target branches are the same');
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'POST', `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/pulls`, {
+      title, head, base, body: o.body || '', draft: !!o.draft
+    });
+    // 422 here is nearly always "no commits between base and head" or "already exists" —
+    // forgeCheck surfaces GitHub's own wording, which is accurate and specific.
+    const pr = forgeCheck(res, ctx, 'Pull request');
+    return normalizeGithubPr(pr);
+  }
+  const res = await forgeRequest(ctx, 'POST', `/projects/${encodeURIComponent(ctx.projectPath)}/merge_requests`, {
+    // GitLab has no draft flag: a "Draft:" title prefix is the mechanism.
+    title: o.draft && !/^draft:/i.test(title) ? 'Draft: ' + title : title,
+    description: o.body || '',
+    source_branch: head,
+    target_branch: base,
+    remove_source_branch: !!o.deleteBranch
+  });
+  return normalizeGitlabMr(forgeCheck(res, ctx, 'Merge request'));
+}));
+
+// CI state for one commit, normalised to a single verdict plus the runs behind it.
+// GitHub splits this across two APIs — check-runs (Actions, most apps) and commit statuses
+// (older integrations) — and a repository can use either or both, so both are read.
+ipcMain.handle('forge:checks', wrap(async (_, opts) => {
+  const o = opts || {};
+  const sha = String(o.sha || '').trim();
+  if (!sha) throw new Error('A commit hash is required');
+  const ctx = await forgeRepoContext(o.remote);
+  if (!ctx.provider) return { state: 'none', runs: [] };
+
+  const runs = [];
+  if (ctx.provider === 'github') {
+    const base = `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/commits/${sha}`;
+    const [checks, statuses] = await Promise.all([
+      forgeRequest(ctx, 'GET', `${base}/check-runs?per_page=50`).catch(() => null),
+      forgeRequest(ctx, 'GET', `${base}/status`).catch(() => null)
+    ]);
+    if (checks && checks.json && checks.json.check_runs) {
+      for (const c of checks.json.check_runs) {
+        runs.push({
+          name: c.name,
+          // A run that has not completed has no conclusion; report what it is doing instead.
+          state: c.status !== 'completed' ? 'running' : ghConclusion(c.conclusion),
+          url: c.html_url || c.details_url || '',
+          detail: c.output && c.output.title ? c.output.title : (c.conclusion || c.status)
+        });
+      }
+    }
+    if (statuses && statuses.json && statuses.json.statuses) {
+      for (const s of statuses.json.statuses) {
+        runs.push({
+          name: s.context,
+          state: s.state === 'success' ? 'success' : s.state === 'pending' ? 'running' : 'failure',
+          url: s.target_url || '',
+          detail: s.description || s.state
+        });
+      }
+    }
+  } else {
+    const res = await forgeRequest(ctx, 'GET',
+      `/projects/${encodeURIComponent(ctx.projectPath)}/repository/commits/${sha}/statuses?per_page=50`).catch(() => null);
+    if (res && Array.isArray(res.json)) {
+      for (const s of res.json) {
+        runs.push({
+          name: s.name || s.stage || 'pipeline',
+          state: s.status === 'success' ? 'success'
+            : (s.status === 'running' || s.status === 'pending' || s.status === 'created') ? 'running'
+            : s.status === 'skipped' || s.status === 'manual' ? 'neutral' : 'failure',
+          url: s.target_url || '',
+          detail: s.description || s.status
+        });
+      }
+    }
+  }
+
+  // The summary verdict: any failure wins, then anything still running, then success.
+  let state = 'none';
+  if (runs.length) {
+    if (runs.some(r => r.state === 'failure')) state = 'failure';
+    else if (runs.some(r => r.state === 'running')) state = 'running';
+    else if (runs.some(r => r.state === 'success')) state = 'success';
+    else state = 'neutral';
+  }
+  return {
+    state,
+    sha,
+    runs,
+    counts: {
+      success: runs.filter(r => r.state === 'success').length,
+      failure: runs.filter(r => r.state === 'failure').length,
+      running: runs.filter(r => r.state === 'running').length,
+      total: runs.length
+    }
+  };
+}));
+
+function ghConclusion(c) {
+  if (c === 'success') return 'success';
+  if (c === 'neutral' || c === 'skipped') return 'neutral';
+  if (c === 'cancelled' || c === 'timed_out' || c === 'failure' || c === 'action_required' || c === 'stale') return 'failure';
+  return 'neutral';
 }
