@@ -67,6 +67,9 @@ async function commitChanges() {
   const summary = $('#commit-summary').value.trim();
   const description = $('#commit-description').value.trim();
   const amend = isAmendMode();
+  // What the "Sign this commit" tick says, or undefined when signing isn't set up at all —
+  // in which case repo:commit passes no signing flag and git's own config decides.
+  const sign = typeof commitSignChoice === 'function' ? commitSignChoice() : undefined;
 
   if (!summary) {
     showToast('Summary required', 'error');
@@ -98,14 +101,14 @@ async function commitChanges() {
       if (!ok) return;
     }
     const label = stagedCount === 0 ? 'Rewording last commit' : 'Amending last commit';
-    const r = await withLoading(label, () => gs.commit({ message: summary, description, amend: true }));
+    const r = await withLoading(label, () => gs.commit({ message: summary, description, amend: true, sign }));
     if (!handleResult(r, stagedCount === 0 ? 'Message rewritten' : 'Last deed amended')) return;
     setAmendMode(false, { clearFields: true });
     await refreshAll();
     return;
   }
 
-  const r = await withLoading('Committing', () => gs.commit({ message: summary, description }));
+  const r = await withLoading('Committing', () => gs.commit({ message: summary, description, sign }));
   if (handleResult(r, 'Deed inscribed')) {
     $('#commit-summary').value = '';
     $('#commit-description').value = '';
@@ -196,6 +199,21 @@ function autoStashMarkerFor(branch) { return AUTO_STASH_MARKER + branch; }
 // offers to restore them.
 async function checkoutBranch(name) {
   if (!name) return;
+  // A branch can only be checked out in one worktree at a time, and git's refusal ("is
+  // already used by worktree at …") arrives after the attempt. Offer the useful move —
+  // opening the worktree that holds it — before spending the failure.
+  const holder = typeof worktreeHoldingBranch === 'function' ? worktreeHoldingBranch(name) : null;
+  if (holder) {
+    const go = await modal.confirm({
+      title: 'Checked Out Elsewhere',
+      message: `"${name}" is checked out in another worktree:\n${holder.path}\n\n` +
+        `Git will not check the same branch out twice. Open that worktree instead?`,
+      confirmText: 'Open That Worktree',
+      cancelText: 'Cancel'
+    });
+    if (go) await openWorktree(holder);
+    return;
+  }
   // Checking out a named branch is a deliberate move onto a branch — forget any
   // remembered detached-HEAD origin so a stale "return to" target doesn't linger.
   state.detachedFrom = null;
@@ -1078,25 +1096,15 @@ $('#btn-open-folder').onclick = () => {
   if (state.repo) gs.openInExplorer(state.repo.path);
 };
 
+// Closing the repository closes its tab; with other tabs open that means switching to one
+// of them rather than dropping to the welcome screen. Both paths live in 19-tabs.js
+// (closeRepoTab → closeCurrentRepo), which owns the teardown.
 $('#btn-close-repo').onclick = async () => {
-  if (typeof stopRepoWatch === 'function') await stopRepoWatch();
-  await gs.closeRepo();
-  state.repo = null;
-  state.status = null;
-  state.selectedCommit = null;
-  state.selectedFile = null;
-  state.diffRenderedKey = null;
-  state.remoteTags = null;          // belongs to the repo we just closed
-  state.remoteTagsRemote = null;
-  clearCommitCache();
-  state.collapsedCommits = null;
-  state.graphCollapsed = false;
-  state.graphFilter = "";
-  state.historyFilter = "";
-  state.detachedFrom = null;
-  _diskState.loaded = false;
-  _diskState.lastData = null;
-  showWelcome();
+  if (typeof closeRepoTab === 'function' && state.repo) {
+    await closeRepoTab(state.repo.path);
+    return;
+  }
+  await closeCurrentRepo();
 };
 
 // ============================================
@@ -1380,6 +1388,8 @@ $$('.tab').forEach(tab => {
     if (target === 'graph') refreshGraph();
     else if (target === 'branches') renderBranchesTab();
     else if (target === 'history') renderHistory();
+    // The forge tab is network-backed, so it loads on visit and never on a plain refresh.
+    else if (target === 'forge' && typeof openForgeTab === 'function') openForgeTab();
   };
 });
 

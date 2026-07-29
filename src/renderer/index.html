@@ -189,6 +189,9 @@
       </div>
     </header>
 
+    <!-- Repository tabs. Hidden until a second repository is open — see renderRepoTabs. -->
+    <div id="repo-tabs" class="repo-tabs hidden"></div>
+
     <!-- Conflict / ongoing-operation banner -->
     <div id="conflict-banner" class="conflict-banner hidden">
       <div class="conflict-banner-icon">⚔</div>
@@ -336,6 +339,17 @@
           </div>
           <ul class="sidebar-list" id="remote-list"></ul>
         </div>
+
+        <div class="sidebar-section collapsible" id="section-worktrees">
+          <div class="sidebar-header clickable" data-target="worktree-list">
+            <span class="caret">▾</span>
+            <span>⌂ Worktrees</span>
+            <button class="sidebar-header-btn" id="worktree-add-btn" title="Create a new worktree">+</button>
+            <button class="sidebar-header-btn" id="worktree-prune-btn" title="Prune records of worktrees whose folders are gone">⌫</button>
+            <span class="count" id="worktree-count">0</span>
+          </div>
+          <ul class="sidebar-list" id="worktree-list"></ul>
+        </div>
       </aside>
 
       <!-- Center: graph / branches / history / changes -->
@@ -347,6 +361,10 @@
           <button class="tab" data-tab="changes">
             ⚒ Changes
             <span class="tab-badge" id="changes-tab-badge" style="display:none">0</span>
+          </button>
+          <button class="tab" data-tab="forge">
+            ⚑ Forge
+            <span class="tab-badge" id="forge-tab-badge" style="display:none">0</span>
           </button>
         </div>
 
@@ -568,10 +586,41 @@
                   <span>Amend last commit</span>
                 </label>
                 <div class="commit-amend-note" id="commit-amend-note"></div>
+                <label class="commit-amend hidden" id="commit-sign-row" title="Sign this commit with your configured key">
+                  <input type="checkbox" id="commit-sign" />
+                  <span>Sign this commit</span>
+                </label>
+                <div class="commit-sign-note" id="commit-sign-note"></div>
                 <button class="btn-medieval primary commit-btn" id="commit-btn">
                   <span class="btn-icon">✠</span> Commit
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+        <!-- Forge tab (GitHub / GitLab) -->
+        <div class="tab-panel" data-panel="forge">
+          <div class="forge-toolbar">
+            <span class="graph-title">⚑ The Forge</span>
+            <span class="forge-repo-label" id="forge-repo-label"></span>
+            <span class="graph-spacer"></span>
+            <div class="forge-tabs" id="forge-subtabs">
+              <button class="mini-btn active" data-forge-view="prs">⇄ Requests</button>
+              <button class="mini-btn" data-forge-view="issues">☰ Issues</button>
+            </div>
+            <select id="forge-state" class="commit-search-mode" title="Which ones to list">
+              <option value="open">Open</option>
+              <option value="closed">Closed</option>
+              <option value="all">All</option>
+            </select>
+            <button class="mini-btn" id="forge-new-pr" title="Open a pull request from the current branch">+ New Request</button>
+            <button class="mini-btn" id="forge-refresh" title="Reload from the forge">⟳ Refresh</button>
+            <button class="mini-btn" id="forge-settings" title="Token & host settings">⚙</button>
+          </div>
+          <div class="forge-body" id="forge-body">
+            <div class="empty-state">
+              <div class="empty-icon">⚑</div>
+              <p>Open this tab to reach GitHub or GitLab.</p>
             </div>
           </div>
         </div>
@@ -694,5 +743,9 @@
   <script src="js/14-watch.js"></script>
   <script src="js/15-palette.js"></script>
   <script src="js/16-submodules.js"></script>
+  <script src="js/17-signing.js"></script>
+  <script src="js/18-worktrees.js"></script>
+  <script src="js/19-tabs.js"></script>
+  <script src="js/20-forge.js"></script>
 </body>
 </html>

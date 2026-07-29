@@ -585,6 +585,7 @@ async function showSettingsDialog() {
       <button class="settings-nav-item active" data-tab="general"><span class="nav-icon">⚙</span> General</button>
       <button class="settings-nav-item" data-tab="appearance"><span class="nav-icon">⚜</span> Appearance</button>
       <button class="settings-nav-item" data-tab="git"><span class="nav-icon">⚔</span> Git Identity</button>
+      <button class="settings-nav-item" data-tab="signing"><span class="nav-icon">✒</span> Signing</button>
       <button class="settings-nav-item" data-tab="defaults"><span class="nav-icon">✠</span> Defaults</button>
       <button class="settings-nav-item" data-tab="assistant"><span class="nav-icon">⚜</span> AI Assistant</button>
       <button class="settings-nav-item" data-tab="about"><span class="nav-icon">⚜</span> About</button>
@@ -627,6 +628,15 @@ async function showSettingsDialog() {
           </div>
         </div>
         <div class="settings-row">
+          <div class="label">Reopen repositories on launch<small>Put back the tabs that were open when you last quit, instead of the welcome screen.</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-restore-tabs" ${appSettings.restoreTabsOnStart !== false ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-row">
           <div class="label">Confirm destructive actions<small>Extra confirmation before discard, force-push, hard reset, etc.</small></div>
           <div class="control">
             <label class="medieval-toggle">
@@ -643,6 +653,7 @@ async function showSettingsDialog() {
       const n = parseInt(e.target.value, 10);
       appChanges.autoFetchMinutes = isNaN(n) ? 0 : Math.max(0, Math.min(180, n));
     };
+    panel.querySelector('#set-restore-tabs').onchange = (e) => { appChanges.restoreTabsOnStart = e.target.checked; };
     panel.querySelector('#set-confirm-destructive').onchange = (e) => { appChanges.confirmDestructive = e.target.checked; };
   }
 
@@ -1113,7 +1124,13 @@ async function showSettingsDialog() {
   }
 
   // Tab switching
-  const renderers = { general: renderGeneral, appearance: renderAppearance, git: renderGitIdentity, defaults: renderDefaults, assistant: renderAssistant, about: renderAbout };
+  // Signing lives in 17-signing.js and applies on its own button rather than this dialog's
+  // Save — writing signing config runs git config immediately so its Test can act on it.
+  const renderers = {
+    general: renderGeneral, appearance: renderAppearance, git: renderGitIdentity,
+    signing: () => renderSigningSettings(panel), defaults: renderDefaults,
+    assistant: renderAssistant, about: renderAbout
+  };
   body.querySelectorAll('.settings-nav-item').forEach(item => {
     item.onclick = () => {
       body.querySelectorAll('.settings-nav-item').forEach(i => i.classList.toggle('active', i === item));
@@ -1230,8 +1247,11 @@ async function applySavedAppSettings() {
         state.llmIndexMaxCommits = r.data.llmIndexMaxCommits || 300;
       }
       if (typeof updateAssistantButton === 'function') updateAssistantButton();
+      // Returned so startup can read the tab-restore keys without a second round trip.
+      return r.data;
     }
   } catch (e) { /* harmless */ }
+  return null;
 }
 
 // Wire up Settings buttons (toolbar + welcome screen)

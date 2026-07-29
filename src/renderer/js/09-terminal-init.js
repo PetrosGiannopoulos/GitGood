@@ -1,7 +1,14 @@
 (async function init() {
   try {
+    // Wait for the document before doing anything. This file is script 09 of 19 and the
+    // startup path below calls into later ones (tab restore, signing); without this the
+    // first `await` hands control back to the parser mid-way through the script list and
+    // those functions may not exist yet.
+    if (document.readyState === 'loading') {
+      await new Promise(r => document.addEventListener('DOMContentLoaded', r, { once: true }));
+    }
     // Apply saved theme/font before anything else so there's no flash
-    await applySavedAppSettings();
+    const saved = await applySavedAppSettings();
     // Check if a repo is already open (e.g. on reload)
     const cur = await gs.currentRepo();
     if (cur && cur.ok && cur.data) {
@@ -9,8 +16,11 @@
       $('#welcome-screen').classList.add('hidden');
       $('#app-screen').classList.remove('hidden');
       updateRepoInfo();
+      noteRepoOpened(cur.data);
       await refreshAll();
-    } else {
+      initCommitSignToggle();
+    } else if (!(await restoreRepoTabs(saved))) {
+      // Nothing to restore (or restoring failed) — the ordinary first-run path.
       await showWelcome();
     }
   } catch (err) {

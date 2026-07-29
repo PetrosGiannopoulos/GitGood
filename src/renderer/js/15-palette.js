@@ -118,6 +118,21 @@ function paletteCommands() {
     { id: 'view.popout', title: 'Pop Out the Diff', group: 'View', icon: '⤢',
       available: hasRepo, run: () => openDiffPopout() },
 
+    // --- forge ---
+    { id: 'forge.open', title: 'Forge: Pull Requests & Issues', group: 'Forge', icon: '⚑',
+      keywords: 'github gitlab pr mr merge request issue', available: hasRepo,
+      run: () => goToTab('forge') },
+    { id: 'forge.newpr', title: 'Forge: New Pull Request…', group: 'Forge', icon: '⇄',
+      keywords: 'github gitlab open pr mr merge request create', available: hasRepo,
+      run: () => showCreatePrDialog() },
+
+    // --- worktrees ---
+    { id: 'worktree.add', title: 'New Worktree…', group: 'Worktrees', icon: '⌂',
+      keywords: 'worktree second checkout parallel branch folder',
+      available: hasRepo, run: () => showAddWorktreeDialog() },
+    { id: 'worktree.prune', title: 'Prune Stale Worktrees', group: 'Worktrees', icon: '⌫',
+      keywords: 'worktree clean missing', available: hasRepo, run: () => pruneWorktrees() },
+
     // --- tools ---
     { id: 'tool.terminal', title: 'Open Terminal', group: 'Tools', icon: '⌨',
       available: hasRepo, run: () => openTerminal() },
@@ -152,6 +167,19 @@ function paletteDynamicCommands() {
       run: () => showRebaseDialog(b)
     });
   });
+
+  // Switching worktree is just opening a repo, so it belongs next to the branch commands.
+  if (typeof worktreeState !== 'undefined') {
+    (worktreeState.list || []).filter(w => !w.current && w.exists).forEach(w => {
+      out.push({
+        id: 'worktree.open.' + w.path,
+        title: `Open worktree ${w.branch || w.name}`,
+        subtitle: w.path,
+        group: 'Worktrees', icon: '⌂', keywords: 'worktree switch ' + w.path,
+        run: () => openWorktree(w)
+      });
+    });
+  }
 
   const seen = new Set();
   [...(state.stagedFiles || []), ...(state.unstagedFiles || [])].forEach(f => {

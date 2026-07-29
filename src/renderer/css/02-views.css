@@ -855,9 +855,70 @@
   color: var(--gold-accent);
 }
 
+/* Which key the "Sign this commit" tick above will use. Hidden along with its row when no
+   signing key is configured — see initCommitSignToggle. */
+.commit-sign-note {
+  margin-top: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+#commit-sign-row.hidden ~ .commit-sign-note { display: none; }
+
 .commit-btn {
   margin-top: auto;
   padding: 14px;
+}
+
+/* ============================================
+   SIGNATURES
+   ============================================ */
+/* One line under a commit's hash. Rendered only for commits that carry a signature, so an
+   unsigned repository shows nothing at all rather than a column of "not signed". */
+.sig-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  background: var(--bg);
+}
+.sig-badge .sig-icon { font-size: 13px; line-height: 1; }
+.sig-badge .sig-label { flex: 1; min-width: 0; }
+.sig-badge .sig-key { color: var(--text-muted); font-size: 10px; }
+
+.sig-badge.sig-good    { border-left-color: var(--added); color: var(--added); }
+.sig-badge.sig-warn    { border-left-color: var(--gold-accent); color: var(--gold-accent); }
+.sig-badge.sig-bad     { border-left-color: var(--crusader-red-bright); color: var(--crusader-red-bright); }
+.sig-badge.sig-unknown { border-left-color: var(--border-strong); color: var(--text-dim); }
+
+/* Settings → Signing: the test output block and the panel's own action row. */
+.sign-test-output {
+  margin-top: 10px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--gold-accent);
+  max-height: 260px;
+  overflow: auto;
+}
+.sign-test-output.hidden { display: none; }
+
+.settings-actions-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 /* ============================================

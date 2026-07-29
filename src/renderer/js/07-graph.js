@@ -1152,6 +1152,8 @@ async function renderGraphDetail(commit) {
     <div class="detail-section">
       <div class="detail-header">⚜ Hash</div>
       <div class="detail-meta text-mono" style="word-break:break-all">${escapeHtml(commit.hash)}</div>
+      <div class="sig-slot" data-sig-hash="${escapeHtml(commit.hash)}"></div>
+      <div class="checks-slot" data-checks-sha="${escapeHtml(commit.hash)}"></div>
     </div>
     ${commit.parents && commit.parents.length > 1
       ? `<div class="detail-section"><div class="detail-header">⚒ Merge of ${commit.parents.length} parents</div><div class="detail-meta text-mono" style="word-break:break-all">${commit.parents.map(p => escapeHtml(p.slice(0,7))).join(' + ')}</div></div>`
@@ -1164,6 +1166,16 @@ async function renderGraphDetail(commit) {
       <div class="diff-content" id="graph-diff-content" style="border:1px solid var(--border);max-height:55vh"><div class="empty-state"><span class="loading"></span></div></div>
     </div>
   `;
+
+  // Signature check runs on its own — one gpg/ssh-keygen process, and the diff below is
+  // usually the slower of the two. Unsigned commits leave the slot empty (see 17-signing).
+  if (typeof hydrateSignatureBadge === 'function') {
+    hydrateSignatureBadge(panel.querySelector('.sig-slot'), requestedHash);
+  }
+  // CI state, if this repository has a forge connected. Silent when it doesn't.
+  if (typeof hydrateChecksBadge === 'function') {
+    hydrateChecksBadge(panel.querySelector('.checks-slot'), requestedHash);
+  }
 
   let details;
   try {
@@ -1408,9 +1420,21 @@ function showCreateTagDialog(hash) {
     <p class="modal-text">Tag commit <code class="text-mono text-red">${escapeHtml(hash.slice(0,7))}</code></p>
     <div class="modal-field"><label>Tag Name</label><input class="modal-input" id="new-tag-name" placeholder="v1.0.0" /></div>
     <div class="modal-field"><label>Message (optional, creates annotated tag)</label><input class="modal-input" id="new-tag-msg" placeholder="Release notes…" /></div>
+    <label class="modal-checkbox" id="new-tag-sign-row" hidden><input type="checkbox" id="new-tag-sign" />
+      Sign this tag with your signing key (always annotated)</label>
     ${remote ? `<label class="modal-checkbox"><input type="checkbox" id="new-tag-push" />
       Push to ${escapeHtml(remote)} after creating (a tag is not shared until it is pushed)</label>` : ''}
   `;
+  // Only offer signing once a key exists; ticked by default when tag.gpgsign is already on.
+  if (typeof loadSigningStatus === 'function') {
+    loadSigningStatus().then(st => {
+      if (!st || !st.effective || !st.effective.key) return;
+      const row = body.querySelector('#new-tag-sign-row');
+      const cb = body.querySelector('#new-tag-sign');
+      if (row) row.hidden = false;
+      if (cb) cb.checked = !!st.effective.tagSign;
+    });
+  }
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
   cancelBtn.onclick = () => modal.hide();
@@ -1420,10 +1444,14 @@ function showCreateTagDialog(hash) {
     const name = $('#new-tag-name').value.trim();
     const msg = $('#new-tag-msg').value.trim();
     const push = !!(body.querySelector('#new-tag-push') || {}).checked;
+    const sign = !!(body.querySelector('#new-tag-sign') || {}).checked;
     if (!name) { showToast('Tag name required', 'error'); return; }
     modal.hide();
     const args = ['tag'];
-    if (msg) args.push('-a', name, '-m', msg, hash);
+    // -s implies an annotated tag, and an annotated tag must carry a message — fall back to
+    // the tag's own name rather than dropping the user into git's editor, which never opens.
+    if (sign) args.push('-s', name, '-m', msg || name, hash);
+    else if (msg) args.push('-a', name, '-m', msg, hash);
     else args.push(name, hash);
     const r = await gs.rawCommand(args);
     if (!handleResult(r, `Tag ${name} forged`)) return;
