@@ -2905,6 +2905,129 @@ body.resizing-panes * {
 .forge-filepath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
 .forge-diff { border: 1px solid var(--border); }
 
+/* ---- work items & board ---- */
+/* The Work Items list is the same left-hand list as everywhere else, just a little wider:
+   its rows carry a column badge that the request rows do not. */
+.forge-items-pane { width: 400px; }
+
+.forge-col-badge {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  font-size: 10px;
+  color: var(--gold-accent);
+  margin-right: 6px;
+}
+.forge-type {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* The board scrolls sideways through its columns; each column scrolls on its own. */
+.forge-board-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.forge-board-hint {
+  padding: 6px 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.forge-board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: stretch;
+}
+.forge-col {
+  width: 270px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.forge-col-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.forge-col-name {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--bone-white);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.forge-col-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.forge-col-body.drop-target {
+  background: color-mix(in srgb, var(--gold-accent) 12%, transparent);
+  outline: 1px dashed var(--gold-accent);
+  outline-offset: -3px;
+}
+
+.forge-card {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 8px;
+  cursor: pointer;
+  transition: border-color 0.1s, transform 0.1s;
+}
+.forge-card:hover { border-color: var(--crusader-red); }
+.forge-card.active { border-color: var(--gold-accent); box-shadow: inset 3px 0 0 var(--gold-accent); }
+.forge-card.dragging { opacity: 0.4; transform: rotate(-1deg); }
+.forge-card[draggable="true"] { cursor: grab; }
+.forge-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.forge-card-head .forge-ext { margin-left: auto; }
+.forge-card-title {
+  font-size: 12px;
+  color: var(--bone-white);
+  line-height: 1.4;
+  /* Three lines then ellipsis: a card is a glance, not a read. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.forge-card-labels { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.forge-card-foot {
+  margin-top: 6px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.forge-card-foot span:last-child { margin-left: auto; }
+
 /* Token / host setup, shown in place of the list until the forge can be reached. */
 .forge-setup {
   max-width: 620px;

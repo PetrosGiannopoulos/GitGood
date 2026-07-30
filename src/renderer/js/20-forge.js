@@ -11,21 +11,35 @@
 
 const forgeState = {
   info: null,        // last forge:info payload
-  view: 'prs',       // 'prs' | 'issues'
+  view: 'prs',       // 'prs' | 'issues' | 'items' | 'board'
   items: [],
   loading: false,
   loadedFor: null,   // repo path the current list belongs to
   checks: new Map(), // sha -> forge:checks result, so the graph doesn't re-ask per click
   // The request or issue being read in the right-hand pane. Panes are filled lazily and
   // then kept, so flipping between Conversation and Files costs nothing the second time.
-  detail: null       // { kind, number, data, tab, timeline, commits, files, error }
+  detail: null,      // { kind, number, data, tab, timeline, commits, files, error }
+  // Boards. The Work Items and Board views are two drawings of one payload, so they share
+  // a single fetch — switching between them costs nothing.
+  boards: null,      // [{ id, title, url }] — null until asked for
+  boardId: null,
+  board: null        // the loaded board: { columns: [{ id, name, items: [] }], fieldId, … }
 };
+
+// Which views are drawn from the board payload rather than from a list of requests/issues.
+function forgeIsBoardView(view) {
+  const v = view || forgeState.view;
+  return v === 'items' || v === 'board';
+}
 
 function forgeReset() {
   forgeState.info = null;
   forgeState.items = [];
   forgeState.loadedFor = null;
   forgeState.detail = null;
+  forgeState.boards = null;
+  forgeState.boardId = null;
+  forgeState.board = null;
   forgeState.checks.clear();
   const badge = document.getElementById('forge-tab-badge');
   if (badge) badge.style.display = 'none';
@@ -34,11 +48,29 @@ function forgeReset() {
 // Entry point from the tab strip.
 async function openForgeTab() {
   if (!state.repo) return;
-  if (forgeState.loadedFor === state.repo.path && forgeState.items.length) { renderForge(); return; }
+  if (forgeState.loadedFor === state.repo.path &&
+      (forgeIsBoardView() ? forgeState.board : forgeState.items.length)) { renderForge(); return; }
   await refreshForge();
 }
 
+// Callers fire this and walk away (a click handler cannot await), so a throw inside would
+// surface as a bare "unhandled rejection" banner with no idea which tab it came from. It
+// belongs in the panel that failed.
 async function refreshForge() {
+  try {
+    await refreshForgeInner();
+  } catch (err) {
+    forgeState.loading = false;
+    const body = document.getElementById('forge-body');
+    if (body) {
+      body.classList.remove('has-split');
+      body.innerHTML = forgeErrorHtml((err && err.message) || String(err));
+    }
+    console.error('[forge]', err);
+  }
+}
+
+async function refreshForgeInner() {
   const body = document.getElementById('forge-body');
   if (!body || !state.repo) return;
   forgeState.loading = true;
@@ -55,9 +87,12 @@ async function refreshForge() {
   }
   forgeState.info = info.data;
   updateForgeLabel();
+  updateForgeToolbar();
 
   if (!forgeState.info.supported) { forgeState.loading = false; renderForgeUnknownHost(); return; }
   if (!forgeState.info.hasToken || forgeState.info.tokenInvalid) { forgeState.loading = false; renderForgeTokenPrompt(); return; }
+
+  if (forgeIsBoardView()) { await refreshForgeBoard(); return; }
 
   const stateFilter = (document.getElementById('forge-state') || {}).value || 'open';
   const r = forgeState.view === 'issues'
@@ -69,6 +104,77 @@ async function refreshForge() {
   forgeState.items = r.data || [];
   forgeState.loadedFor = state.repo.path;
   renderForge();
+}
+
+// The open/closed filter belongs to the request and issue lists; the board picker belongs
+// to the other two. Showing all of it at once would offer controls that do nothing.
+function updateForgeToolbar() {
+  const boardView = forgeIsBoardView();
+  const stateSel = document.getElementById('forge-state');
+  const boardSel = document.getElementById('forge-board');
+  const newPr = document.getElementById('forge-new-pr');
+  if (stateSel) stateSel.style.display = boardView ? 'none' : '';
+  if (newPr) newPr.style.display = boardView ? 'none' : '';
+  if (boardSel) boardSel.style.display = boardView ? '' : 'none';
+}
+
+// Load the board list once per repository, then the selected board. Both views land here.
+async function refreshForgeBoard() {
+  const body = document.getElementById('forge-body');
+  if (!body) return;
+
+  if (!forgeState.boards) {
+    const r = await gs.forgeBoards({});
+    forgeState.loading = false;
+    if (!r || !r.ok) { body.classList.remove('has-split'); body.innerHTML = forgeErrorHtml(r && r.error); return; }
+    forgeState.boards = r.data || [];
+  }
+
+  // Checked on every pass, not only on the one that fetched: an empty list is cached like
+  // any other, and an empty array is truthy, so the block above is skipped from the second
+  // call onwards. Reading boards[0] out of it was how this used to throw.
+  if (!forgeState.boards.length) {
+    forgeState.loading = false;
+    forgeState.board = null;
+    body.classList.remove('has-split');
+    body.innerHTML = forgeNoBoardsHtml();
+    updateForgeBoardPicker();
+    return;
+  }
+
+  if (!forgeState.boardId || !forgeState.boards.some(b => b.id === forgeState.boardId)) {
+    forgeState.boardId = forgeState.boards[0].id;
+  }
+  updateForgeBoardPicker();
+
+  const r = await gs.forgeBoard({ id: forgeState.boardId });
+  forgeState.loading = false;
+  if (!r || !r.ok) { body.classList.remove('has-split'); body.innerHTML = forgeErrorHtml(r && r.error); return; }
+  forgeState.board = r.data;
+  forgeState.loadedFor = state.repo.path;
+  renderForge();
+}
+
+function forgeNoBoardsHtml() {
+  const gh = (forgeState.info || {}).provider === 'github';
+  return `<div class="empty-state">
+    <div class="empty-icon">▦</div>
+    <p>No ${gh ? 'project' : 'board'} is attached to this repository.</p>
+    <p class="text-muted" style="max-width:520px">
+      ${gh
+        ? 'GitGood reads GitHub Projects that are linked to this repository. Link one from the repository’s Projects tab and it will appear here.'
+        : 'GitLab creates a default board per project. If none is listed, the token may not be allowed to see it.'}
+    </p>
+  </div>`;
+}
+
+function updateForgeBoardPicker() {
+  const sel = document.getElementById('forge-board');
+  if (!sel) return;
+  const boards = forgeState.boards || [];
+  sel.innerHTML = boards.map(b =>
+    `<option value="${forgeAttr(b.id)}"${b.id === forgeState.boardId ? ' selected' : ''}>${escapeHtml(b.title)}</option>`).join('');
+  sel.disabled = boards.length < 2;
 }
 
 function updateForgeLabel() {
@@ -94,6 +200,7 @@ function forgeErrorHtml(msg) {
 function renderForge() {
   const body = document.getElementById('forge-body');
   if (!body) return;
+  updateForgeToolbar();   // also covers the cached path, which never goes through refreshForge
   const items = forgeState.items || [];
 
   // The badge counts open requests only — an issue count on a tab that also lists requests
@@ -104,6 +211,8 @@ function renderForge() {
     badge.textContent = open;
     badge.style.display = open ? 'inline-block' : 'none';
   }
+
+  if (forgeIsBoardView()) { renderForgeBoardView(body); return; }
 
   const current = (state.branches.local && state.branches.local.current) || '';
   const listHtml = items.length
@@ -122,6 +231,219 @@ function renderForge() {
     </div>`;
   body.classList.add('has-split');
   renderForgeDetail();
+}
+
+// ============================================
+// WORK ITEMS & BOARD
+// ============================================
+// Both are the same payload. Work Items is the flat reading of it — every card in one list,
+// with the column it sits in shown as a badge — and Board is the columnar one. The reader
+// on the right is the same reader the request and issue lists use.
+
+function forgeBoardCards() {
+  const b = forgeState.board;
+  if (!b) return [];
+  const out = [];
+  for (const col of b.columns || []) {
+    for (const card of col.items || []) out.push(Object.assign({ columnName: col.name }, card));
+  }
+  return out;
+}
+
+function renderForgeBoardView(body) {
+  const b = forgeState.board;
+  if (!b) {
+    body.classList.remove('has-split');
+    body.innerHTML = forgeNoBoardsHtml();
+    return;
+  }
+  // The board is wide, so the reader only takes its width once something is open. The Work
+  // Items list is narrow and keeps the reader alongside it permanently, like the other lists.
+  const isBoard = forgeState.view === 'board';
+  const showReader = !isBoard || !!forgeState.detail;
+  body.innerHTML = `
+    <div class="forge-split">
+      ${isBoard ? forgeBoardHtml(b) : `<div class="forge-list-pane forge-items-pane">${forgeWorkItemsHtml(b)}</div>`}
+      ${showReader ? '<div class="forge-detail" id="forge-detail"></div>' : ''}
+    </div>`;
+  body.classList.add('has-split');
+  if (showReader) renderForgeDetail();
+}
+
+function forgeWorkItemsHtml(b) {
+  const cards = forgeBoardCards();
+  if (!cards.length) {
+    return `<div class="empty-state"><div class="empty-icon">⛯</div><p>This ${escapeHtml(b.title)} has no items.</p></div>`;
+  }
+  // Newest activity first: a work-item list read top-down should start with what moved.
+  const sorted = cards.slice().sort((x, y) => new Date(y.updatedAt || 0) - new Date(x.updatedAt || 0));
+  return `<ul class="forge-list">${sorted.map(c => `
+    <li class="forge-item${forgeCardActiveClass(c)}" ${forgeCardOpenAttr(c)}>
+      <div class="forge-item-head">
+        <span class="forge-state forge-state-${escapeHtml(c.state)}">${escapeHtml(c.state)}</span>
+        ${c.number ? `<span class="forge-num">#${c.number}</span>` : ''}
+        <span class="forge-title">${escapeHtml(c.title)}</span>
+        ${c.url ? forgeOpenExternalBtnHtml(c.url) : ''}
+      </div>
+      <div class="forge-item-meta">
+        <span class="forge-col-badge">${escapeHtml(c.columnName)}</span>
+        <span class="forge-type">${escapeHtml(c.type)}</span>
+        ${c.author ? ' · ' + escapeHtml(c.author) : ''}
+        ${c.updatedAt ? ' · updated ' + escapeHtml(relativeTime(c.updatedAt)) : ''}
+        ${forgeLabelsHtml(c.labels, 3)}
+      </div>
+    </li>`).join('')}</ul>`;
+}
+
+function forgeBoardHtml(b) {
+  const cols = b.columns || [];
+  return `<div class="forge-board-pane">
+    ${b.moveHint ? `<div class="forge-board-hint">${escapeHtml(b.moveHint)}</div>` : ''}
+    <div class="forge-board">
+      ${cols.map(col => `
+        <section class="forge-col" data-col-id="${forgeAttr(col.id)}">
+          <header class="forge-col-head">
+            <span class="forge-col-name">${escapeHtml(col.name)}</span>
+            <span class="forge-num">${(col.items || []).length}</span>
+          </header>
+          <div class="forge-col-body" data-drop-col="${forgeAttr(col.id)}">
+            ${(col.items || []).map(c => forgeCardHtml(c, b)).join('')}
+          </div>
+        </section>`).join('')}
+    </div>
+  </div>`;
+}
+
+// A card is only draggable when the board can actually take the move — a GitHub project
+// with no single-select field has nothing to write, and saying so beats a drag that fails.
+function forgeCardHtml(c, b) {
+  return `<article class="forge-card${forgeCardActiveClass(c)}"
+      ${b.canMove ? 'draggable="true"' : ''}
+      data-item-id="${forgeAttr(c.itemId)}"
+      data-card-col="${forgeAttr(c.columnId)}"
+      ${forgeCardOpenAttr(c)}>
+    <div class="forge-card-head">
+      <span class="forge-state forge-state-${escapeHtml(c.state)}">${escapeHtml(c.state)}</span>
+      ${c.number ? `<span class="forge-num">#${c.number}</span>` : ''}
+      ${c.url ? forgeOpenExternalBtnHtml(c.url) : ''}
+    </div>
+    <div class="forge-card-title">${escapeHtml(c.title)}</div>
+    ${(c.labels || []).length ? `<div class="forge-card-labels">${forgeLabelsHtml(c.labels, 3).replace(/^ · /, '')}</div>` : ''}
+    <div class="forge-card-foot">
+      <span class="forge-type">${escapeHtml(c.type)}</span>
+      ${(c.assignees || []).length ? '<span>' + escapeHtml(c.assignees.join(', ')) + '</span>' : ''}
+      ${c.updatedAt ? `<span>${escapeHtml(relativeTime(c.updatedAt))}</span>` : ''}
+    </div>
+  </article>`;
+}
+
+// A draft item exists only inside the project — there is no issue behind it and no page to
+// open — so it is read from the payload already in hand rather than fetched.
+function forgeCardOpenAttr(c) {
+  return c.kind === 'draft'
+    ? `data-forge-draft="${forgeAttr(c.itemId)}"`
+    : `data-forge-open="${c.kind === 'request' ? 'request' : 'issue'}:${c.number}"`;
+}
+
+function forgeCardActiveClass(c) {
+  const d = forgeState.detail;
+  if (!d) return '';
+  if (d.draftId) return d.draftId === c.itemId ? ' active' : '';
+  return d.number === c.number && d.kind === (c.kind === 'request' ? 'request' : 'issue') ? ' active' : '';
+}
+
+function openForgeDraft(itemId) {
+  const card = forgeBoardCards().find(c => c.itemId === itemId);
+  if (!card) return;
+  // Shaped like a loaded detail so the reader needs no special case beyond the draft flag.
+  forgeState.detail = {
+    kind: 'issue', number: 0, draftId: itemId, tab: 'conversation',
+    loading: false, error: '', timeline: [], commits: null, files: null,
+    data: {
+      kind: 'issue', number: 0, title: card.title, body: card.body || '',
+      state: 'draft', author: card.author, url: '', createdAt: card.updatedAt,
+      updatedAt: card.updatedAt, comments: 0, labels: card.labels || [],
+      assignees: card.assignees || [], milestone: ''
+    }
+  };
+  renderForge();
+}
+
+// ---- drag and drop -------------------------------------------------------------------
+// The card moves in the UI first and the forge is told after. A rejected move puts it back
+// and says why — the alternative, a card that sits still for a second after being dropped,
+// reads as a broken board.
+let _forgeDrag = null;
+
+document.addEventListener('dragstart', (e) => {
+  const card = e.target.closest && e.target.closest('.forge-card[draggable="true"]');
+  if (!card) return;
+  _forgeDrag = { itemId: card.dataset.itemId, fromCol: card.dataset.cardCol || '' };
+  card.classList.add('dragging');
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox and Chromium both refuse to start a drag without payload on the transfer.
+    e.dataTransfer.setData('text/plain', card.dataset.itemId);
+  }
+});
+
+document.addEventListener('dragend', () => {
+  _forgeDrag = null;
+  document.querySelectorAll('.forge-card.dragging').forEach(el => el.classList.remove('dragging'));
+  document.querySelectorAll('.forge-col-body.drop-target').forEach(el => el.classList.remove('drop-target'));
+});
+
+document.addEventListener('dragover', (e) => {
+  if (!_forgeDrag) return;
+  const col = e.target.closest && e.target.closest('[data-drop-col]');
+  if (!col) return;
+  e.preventDefault();                       // without this the drop event never fires
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  if (!col.classList.contains('drop-target')) {
+    document.querySelectorAll('.forge-col-body.drop-target').forEach(el => el.classList.remove('drop-target'));
+    col.classList.add('drop-target');
+  }
+});
+
+document.addEventListener('drop', (e) => {
+  if (!_forgeDrag) return;
+  const col = e.target.closest && e.target.closest('[data-drop-col]');
+  if (!col) return;
+  e.preventDefault();
+  const to = col.dataset.dropCol || '';
+  const drag = _forgeDrag;
+  _forgeDrag = null;
+  if (to !== drag.fromCol) forgeMoveCard(drag.itemId, drag.fromCol, to);
+});
+
+async function forgeMoveCard(itemId, fromCol, toCol) {
+  const b = forgeState.board;
+  if (!b) return;
+  const from = (b.columns || []).find(c => c.id === fromCol);
+  const to = (b.columns || []).find(c => c.id === toCol);
+  if (!from || !to) return;
+  const idx = from.items.findIndex(c => c.itemId === itemId);
+  if (idx === -1) return;
+
+  const [card] = from.items.splice(idx, 1);
+  card.columnId = toCol;
+  to.items.unshift(card);
+  renderForge();
+
+  const r = await gs.forgeMoveBoardItem({
+    boardId: b.id, fieldId: b.fieldId, itemId,
+    number: card.number, kind: card.kind,
+    fromColumn: fromCol, toColumn: toCol
+  });
+  if (r && r.ok) { showToast(`#${card.number || '—'} → ${to.name}`, 'success'); return; }
+
+  // Put it back exactly where it was.
+  const back = to.items.findIndex(c => c.itemId === itemId);
+  if (back !== -1) to.items.splice(back, 1);
+  card.columnId = fromCol;
+  from.items.splice(idx, 0, card);
+  renderForge();
+  showToast((r && r.error) || 'The forge refused the move.', 'error', 6000);
 }
 
 // Rows carry what it takes to open them here (kind + number); the ↗ button is the only
@@ -214,6 +536,9 @@ document.addEventListener('click', (e) => {
     if (url) gs.openExternal(url);
     return;
   }
+  const draft = e.target.closest('[data-forge-draft]');
+  if (draft) { openForgeDraft(draft.dataset.forgeDraft); return; }
+
   const row = e.target.closest('[data-forge-open]');
   if (row) {
     const [kind, number] = String(row.dataset.forgeOpen).split(':');
@@ -348,6 +673,9 @@ function renderForgeDetail() {
 function forgeDetailHeadHtml(d, x, isReq) {
   const st = x.state === 'opened' ? 'open' : x.state;
   const open = st === 'open' || st === 'draft';
+  // A project draft has no issue behind it: nothing to close, comment on, or open in a
+  // browser. It is a note on a board, and the reader shows it as one.
+  const draft = !!d.draftId;
   const counts = isReq && (x.additions || x.deletions)
     ? `<span class="forge-plusminus"><span class="text-add">+${x.additions}</span> <span class="text-del">−${x.deletions}</span></span>` : '';
 
@@ -361,7 +689,7 @@ function forgeDetailHeadHtml(d, x, isReq) {
     <div class="forge-detail-head">
       <div class="forge-detail-title">
         <span class="forge-state forge-state-${escapeHtml(st)}">${escapeHtml(st)}</span>
-        <span class="forge-num">#${x.number}</span>
+        ${draft ? '' : `<span class="forge-num">#${x.number}</span>`}
         <span class="forge-detail-name">${escapeHtml(x.title)}</span>
         <button class="forge-ext" title="Close this and go back to the list" data-forge-act="close-detail">✕</button>
       </div>
@@ -377,6 +705,7 @@ function forgeDetailHeadHtml(d, x, isReq) {
       </div>
       ${isReq ? forgeMergeStateHtml(x) : ''}
       ${isReq ? '<div class="forge-detail-checks"></div>' : ''}
+      ${draft ? '<div class="forge-detail-meta">A draft item on the board — it has no issue behind it yet.</div>' : `
       <div class="forge-detail-actions">
         ${isReq && open ? '<button class="mini-btn" data-forge-act="checkout" title="Fetch this request’s head and check it out locally">⤓ Checkout</button>' : ''}
         ${isReq && open ? '<button class="mini-btn" data-forge-act="merge" title="Merge on the forge">⑃ Merge</button>' : ''}
@@ -387,7 +716,7 @@ function forgeDetailHeadHtml(d, x, isReq) {
       </div>
       <div class="forge-detail-tabs">
         ${tabs.map(([id, label, n]) => `<button class="mini-btn${d.tab === id ? ' active' : ''}" data-forge-tab="${id}">${label}${n ? ` <span class="forge-num">${n}</span>` : ''}</button>`).join('')}
-      </div>
+      </div>`}
     </div>`;
 }
 
@@ -421,6 +750,9 @@ function forgeConversationPaneHtml(d, x) {
     : d.timelineError
       ? forgeErrorHtml(d.timelineError)
       : entries.map(forgeCommentHtml).join('');
+
+  // Nowhere to post a comment to on a project draft.
+  if (d.draftId) return body;
 
   return body + list + `
     <div class="forge-composer">
@@ -969,7 +1301,12 @@ async function hydrateChecksBadge(hostEl, sha) {
 // ============================================
 (() => {
   const refresh = document.getElementById('forge-refresh');
-  if (refresh) refresh.onclick = () => refreshForge();
+  if (refresh) refresh.onclick = () => {
+    // The board list is cached for the life of the repository, so the explicit refresh is
+    // the only thing that will notice a project or board created since it was read.
+    if (forgeIsBoardView()) { forgeState.boards = null; forgeState.board = null; }
+    refreshForge();
+  };
 
   const newPr = document.getElementById('forge-new-pr');
   if (newPr) newPr.onclick = () => showCreatePrDialog();
@@ -984,11 +1321,25 @@ async function hydrateChecksBadge(hostEl, sha) {
   if (subtabs) subtabs.onclick = (e) => {
     const btn = e.target.closest('[data-forge-view]');
     if (!btn) return;
+    const was = forgeState.view;
     forgeState.view = btn.dataset.forgeView;
-    // A request left open in the reader while the list switches to issues reads as though
-    // it belonged to that list. Switching the list closes it.
-    forgeState.detail = null;
     subtabs.querySelectorAll('[data-forge-view]').forEach(b => b.classList.toggle('active', b === btn));
+    updateForgeToolbar();
+
+    // Work Items and Board are two drawings of one payload: flipping between them is a
+    // re-render, never another round trip.
+    if (forgeIsBoardView() && forgeIsBoardView(was) && forgeState.board) { renderForge(); return; }
+
+    // Otherwise the reader is showing something that belongs to the list being left behind.
+    forgeState.detail = null;
+    refreshForge();
+  };
+
+  const boardSel = document.getElementById('forge-board');
+  if (boardSel) boardSel.onchange = () => {
+    forgeState.boardId = boardSel.value;
+    forgeState.board = null;
+    forgeState.detail = null;
     refreshForge();
   };
 })();

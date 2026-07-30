@@ -607,12 +607,16 @@
             <div class="forge-tabs" id="forge-subtabs">
               <button class="mini-btn active" data-forge-view="prs">⇄ Requests</button>
               <button class="mini-btn" data-forge-view="issues">☰ Issues</button>
+              <button class="mini-btn" data-forge-view="items">⛯ Work Items</button>
+              <button class="mini-btn" data-forge-view="board">▦ Board</button>
             </div>
             <select id="forge-state" class="commit-search-mode" title="Which ones to list">
               <option value="open">Open</option>
               <option value="closed">Closed</option>
               <option value="all">All</option>
             </select>
+            <!-- Only meaningful on the Work Items / Board views; hidden otherwise. -->
+            <select id="forge-board" class="commit-search-mode" title="Which board" style="display:none"></select>
             <button class="mini-btn" id="forge-new-pr" title="Open a pull request from the current branch">+ New Request</button>
             <button class="mini-btn" id="forge-refresh" title="Reload from the forge">⟳ Refresh</button>
             <button class="mini-btn" id="forge-settings" title="Token & host settings">⚙</button>

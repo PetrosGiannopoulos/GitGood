@@ -92,6 +92,11 @@ const api = {
   forgeSetState: (opts) => ipcRenderer.invoke('forge:setState', opts),
   forgeMerge: (opts) => ipcRenderer.invoke('forge:merge', opts),
   forgeCheckoutRequest: (opts) => ipcRenderer.invoke('forge:checkoutRequest', opts),
+  // Boards & work items. GitHub Projects v2 (GraphQL) and GitLab issue boards (REST) are
+  // flattened to one columns-and-cards shape before they get here.
+  forgeBoards: (opts) => ipcRenderer.invoke('forge:boards', opts),
+  forgeBoard: (opts) => ipcRenderer.invoke('forge:board', opts),
+  forgeMoveBoardItem: (opts) => ipcRenderer.invoke('forge:moveBoardItem', opts),
 
   // Worktrees. Opening one is just openRepo(path) — a linked worktree is a repository as
   // far as every other handler is concerned.

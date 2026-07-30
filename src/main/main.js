@@ -6097,6 +6097,306 @@ ipcMain.handle('forge:merge', wrap(async (_, opts) => {
   return { merged: j.state === 'merged', sha: j.merge_commit_sha || j.sha || '', message: '' };
 }));
 
+// ============================================
+// FORGE — BOARDS & WORK ITEMS
+// ============================================
+// The two providers disagree about this more than anywhere else in the forge:
+//
+// • GitHub has Projects v2, which are not part of the REST API at all — they exist only in
+//   GraphQL, an item is a wrapper around an issue/PR/draft rather than the issue itself,
+//   and its column is the value of a single-select *field* that the project owner defined.
+// • GitLab has issue boards, which are REST, and a "column" is a label. An issue's column
+//   is not stored anywhere: it is derived from which list labels the issue carries.
+//
+// Both are flattened into one shape — a board is columns, a column is cards — so the
+// renderer draws one board and moving a card is one call either way.
+
+function graphqlUrlFor(host) {
+  return (host === 'github.com' || host === 'www.github.com')
+    ? 'https://api.github.com/graphql'
+    : `https://${host}/api/graphql`;          // GitHub Enterprise Server
+}
+
+// GraphQL answers 200 with an `errors` array rather than an HTTP status, so the usual
+// forgeCheck is not enough on its own.
+async function forgeGraphql(ctx, query, variables) {
+  const res = await forgeRequest(ctx, 'POST', graphqlUrlFor(ctx.host), { query, variables: variables || {} });
+  if (res.status >= 400) forgeCheck(res, ctx, 'Projects');
+  const j = res.json || {};
+  if (j.errors && j.errors.length) {
+    const scope = j.errors.some(e => e.type === 'INSUFFICIENT_SCOPES' || /scope|permission/i.test(e.message || ''));
+    if (scope) {
+      throw new Error(`${ctx.host} will not show projects to this token. A classic token needs the "project" scope (read:project is enough to look); a fine-grained token needs Projects: Read and write. Add a new token in Settings → Forge.`);
+    }
+    throw new Error(j.errors.map(e => e.message).filter(Boolean).join('; ') || 'The projects API refused the query.');
+  }
+  return j.data || {};
+}
+
+const GQL_PROJECTS = `query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    projectsV2(first:20){ nodes{ id number title url closed } }
+  }
+}`;
+
+const GQL_PROJECT = `query($id:ID!,$after:String){
+  node(id:$id){ ... on ProjectV2 {
+    id title url
+    fields(first:50){ nodes{
+      __typename
+      ... on ProjectV2SingleSelectField{ id name options{ id name } }
+      ... on ProjectV2FieldCommon{ id name }
+    } }
+    items(first:100,after:$after){
+      pageInfo{ hasNextPage endCursor }
+      nodes{
+        id
+        fieldValues(first:20){ nodes{
+          __typename
+          ... on ProjectV2ItemFieldSingleSelectValue{
+            optionId name field{ ... on ProjectV2SingleSelectField{ id } }
+          }
+        } }
+        content{
+          __typename
+          ... on DraftIssue{ title body createdAt creator{ login } }
+          ... on Issue{ number title url state updatedAt author{ login }
+            labels(first:10){ nodes{ name color } } assignees(first:5){ nodes{ login } } }
+          ... on PullRequest{ number title url state isDraft updatedAt author{ login }
+            labels(first:10){ nodes{ name color } } assignees(first:5){ nodes{ login } } }
+        }
+      }
+    }
+  } }
+}`;
+
+const GQL_SET_FIELD = `mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){
+  updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,
+    value:{singleSelectOptionId:$option}}){ projectV2Item{ id } }
+}`;
+
+// Moving a card back to "no status" is a different mutation, not an empty value.
+const GQL_CLEAR_FIELD = `mutation($project:ID!,$item:ID!,$field:ID!){
+  clearProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field}){ projectV2Item{ id } }
+}`;
+
+function ghProjectCard(node) {
+  const c = node.content || {};
+  const draft = c.__typename === 'DraftIssue';
+  const isPr = c.__typename === 'PullRequest';
+  return {
+    itemId: node.id,                    // the project item, which is what a move addresses
+    kind: draft ? 'draft' : isPr ? 'request' : 'issue',
+    type: draft ? 'draft' : isPr ? 'pull request' : 'issue',
+    number: c.number || 0,
+    title: c.title || '(untitled)',
+    body: draft ? (c.body || '') : '',
+    url: c.url || '',
+    state: draft ? 'draft'
+      : isPr && c.isDraft ? 'draft'
+      : String(c.state || '').toLowerCase() === 'closed' ? 'closed'
+      : String(c.state || '').toLowerCase() === 'merged' ? 'merged' : 'open',
+    author: (c.author && c.author.login) || (c.creator && c.creator.login) || '',
+    labels: forgeLabels(((c.labels && c.labels.nodes) || []).map(l => ({ name: l.name, color: l.color }))),
+    assignees: forgeLogins((c.assignees && c.assignees.nodes) || []),
+    updatedAt: c.updatedAt || c.createdAt || ''
+  };
+}
+
+async function githubBoard(ctx, projectId) {
+  let after = null;
+  let project = null;
+  const nodes = [];
+  // 100 at a time, and a hard stop: a board is something a person reads, and five pages of
+  // cards is already past the point where the column is scrollable rather than glanceable.
+  for (let page = 0; page < 5; page++) {
+    const data = await forgeGraphql(ctx, GQL_PROJECT, { id: projectId, after });
+    const n = data.node;
+    if (!n) throw new Error('That project no longer exists on the forge.');
+    project = project || n;
+    const items = n.items || { nodes: [], pageInfo: {} };
+    nodes.push(...(items.nodes || []));
+    if (!items.pageInfo || !items.pageInfo.hasNextPage) break;
+    after = items.pageInfo.endCursor;
+  }
+
+  // The column field: the single-select called "Status" if there is one, otherwise the
+  // first single-select the project defines. A project with none has no columns to speak of.
+  const fields = ((project.fields && project.fields.nodes) || []).filter(Boolean);
+  const selects = fields.filter(f => f.__typename === 'ProjectV2SingleSelectField');
+  const statusField = selects.find(f => /^status$/i.test(f.name)) || selects[0] || null;
+
+  const columns = [{ id: '', name: 'No status', items: [] }];
+  if (statusField) {
+    for (const o of statusField.options || []) columns.push({ id: o.id, name: o.name, items: [] });
+  }
+  const byId = new Map(columns.map(c => [c.id, c]));
+
+  for (const node of nodes) {
+    const values = ((node.fieldValues && node.fieldValues.nodes) || []);
+    const v = statusField
+      ? values.find(fv => fv && fv.__typename === 'ProjectV2ItemFieldSingleSelectValue' &&
+                          fv.field && fv.field.id === statusField.id)
+      : null;
+    const card = ghProjectCard(node);
+    card.columnId = (v && v.optionId) || '';
+    (byId.get(card.columnId) || byId.get('')).items.push(card);
+  }
+
+  return {
+    id: project.id,
+    title: project.title || 'Project',
+    url: project.url || '',
+    provider: 'github',
+    fieldId: statusField ? statusField.id : '',
+    canMove: !!statusField,
+    moveHint: statusField ? '' : 'This project has no single-select field, so it has no columns to move a card between.',
+    columns
+  };
+}
+
+// ---- GitLab ---------------------------------------------------------------------------
+
+function glBoardCard(i) {
+  return {
+    itemId: String(i.iid),
+    kind: 'issue',
+    // GitLab's own word for the kind of thing this is: issue, incident, test_case, task.
+    type: (i.issue_type || 'issue').replace(/_/g, ' '),
+    number: i.iid,
+    title: i.title,
+    body: '',
+    url: i.web_url,
+    state: i.state === 'opened' ? 'open' : i.state,
+    author: (i.author && i.author.username) || '',
+    labels: forgeLabels(i.labels),
+    assignees: forgeLogins(i.assignees && i.assignees.length ? i.assignees : (i.assignee ? [i.assignee] : [])),
+    updatedAt: i.updated_at || ''
+  };
+}
+
+async function gitlabBoard(ctx, boardId) {
+  const bRes = await forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/boards/${boardId}`);
+  const board = forgeCheck(bRes, ctx, 'Board');
+
+  // A list is a label. Position matters: an issue carrying two list labels belongs to the
+  // rightmost of them, which is how GitLab itself resolves the ambiguity.
+  const lists = (board.lists || [])
+    .filter(l => l.label && l.label.name)
+    .sort((a, b) => (a.position || 0) - (b.position || 0));
+
+  const [openRes, closedRes] = await Promise.all([
+    forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/issues?state=opened&per_page=100&order_by=updated_at`),
+    forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/issues?state=closed&per_page=20&order_by=updated_at`)
+  ]);
+  const openIssues = forgeCheck(openRes, ctx, 'Issues') || [];
+  const closedIssues = (closedRes && Array.isArray(closedRes.json)) ? closedRes.json : [];
+
+  const columns = [{ id: 'open', name: 'Open', items: [] }];
+  for (const l of lists) columns.push({ id: 'label:' + l.label.name, name: l.label.name, color: l.label.color, items: [] });
+  columns.push({ id: 'closed', name: 'Closed', items: [] });
+
+  const byId = new Map(columns.map(c => [c.id, c]));
+  for (const i of openIssues) {
+    const names = (i.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+    let target = 'open';
+    for (const l of lists) if (names.includes(l.label.name)) target = 'label:' + l.label.name;
+    const card = glBoardCard(i);
+    card.columnId = target;
+    byId.get(target).items.push(card);
+  }
+  for (const i of closedIssues) {
+    const card = glBoardCard(i);
+    card.columnId = 'closed';
+    byId.get('closed').items.push(card);
+  }
+
+  return {
+    id: String(board.id),
+    title: board.name || 'Board',
+    url: `${ctx.webUrl}/-/boards/${board.id}`,
+    provider: 'gitlab',
+    fieldId: '',
+    canMove: true,
+    moveHint: lists.length ? '' : 'This board has no lists, so there is nowhere to move a card except open and closed.',
+    columns
+  };
+}
+
+// ---- handlers -------------------------------------------------------------------------
+
+// Which boards exist. GitHub calls them projects and attaches them to a repository;
+// GitLab calls them boards and a project always has at least the default one.
+ipcMain.handle('forge:boards', wrap(async (_, opts) => {
+  const ctx = await forgeCtxFor(opts);
+  if (ctx.provider === 'github') {
+    const data = await forgeGraphql(ctx, GQL_PROJECTS, { owner: ctx.owner, name: ctx.repo });
+    const repo = data.repository;
+    if (!repo) throw new Error(`${ctx.host} did not return this repository — the token may not be able to see it.`);
+    return ((repo.projectsV2 && repo.projectsV2.nodes) || [])
+      .filter(p => p && !p.closed)
+      .map(p => ({ id: p.id, number: p.number, title: p.title || `Project ${p.number}`, url: p.url }));
+  }
+  const res = await forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/boards?per_page=20`);
+  return (forgeCheck(res, ctx, 'Boards') || []).map(b => ({
+    id: String(b.id), number: b.id, title: b.name || 'Board', url: `${ctx.webUrl}/-/boards/${b.id}`
+  }));
+}));
+
+// One board, columns filled. The Work Items view is this same payload flattened in the
+// renderer — the two views are one fetch, because they are one dataset.
+ipcMain.handle('forge:board', wrap(async (_, opts) => {
+  const o = opts || {};
+  const id = String(o.id || '').trim();
+  if (!id) throw new Error('Which board?');
+  const ctx = await forgeCtxFor(o);
+  return ctx.provider === 'github' ? await githubBoard(ctx, id) : await gitlabBoard(ctx, id);
+}));
+
+// Moving a card means two entirely different things, so this is where the two providers
+// stop looking alike: GitHub writes a project field, GitLab swaps labels (and opens or
+// closes the issue when the column is the open/closed one).
+ipcMain.handle('forge:moveBoardItem', wrap(async (_, opts) => {
+  const o = opts || {};
+  const boardId = String(o.boardId || '').trim();
+  const itemId = String(o.itemId || '').trim();
+  const to = String(o.toColumn === undefined || o.toColumn === null ? '' : o.toColumn);
+  const from = String(o.fromColumn === undefined || o.fromColumn === null ? '' : o.fromColumn);
+  if (!boardId || !itemId) throw new Error('Which card, and on which board?');
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Moving a card needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  if (ctx.provider === 'github') {
+    const fieldId = String(o.fieldId || '').trim();
+    if (!fieldId) throw new Error('This project has no status field to move the card into.');
+    if (!to) {
+      await forgeGraphql(ctx, GQL_CLEAR_FIELD, { project: boardId, item: itemId, field: fieldId });
+    } else {
+      await forgeGraphql(ctx, GQL_SET_FIELD, { project: boardId, item: itemId, field: fieldId, option: to });
+    }
+    return { moved: true };
+  }
+
+  const iid = parseInt(o.number || itemId, 10);
+  if (!iid) throw new Error('Which issue?');
+  // The open and closed columns are a state change; every other column is a label.
+  const body = {};
+  if (to === 'closed') {
+    // Deliberately leaves the list label alone: closing an issue should not also empty the
+    // column it was in, or reopening it would land in the backlog instead of back where it was.
+    body.state_event = 'close';
+  } else {
+    if (from.startsWith('label:')) body.remove_labels = from.slice(6);
+    if (to.startsWith('label:')) body.add_labels = to.slice(6);
+    // Reopening has to be said explicitly, or dragging out of Closed is a no-op.
+    if (from === 'closed') body.state_event = 'reopen';
+  }
+
+  const res = await forgeRequest(ctx, 'PUT', `/projects/${glProject(ctx)}/issues/${iid}`, body);
+  forgeCheck(res, ctx, `Issue #${iid}`);
+  return { moved: true };
+}));
+
 // Check out the request's head locally. This deliberately does not check out the source
 // *branch*: on a fork that branch is not on this remote at all. Both forges publish every
 // request's head under a ref of their own (refs/pull/N/head, refs/merge-requests/N/head),
