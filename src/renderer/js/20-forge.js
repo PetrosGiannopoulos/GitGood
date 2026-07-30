@@ -1119,8 +1119,9 @@ function renderForgeTokenPrompt() {
     <div class="forge-setup">
       <h3>${i.tokenInvalid ? 'That token no longer works' : `Connect to ${escapeHtml(i.host)}`}</h3>
       <p class="modal-text text-muted">
-        ${gh ? 'A classic token with the <strong>repo</strong> scope (or a fine-grained token with Pull requests, Issues and Contents access) lets GitGood list and open pull requests.'
-             : 'A personal access token with the <strong>api</strong> scope lets GitGood list and open merge requests.'}
+        ${gh ? 'A classic token with the <strong>repo</strong> scope (or a fine-grained token with Pull requests, Issues and Contents access) lets GitGood list and open pull requests. ' +
+               'Add the <strong>project</strong> scope as well if you want the Board and Work Items tabs — a Project belongs to the account or organisation that owns it, so repository access alone does not reach it.'
+             : 'A personal access token with the <strong>api</strong> scope lets GitGood list and open merge requests, and read the issue boards.'}
         The token is encrypted by your operating system's credential store and never leaves this machine except as a request header.
       </p>
       ${i.storageAvailable ? '' : `<p class="modal-text text-red">This system has no secure credential store available, so GitGood will not save a token here.</p>`}

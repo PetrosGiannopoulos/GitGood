@@ -6117,6 +6117,25 @@ function graphqlUrlFor(host) {
     : `https://${host}/api/graphql`;          // GitHub Enterprise Server
 }
 
+// A Project belongs to a *user or organisation*, not to a repository, so the repo access a
+// token already has says nothing about whether it can see the board. That is the whole
+// reason this refusal is confusing enough to need its own paragraph.
+function forgeProjectScopeHelp(ctx) {
+  return [
+    `${ctx.host} will not show Projects to this token — repository access does not cover them,`,
+    `because a Project belongs to the user or organisation that owns it, not to the repository.`,
+    ``,
+    `Classic token: add the "project" scope (read:project if you only want to look). This is`,
+    `the simplest thing that works for both personal and organisation projects.`,
+    ``,
+    `Fine-grained token: grant Projects — Read and write, on the account or organisation that`,
+    `OWNS the project. A fine-grained token can only reach projects belonging to the resource`,
+    `owner it was issued for, and an organisation may have to approve the token first.`,
+    ``,
+    `Then paste the token in Settings → Forge (⚙ in this tab).`
+  ].join('\n');
+}
+
 // GraphQL answers 200 with an `errors` array rather than an HTTP status, so the usual
 // forgeCheck is not enough on its own.
 async function forgeGraphql(ctx, query, variables) {
@@ -6124,10 +6143,13 @@ async function forgeGraphql(ctx, query, variables) {
   if (res.status >= 400) forgeCheck(res, ctx, 'Projects');
   const j = res.json || {};
   if (j.errors && j.errors.length) {
-    const scope = j.errors.some(e => e.type === 'INSUFFICIENT_SCOPES' || /scope|permission/i.test(e.message || ''));
-    if (scope) {
-      throw new Error(`${ctx.host} will not show projects to this token. A classic token needs the "project" scope (read:project is enough to look); a fine-grained token needs Projects: Read and write. Add a new token in Settings → Forge.`);
-    }
+    // The two refusals look nothing alike and neither says what to do. A classic token
+    // reports INSUFFICIENT_SCOPES and names the scope; a fine-grained one answers FORBIDDEN
+    // with "Resource not accessible by personal access token" and no hint at all.
+    const denied = j.errors.some(e =>
+      e.type === 'INSUFFICIENT_SCOPES' || e.type === 'FORBIDDEN' ||
+      /scope|permission|not accessible/i.test(e.message || ''));
+    if (denied) throw new Error(forgeProjectScopeHelp(ctx));
     throw new Error(j.errors.map(e => e.message).filter(Boolean).join('; ') || 'The projects API refused the query.');
   }
   return j.data || {};
