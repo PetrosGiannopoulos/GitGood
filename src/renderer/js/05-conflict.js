@@ -823,6 +823,17 @@ function renderFileList(container, files, staged) {
       <div class="file-actions">${actionsInner}</div>
     `;
 
+    // Shift+click is a range *selection* gesture here, but the browser also reads it as
+    // "extend the text selection to this point" and flashes every path between the two
+    // rows highlighted until the re-render below wipes the DOM. Suppressing the default
+    // on the shift-mousedown kills the flash; plain clicks keep normal text selection.
+    li.onmousedown = (e) => {
+      if (!e.shiftKey) return;
+      e.preventDefault();
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed) sel.removeAllRanges();
+    };
+
     li.onclick = (e) => {
       // Quick-action buttons inside the row
       const btn = e.target.closest('.file-action-btn');
