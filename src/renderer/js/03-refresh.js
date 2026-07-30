@@ -3,6 +3,7 @@
 function updateRepoInfo() {
   if (!state.repo) {
     $('#repo-info').innerHTML = '<span class="repo-label">No realm</span>';
+    hideRepoPathTip();
     return;
   }
   $('#repo-info').innerHTML = `
@@ -10,6 +11,66 @@ function updateRepoInfo() {
     <span class="repo-path">${escapeHtml(state.repo.path)}</span>
   `;
 }
+
+// ---- full-path tooltip ----------------------------------------------------------------
+// The toolbar shows the path ellipsised to whatever room is left before the Sync button;
+// hovering it shows the whole thing. The tooltip is a <body> child, not a child of the
+// repo-info block, for two reasons: .toolbar-left clips its overflow (that clip is what
+// stops the path running under the buttons), and a tooltip that is itself part of the
+// hovered element's layout makes the pointer chase it — restyling the hovered node moves it
+// out from under the cursor, hover drops, it snaps back, and the pair oscillates.
+let _repoPathTip = null;
+
+function repoPathTipEl() {
+  if (_repoPathTip && _repoPathTip.isConnected) return _repoPathTip;
+  _repoPathTip = document.createElement('div');
+  _repoPathTip.className = 'repo-path-tip';
+  document.body.appendChild(_repoPathTip);
+  return _repoPathTip;
+}
+
+function showRepoPathTip() {
+  const info = document.getElementById('repo-info');
+  const path = info && info.querySelector('.repo-path');
+  if (!path || !state.repo) return;
+  const tip = repoPathTipEl();
+  tip.textContent = state.repo.path;
+  // Anchored to the toolbar's bottom edge rather than to the (clipped) path element, so it
+  // sits in the same place whether or not the text is truncated.
+  const anchor = info.getBoundingClientRect();
+  const bar = document.querySelector('.toolbar');
+  tip.style.left = Math.round(anchor.left) + 'px';
+  tip.style.top = Math.round((bar ? bar.getBoundingClientRect().bottom : anchor.bottom) + 4) + 'px';
+  tip.style.right = 'auto';
+  tip.classList.add('visible');
+  // Nudge back inside if the path is long enough to run off the right edge.
+  const box = tip.getBoundingClientRect();
+  if (box.right > window.innerWidth - 8) {
+    tip.style.left = Math.max(8, window.innerWidth - 8 - box.width) + 'px';
+  }
+}
+
+function hideRepoPathTip() {
+  if (_repoPathTip) _repoPathTip.classList.remove('visible');
+}
+
+(() => {
+  const info = document.getElementById('repo-info');
+  if (!info) return;
+  // enter/leave rather than :hover so the tooltip's own existence can never influence it.
+  info.addEventListener('mouseenter', showRepoPathTip);
+  info.addEventListener('mouseleave', hideRepoPathTip);
+  // mouseenter only fires when the pointer crosses the boundary. If the repository opens
+  // (or a tab switch repaints this block) while the cursor is already resting here, there
+  // is no crossing and hovering would feel dead until you moved away and back. Showing on
+  // move covers that; it can only ever show, so it cannot start a flicker loop.
+  info.addEventListener('mousemove', () => {
+    if (!_repoPathTip || !_repoPathTip.classList.contains('visible')) showRepoPathTip();
+  });
+  // A tooltip pinned to a viewport coordinate goes stale the moment anything moves.
+  window.addEventListener('resize', hideRepoPathTip);
+  window.addEventListener('blur', hideRepoPathTip);
+})();
 
 async function refreshAll() {
   // New commits may have appeared — drop the cached commit→files map so a file-based

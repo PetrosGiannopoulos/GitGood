@@ -422,12 +422,19 @@ body::before {
   gap: 4px;
 }
 
-/* min-width:0 defeats the automatic min-content floor on a flex item: without it the repo
-   path (one unbreakable string) sets this group's minimum width, so the group grows past
-   its share and shoves the centred button row to the right. */
-.toolbar-left { flex: 1; gap: 16px; min-width: 0; }
-.toolbar-center { flex: 0; }
-.toolbar-right { flex: 1; justify-content: flex-end; }
+/* The three groups divide a fixed width, and only ONE of them is allowed to give:
+   • left  — min-width:0 lets it shrink past its content (the repo path is one unbreakable
+     string, which would otherwise set a floor and shove the centred button row right).
+     overflow:hidden is the guarantee behind that: a flex item whose children cannot shrink
+     paints them outside its box, straight over the neighbouring group — which is exactly
+     how the toolbar buttons ended up sitting on top of the repo path. Clipping here makes
+     the group's right edge (= the Sync button's left edge) a hard boundary for the text.
+   • centre — never shrinks, so the buttons keep their labels and never overlap anything.
+   • right — grows in step with the left so the centre stays centred, but keeps its
+     automatic min-width so its icons are never squeezed. */
+.toolbar-left { flex: 1 1 auto; gap: 16px; min-width: 0; overflow: hidden; }
+.toolbar-center { flex: 0 0 auto; }
+.toolbar-right { flex: 1 1 auto; justify-content: flex-end; }
 
 .brand {
   display: flex;
@@ -435,11 +442,13 @@ body::before {
   gap: 10px;
   padding-right: 16px;
   border-right: 1px solid var(--border);
+  flex: 0 0 auto;
 }
 
 .brand-shield {
   width: 28px;
   height: 28px;
+  flex: 0 0 auto;
   color: var(--crusader-red);
   filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 50%, transparent));
 }
@@ -450,24 +459,29 @@ body::before {
   font-size: 18px;
   letter-spacing: 0.15em;
   color: var(--bone-white);
+  white-space: nowrap;
 }
 
+/* Below this width the centre button row leaves the left group too little to hold both the
+   wordmark and a legible repository name. The name is the useful one; the shield still
+   brands the window. Dropped whole rather than clipped, because half a word reads as a bug. */
+@media (max-width: 1500px) {
+  .brand-name { display: none; }
+  .brand { padding-right: 12px; }
+}
+
+/* The only elastic thing in the left group: it takes whatever is left between the brand and
+   the Sync button, and ellipsises inside it. No min-width floor — a floor makes the box
+   overhang the group, and the overflow:hidden above then cuts the text mid-glyph instead of
+   letting it end in an ellipsis. Hovering gives the full path (see .repo-path-tip). */
 .repo-info {
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
+  justify-content: center;
   line-height: 1.2;
-  /* Shrinks (min-width:0 defeats the min-content floor) but not to nothing: on a narrow
-     window the left group's share can be smaller than the repo name, and a name clipped to
-     four characters is worse than nudging the button row by a few pixels. */
-  min-width: 90px;
-  /* Anchor for the hover-expanded path below. */
-  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
 }
-
-/* Fixed height only in the name+path case (not the "No realm" placeholder), so the name
-   doesn't jump up when hovering lifts the path out of the flow. 30px ≈ both lines. */
-.repo-info:has(.repo-path) { height: 30px; }
 
 .repo-name {
   font-family: var(--font-display);
@@ -489,27 +503,35 @@ body::before {
   text-overflow: ellipsis;
 }
 
-/* Hover shows the path in full. It goes out of the flow on purpose: expanding it in place
-   would widen the left group and shove the button row across the moment the pointer passed
-   over it — the exact thing the clamp above exists to prevent. Hover still holds while the
-   pointer is over the expanded box (it's a descendant), so the path stays selectable. */
-.repo-info:hover .repo-path {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  z-index: 300;
+/* The full path on hover, as a tooltip that lives on <body> rather than inside .repo-info.
+   Two reasons, both learned the hard way:
+   • It must not be a CSS :hover rule on the path element itself. Restyling the hovered
+     element to position:absolute moves it out from under the pointer, hover drops, it
+     springs back into flow, hover returns — a flicker loop for as long as you hold still.
+     Nothing about the toolbar changes when this appears; only this element toggles.
+   • .toolbar-left clips its overflow, so a descendant tooltip would be cut off at the Sync
+     button. position:fixed on a <body> child escapes that.
+   pointer-events:none keeps it from ever becoming a hit target itself. */
+.repo-path-tip {
+  position: fixed;
+  z-index: 4000;
   max-width: 52vw;
-  width: max-content;
-  overflow: visible;
-  text-overflow: clip;
+  padding: 5px 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
   white-space: normal;
   word-break: break-all;
-  padding: 4px 8px;
   color: var(--text-dim);
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.08s;
 }
+.repo-path-tip.visible { opacity: 1; visibility: visible; }
 
 .repo-label {
   font-family: var(--font-ornament);
