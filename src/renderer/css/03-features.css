@@ -2592,6 +2592,9 @@ body.resizing-panes * {
   min-height: 0;
   overflow: auto;
 }
+/* With the split in place the two panes do the scrolling; letting the body scroll too
+   would give the tab a second, outer scrollbar. The setup screens still scroll normally. */
+.forge-body.has-split { overflow: hidden; }
 
 .forge-list { list-style: none; padding: 0; margin: 0; }
 
@@ -2664,6 +2667,243 @@ body.resizing-panes * {
   font-size: 10px;
   color: var(--text-dim);
 }
+
+/* The tab is a list on the left and a reader on the right. Only the two panes scroll —
+   the split itself never does, so the toolbar above stays put. */
+.forge-split {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+.forge-list-pane {
+  width: 340px;
+  flex-shrink: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+}
+.forge-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.forge-detail-hint { opacity: 0.5; }
+
+.forge-item.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 3px 0 0 var(--gold-accent);
+}
+/* The one target in a row that still leaves the app. Kept faint until the row is hovered
+   so it does not compete with the title. */
+.forge-ext {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  opacity: 0;
+  flex-shrink: 0;
+}
+.forge-item:hover .forge-ext,
+.forge-comment:hover .forge-ext,
+.forge-ext:focus { opacity: 1; }
+.forge-ext:hover { color: var(--gold-accent); }
+
+/* ---- the reader ---- */
+.forge-detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 12px 16px 0;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.forge-detail-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.forge-detail-name {
+  color: var(--bone-white);
+  font-size: 15px;
+  flex: 1;
+  min-width: 0;
+}
+.forge-detail-title .forge-ext { opacity: 0.6; align-self: center; }
+.forge-detail-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+.forge-plusminus { margin-left: 8px; font-family: var(--font-mono); font-size: 11px; }
+.text-add { color: var(--added); }
+.text-del { color: var(--crusader-red-bright); }
+
+.forge-mergestate {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-left: 3px solid var(--border-strong);
+  padding-left: 8px;
+}
+.forge-mergestate.ok  { color: var(--added); border-left-color: var(--added); }
+.forge-mergestate.bad { color: var(--crusader-red-bright); border-left-color: var(--crusader-red-deep); }
+.forge-detail-checks:not(:empty) { margin-top: 8px; }
+
+.forge-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0;
+}
+.forge-detail-tabs { display: flex; gap: 2px; }
+.forge-detail-tabs .mini-btn {
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.forge-detail-tabs .mini-btn.active {
+  color: var(--bone-white);
+  border-bottom-color: var(--crusader-red);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.forge-detail-body { padding: 14px 16px 24px; }
+
+/* ---- comments ---- */
+.forge-comment {
+  border: 1px solid var(--border);
+  margin-bottom: 12px;
+  background: var(--bg-elevated, var(--bg-panel));
+}
+.forge-comment-body { border-color: var(--border-strong); }
+.forge-comment.is-inline { border-left: 3px solid var(--gold-accent); }
+.forge-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.forge-comment-author { color: var(--bone-white); }
+.forge-comment-when { margin-left: auto; }
+.forge-comment-where { font-size: 10px; color: var(--text-dim); }
+.forge-verdict {
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+}
+.forge-verdict-approved { color: var(--added); border-color: var(--added); }
+.forge-verdict-changes_requested { color: var(--crusader-red-bright); border-color: var(--crusader-red-deep); }
+
+.forge-hunk {
+  margin: 0;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+/* A GitLab system note ("changed the target branch") is one line of chronology, not a
+   comment, and is drawn as such. */
+.forge-sysnote {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 3px 10px 3px 0;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+  margin: 0 0 6px 6px;
+}
+
+/* ---- rendered markdown ---- */
+.forge-md { padding: 10px 12px; font-size: 13px; line-height: 1.6; color: var(--text-dim); }
+.forge-md p { margin: 0 0 10px; }
+.forge-md p:last-child { margin-bottom: 0; }
+.forge-md code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 4px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--bone-white);
+}
+.forge-code {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-left: 2px solid var(--border-strong);
+}
+.forge-code code { background: none; padding: 0; color: var(--text-dim); }
+.forge-h { font-family: var(--font-display); color: var(--bone-white); margin: 12px 0 6px; }
+.forge-h3 { font-size: 15px; }
+.forge-h4 { font-size: 14px; }
+.forge-h5, .forge-h6, .forge-h7, .forge-h8 { font-size: 13px; }
+.forge-quote {
+  margin: 0 0 10px;
+  padding-left: 10px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-muted);
+}
+.forge-ul { margin: 0 0 10px; padding-left: 20px; }
+.forge-ul li { margin: 2px 0; }
+.forge-task { list-style: none; margin-left: -16px; }
+.forge-hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.forge-link, .forge-ref { color: var(--accent-bright); cursor: pointer; text-decoration: none; }
+.forge-link:hover, .forge-ref:hover { text-decoration: underline; }
+
+/* ---- composer ---- */
+.forge-composer { margin-top: 16px; }
+.forge-composer textarea { width: 100%; resize: vertical; font-size: 13px; }
+.forge-composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+/* ---- commits & files panes ---- */
+.forge-commits { list-style: none; padding: 0; margin: 0; }
+.forge-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.forge-commit-hash { color: var(--gold-accent); cursor: pointer; flex-shrink: 0; }
+.forge-commit-msg { color: var(--text-dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.forge-commit-meta { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+
+.forge-files-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.forge-filelist { list-style: none; padding: 8px 0; margin: 0 0 10px; }
+.forge-fileline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.forge-filepath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.forge-diff { border: 1px solid var(--border); }
 
 /* Token / host setup, shown in place of the list until the forge can be reached. */
 .forge-setup {

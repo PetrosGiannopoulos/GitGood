@@ -5393,9 +5393,11 @@ function forgeCheck(res, ctx, what) {
 
 function normalizeGithubPr(p) {
   return {
+    kind: 'request',
     number: p.number,
     title: p.title,
     author: (p.user && p.user.login) || '',
+    avatar: (p.user && p.user.avatar_url) || '',
     state: p.draft ? 'draft' : (p.state === 'closed' ? (p.merged_at ? 'merged' : 'closed') : 'open'),
     draft: !!p.draft,
     source: (p.head && p.head.ref) || '',
@@ -5410,9 +5412,11 @@ function normalizeGithubPr(p) {
 
 function normalizeGitlabMr(m) {
   return {
+    kind: 'request',
     number: m.iid,                        // iid is the per-project number shown in the UI
     title: m.title,
     author: (m.author && m.author.username) || '',
+    avatar: (m.author && m.author.avatar_url) || '',
     state: m.draft || m.work_in_progress ? 'draft'
       : (m.state === 'merged' ? 'merged' : m.state === 'closed' ? 'closed' : 'open'),
     draft: !!(m.draft || m.work_in_progress),
@@ -5424,6 +5428,120 @@ function normalizeGitlabMr(m) {
     comments: m.user_notes_count || 0,
     sha: m.sha || ''
   };
+}
+
+// A label is a name plus, on GitHub, a colour; GitLab's list endpoints hand back bare
+// strings. One shape either way, so the renderer never branches on provider.
+function forgeLabels(raw) {
+  return (raw || []).map(l => (typeof l === 'string'
+    ? { name: l, color: '' }
+    : { name: l.name || l.title || '', color: String(l.color || '').replace(/^#/, '') }
+  )).filter(l => l.name);
+}
+
+function forgeLogins(users) {
+  return (users || []).map(u => (u && (u.login || u.username)) || '').filter(Boolean);
+}
+
+function forgeAvatar(u) {
+  return (u && (u.avatar_url || u.avatarUrl)) || '';
+}
+
+function normalizeGithubIssue(i) {
+  return {
+    kind: 'issue',
+    number: i.number,
+    title: i.title,
+    author: (i.user && i.user.login) || '',
+    avatar: forgeAvatar(i.user),
+    state: i.state === 'closed' ? 'closed' : 'open',
+    url: i.html_url,
+    body: i.body || '',
+    createdAt: i.created_at,
+    updatedAt: i.updated_at,
+    closedAt: i.closed_at || '',
+    comments: i.comments || 0,
+    labels: forgeLabels(i.labels),
+    assignees: forgeLogins(i.assignees),
+    milestone: (i.milestone && i.milestone.title) || ''
+  };
+}
+
+function normalizeGitlabIssue(i) {
+  return {
+    kind: 'issue',
+    number: i.iid,
+    title: i.title,
+    author: (i.author && i.author.username) || '',
+    avatar: forgeAvatar(i.author),
+    state: i.state === 'opened' ? 'open' : i.state,
+    url: i.web_url,
+    body: i.description || '',
+    createdAt: i.created_at,
+    updatedAt: i.updated_at,
+    closedAt: i.closed_at || '',
+    comments: i.user_notes_count || 0,
+    labels: forgeLabels(i.labels),
+    assignees: forgeLogins(i.assignees && i.assignees.length ? i.assignees : (i.assignee ? [i.assignee] : [])),
+    milestone: (i.milestone && i.milestone.title) || ''
+  };
+}
+
+// The list rows carry only what a row shows. The detail view needs the description, the
+// review/merge state and the counts, which cost an extra round trip per request — so they
+// are only fetched when a request is actually opened.
+function normalizeGithubPrDetail(p) {
+  return Object.assign(normalizeGithubPr(p), {
+    kind: 'request',
+    body: p.body || '',
+    avatar: forgeAvatar(p.user),
+    merged: !!p.merged,
+    // GitHub computes mergeability in the background; null means "ask again shortly",
+    // which is not the same as "cannot merge" and must not be shown as a conflict.
+    mergeable: typeof p.mergeable === 'boolean' ? p.mergeable : null,
+    mergeableState: p.mergeable_state || '',
+    additions: p.additions || 0,
+    deletions: p.deletions || 0,
+    changedFiles: p.changed_files || 0,
+    commitsCount: p.commits || 0,
+    labels: forgeLabels(p.labels),
+    assignees: forgeLogins(p.assignees),
+    reviewers: forgeLogins(p.requested_reviewers),
+    milestone: (p.milestone && p.milestone.title) || '',
+    closedAt: p.closed_at || '',
+    mergedAt: p.merged_at || '',
+    // A fork's branch is not on this remote, so the "check it out" button has to fetch the
+    // request ref rather than the branch name.
+    isFork: !!(p.head && p.head.repo && p.base && p.base.repo &&
+               p.head.repo.full_name !== p.base.repo.full_name),
+    headLabel: (p.head && p.head.label) || ''
+  });
+}
+
+function normalizeGitlabMrDetail(m) {
+  return Object.assign(normalizeGitlabMr(m), {
+    kind: 'request',
+    body: m.description || '',
+    avatar: forgeAvatar(m.author),
+    merged: m.state === 'merged',
+    // GitLab answers "can this merge" with a word. can_be_merged is the only yes; an
+    // unchecked status is reported as unknown for the same reason as GitHub's null.
+    mergeable: !m.merge_status || m.merge_status === 'unchecked' ? null : m.merge_status === 'can_be_merged',
+    mergeableState: m.detailed_merge_status || m.merge_status || '',
+    additions: 0,                 // GitLab only counts lines on the changes endpoint
+    deletions: 0,
+    changedFiles: parseInt(String(m.changes_count || '0'), 10) || 0,
+    commitsCount: 0,
+    labels: forgeLabels(m.labels),
+    assignees: forgeLogins(m.assignees && m.assignees.length ? m.assignees : (m.assignee ? [m.assignee] : [])),
+    reviewers: forgeLogins(m.reviewers),
+    milestone: (m.milestone && m.milestone.title) || '',
+    closedAt: m.closed_at || '',
+    mergedAt: m.merged_at || '',
+    conflicts: !!m.has_conflicts,
+    isFork: !!(m.source_project_id && m.target_project_id && m.source_project_id !== m.target_project_id),
+    headLabel: m.source_branch || ''
+  });
 }
 
 // ---- handlers ------------------------------------------------------------------------
@@ -5539,20 +5657,12 @@ ipcMain.handle('forge:issues', wrap(async (_, opts) => {
       `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/issues?state=${state}&per_page=50&sort=updated`);
     // GitHub returns pull requests from the issues endpoint too — they are issues under the
     // hood — and listing them twice in two panels is confusing, so drop them here.
-    return (forgeCheck(res, ctx, 'Issues') || []).filter(i => !i.pull_request).map(i => ({
-      number: i.number, title: i.title, author: (i.user && i.user.login) || '',
-      state: i.state, url: i.html_url, updatedAt: i.updated_at, comments: i.comments || 0,
-      labels: (i.labels || []).map(l => (typeof l === 'string' ? l : l.name))
-    }));
+    return (forgeCheck(res, ctx, 'Issues') || []).filter(i => !i.pull_request).map(normalizeGithubIssue);
   }
   const state = o.state === 'closed' ? 'closed' : o.state === 'all' ? 'all' : 'opened';
   const res = await forgeRequest(ctx, 'GET',
     `/projects/${encodeURIComponent(ctx.projectPath)}/issues?state=${state}&per_page=50&order_by=updated_at`);
-  return (forgeCheck(res, ctx, 'Issues') || []).map(i => ({
-    number: i.iid, title: i.title, author: (i.author && i.author.username) || '',
-    state: i.state === 'opened' ? 'open' : i.state, url: i.web_url,
-    updatedAt: i.updated_at, comments: i.user_notes_count || 0, labels: i.labels || []
-  }));
+  return (forgeCheck(res, ctx, 'Issues') || []).map(normalizeGitlabIssue);
 }));
 
 ipcMain.handle('forge:createPullRequest', wrap(async (_, opts) => {
@@ -5669,3 +5779,342 @@ function ghConclusion(c) {
   if (c === 'cancelled' || c === 'timed_out' || c === 'failure' || c === 'action_required' || c === 'stale') return 'failure';
   return 'neutral';
 }
+
+// ============================================
+// FORGE — READING A REQUEST OR ISSUE IN THE APP
+// ============================================
+// Everything below exists so that clicking a row opens the discussion *here* rather than
+// handing the user to a browser. Same three rules as above: the token stays in main, the
+// provider is derived, and every payload is normalised to one shape before it crosses IPC.
+//
+// The cost of that is one round trip per pane. The detail, the timeline, the commits and
+// the files are four separate handlers rather than one fat one, because the renderer only
+// asks for the pane you are actually looking at — a request with 200 changed files should
+// not be downloaded to read a one-line comment.
+
+function ghRepo(ctx) { return `${ctx.owner}/${encodeURIComponent(ctx.repo)}`; }
+function glProject(ctx) { return encodeURIComponent(ctx.projectPath); }
+
+// GitHub's issue endpoints serve pull requests too (a PR *is* an issue there), which is
+// what makes one comment/close handler work for both kinds. GitLab keeps them apart.
+function forgeResource(ctx, kind) {
+  if (ctx.provider === 'github') return kind === 'issue' ? 'issues' : 'pulls';
+  return kind === 'issue' ? 'issues' : 'merge_requests';
+}
+
+function forgeNumber(o) {
+  const n = parseInt(o && o.number, 10);
+  if (!n || n < 1) throw new Error('Which request or issue?');
+  return n;
+}
+
+async function forgeCtxFor(o) {
+  const ctx = await forgeRepoContext(o && o.remote);
+  if (!ctx.provider) {
+    throw new Error(`GitGood does not know whether ${ctx.host} is GitHub or GitLab. Set it in Settings → Forge.`);
+  }
+  return ctx;
+}
+
+ipcMain.handle('forge:detail', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  const what = `${kind === 'issue' ? 'Issue' : ctx.provider === 'gitlab' ? 'Merge request' : 'Pull request'} #${n}`;
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/${kind === 'issue' ? 'issues' : 'pulls'}/${n}`);
+    const j = forgeCheck(res, ctx, what);
+    return kind === 'issue' ? normalizeGithubIssue(j) : normalizeGithubPrDetail(j);
+  }
+  const res = await forgeRequest(ctx, 'GET',
+    `/projects/${glProject(ctx)}/${kind === 'issue' ? 'issues' : 'merge_requests'}/${n}`);
+  const j = forgeCheck(res, ctx, what);
+  return kind === 'issue' ? normalizeGitlabIssue(j) : normalizeGitlabMrDetail(j);
+}));
+
+// ---- timeline ------------------------------------------------------------------------
+
+function normalizeGithubComment(c, kind) {
+  return {
+    id: 'gh-' + (kind || 'comment') + '-' + c.id,
+    kind: kind || 'comment',
+    author: (c.user && c.user.login) || '',
+    avatar: forgeAvatar(c.user),
+    body: c.body || '',
+    createdAt: c.created_at || c.submitted_at || '',
+    url: c.html_url || '',
+    path: c.path || '',
+    line: c.line || c.original_line || 0,
+    diffHunk: c.diff_hunk || '',
+    state: ''
+  };
+}
+
+function normalizeGitlabNote(n) {
+  const pos = n.position || null;
+  return {
+    id: 'gl-note-' + n.id,
+    kind: n.system ? 'system' : pos ? 'inline' : 'comment',
+    author: (n.author && n.author.username) || '',
+    avatar: forgeAvatar(n.author),
+    body: n.body || '',
+    createdAt: n.created_at || '',
+    url: '',
+    path: pos ? (pos.new_path || pos.old_path || '') : '',
+    line: pos ? (pos.new_line || pos.old_line || 0) : 0,
+    diffHunk: '',
+    state: ''
+  };
+}
+
+// One chronological list of everything said on a request or issue. GitHub scatters that
+// across three endpoints — the conversation, the review verdicts, and the inline notes
+// attached to a diff — and shows them interleaved; so do we.
+ipcMain.handle('forge:timeline', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  const out = [];
+
+  if (ctx.provider === 'github') {
+    const jobs = [forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/issues/${n}/comments?per_page=100`)];
+    if (kind === 'request') {
+      jobs.push(forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/pulls/${n}/reviews?per_page=100`));
+      jobs.push(forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/pulls/${n}/comments?per_page=100`));
+    }
+    const [comments, reviews, inline] = await Promise.all(jobs);
+    for (const c of forgeCheck(comments, ctx, 'Comments') || []) out.push(normalizeGithubComment(c, 'comment'));
+    for (const r of (reviews && Array.isArray(reviews.json) ? reviews.json : [])) {
+      // A "COMMENTED" review with no body is just the envelope GitHub wraps a batch of
+      // inline notes in — the notes themselves arrive below, so the envelope is noise.
+      if (r.state === 'COMMENTED' && !(r.body || '').trim()) continue;
+      const c = normalizeGithubComment(r, 'review');
+      c.state = String(r.state || '').toLowerCase();   // approved | changes_requested | commented | dismissed
+      out.push(c);
+    }
+    for (const c of (inline && Array.isArray(inline.json) ? inline.json : [])) {
+      out.push(normalizeGithubComment(c, 'inline'));
+    }
+  } else {
+    const res = await forgeRequest(ctx, 'GET',
+      `/projects/${glProject(ctx)}/${kind === 'issue' ? 'issues' : 'merge_requests'}/${n}/notes?per_page=100&sort=asc&order_by=created_at`);
+    for (const note of forgeCheck(res, ctx, 'Notes') || []) out.push(normalizeGitlabNote(note));
+  }
+
+  out.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+  return out;
+}));
+
+ipcMain.handle('forge:comment', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const body = String(o.body || '').trim();
+  if (!body) throw new Error('Write something first.');
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Commenting needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  if (ctx.provider === 'github') {
+    // Issues and pull requests share this endpoint on GitHub, which is why there is no
+    // pull-request branch here.
+    const res = await forgeRequest(ctx, 'POST', `/repos/${ghRepo(ctx)}/issues/${n}/comments`, { body });
+    return normalizeGithubComment(forgeCheck(res, ctx, 'Comment'), 'comment');
+  }
+  const res = await forgeRequest(ctx, 'POST',
+    `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}/notes`, { body });
+  return normalizeGitlabNote(forgeCheck(res, ctx, 'Comment'));
+}));
+
+// ---- what is in the request ----------------------------------------------------------
+
+ipcMain.handle('forge:requestCommits', wrap(async (_, opts) => {
+  const o = opts || {};
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/pulls/${n}/commits?per_page=100`);
+    return (forgeCheck(res, ctx, 'Commits') || []).map(c => ({
+      hash: c.sha,
+      message: ((c.commit && c.commit.message) || '').split('\n')[0],
+      author: (c.author && c.author.login) || (c.commit && c.commit.author && c.commit.author.name) || '',
+      date: (c.commit && c.commit.author && c.commit.author.date) || '',
+      url: c.html_url || ''
+    }));
+  }
+  const res = await forgeRequest(ctx, 'GET',
+    `/projects/${glProject(ctx)}/merge_requests/${n}/commits?per_page=100`);
+  return (forgeCheck(res, ctx, 'Commits') || []).map(c => ({
+    hash: c.id,
+    message: (c.title || c.message || '').split('\n')[0],
+    author: c.author_name || '',
+    date: c.created_at || c.committed_date || '',
+    url: c.web_url || ''
+  }));
+}));
+
+// Rebuild a real `diff --git` chunk from what the API returns. Both forges hand back only
+// the hunks, without the header lines that name the file — and the renderer's diff parser
+// (and every reader) works from those. Synthesizing them here keeps one diff pipeline for
+// working-tree changes, commits and requests alike.
+function forgeFileDiff(f) {
+  const oldPath = f.oldPath || f.path;
+  const newPath = f.path;
+  const lines = [`diff --git a/${oldPath} b/${newPath}`];
+  if (f.status === 'added') lines.push('new file mode 100644');
+  else if (f.status === 'deleted') lines.push('deleted file mode 100644');
+  else if (f.status === 'renamed') lines.push(`similarity index 100%`, `rename from ${oldPath}`, `rename to ${newPath}`);
+  if (f.binary) {
+    // The renderer detects binaries by this exact wording, which is also what git writes.
+    // A file the forge judged too large to inline arrives here too — there is no patch to
+    // show either way.
+    lines.push(`Binary files a/${oldPath} and b/${newPath} differ`);
+    return lines.join('\n');
+  }
+  // No patch and not binary means nothing changed inside the file — a pure rename or a
+  // mode change. The header alone is the whole story.
+  if (!f.patch) return lines.join('\n');
+  lines.push(`--- ${f.status === 'added' ? '/dev/null' : 'a/' + oldPath}`);
+  lines.push(`+++ ${f.status === 'deleted' ? '/dev/null' : 'b/' + newPath}`);
+  lines.push(f.patch.replace(/\n$/, ''));
+  return lines.join('\n');
+}
+
+ipcMain.handle('forge:requestFiles', wrap(async (_, opts) => {
+  const o = opts || {};
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  let files = [];
+  let truncated = false;
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/pulls/${n}/files?per_page=100`);
+    const raw = forgeCheck(res, ctx, 'Changed files') || [];
+    // GitHub caps this at 3000 files and pages at 100; one page is as far as we go, and
+    // saying so beats silently showing a third of a request.
+    truncated = raw.length >= 100;
+    files = raw.map(f => ({
+      path: f.filename,
+      oldPath: f.previous_filename || f.filename,
+      status: f.status === 'removed' ? 'deleted' : f.status === 'added' ? 'added'
+        : f.status === 'renamed' ? 'renamed' : 'modified',
+      additions: f.additions || 0,
+      deletions: f.deletions || 0,
+      // No patch means either a binary/too-large file or a rename that changed nothing.
+      // `changes` tells them apart: zero changed lines is the pure rename.
+      binary: !f.patch && (f.changes || 0) > 0,
+      patch: f.patch || ''
+    }));
+  } else {
+    const res = await forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/merge_requests/${n}/changes`);
+    const j = forgeCheck(res, ctx, 'Changed files') || {};
+    truncated = !!(j.changes_count && String(j.changes_count).endsWith('+'));
+    files = (j.changes || []).map(c => ({
+      path: c.new_path || c.old_path,
+      oldPath: c.old_path || c.new_path,
+      status: c.new_file ? 'added' : c.deleted_file ? 'deleted' : c.renamed_file ? 'renamed' : 'modified',
+      // GitLab does not count lines per file; the renderer reads them off the hunks.
+      additions: 0,
+      deletions: 0,
+      binary: !c.diff,
+      patch: c.diff || ''
+    }));
+  }
+
+  for (const f of files) {
+    f.diff = forgeFileDiff(f);
+    delete f.patch;
+    if (!f.additions && !f.deletions && f.diff) {
+      // Fill in the counts GitLab omits so both providers show the same +/- column.
+      for (const line of f.diff.split('\n')) {
+        if (line.startsWith('+') && !line.startsWith('+++')) f.additions++;
+        else if (line.startsWith('-') && !line.startsWith('---')) f.deletions++;
+      }
+    }
+  }
+  return { files, truncated };
+}));
+
+// ---- acting on a request or issue ----------------------------------------------------
+
+ipcMain.handle('forge:setState', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const close = o.state !== 'open';
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`This needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'PATCH',
+      `/repos/${ghRepo(ctx)}/${forgeResource(ctx, kind)}/${n}`, { state: close ? 'closed' : 'open' });
+    const j = forgeCheck(res, ctx, `#${n}`);
+    return kind === 'issue' ? normalizeGithubIssue(j) : normalizeGithubPrDetail(j);
+  }
+  const res = await forgeRequest(ctx, 'PUT',
+    `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}`, { state_event: close ? 'close' : 'reopen' });
+  const j = forgeCheck(res, ctx, `#${n}`);
+  return kind === 'issue' ? normalizeGitlabIssue(j) : normalizeGitlabMrDetail(j);
+}));
+
+ipcMain.handle('forge:merge', wrap(async (_, opts) => {
+  const o = opts || {};
+  const n = forgeNumber(o);
+  const method = ['merge', 'squash', 'rebase'].includes(o.method) ? o.method : 'merge';
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Merging needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'PUT', `/repos/${ghRepo(ctx)}/pulls/${n}/merge`, {
+      merge_method: method,
+      commit_title: o.title || undefined,
+      commit_message: o.message || undefined
+    });
+    // 405 is GitHub's "not mergeable" and 409 its "head moved since you looked"; both
+    // arrive with a message worth repeating verbatim.
+    if (res.status === 405 || res.status === 409) {
+      throw new Error((res.json && res.json.message) || `${ctx.host} refused the merge (${res.status}).`);
+    }
+    const j = forgeCheck(res, ctx, `Pull request #${n}`);
+    if (o.deleteBranch && o.branch) {
+      // Best effort: the merge itself succeeded, and a protected branch refusing deletion
+      // should not read as a failed merge.
+      await forgeRequest(ctx, 'DELETE', `/repos/${ghRepo(ctx)}/git/refs/heads/${encodeURIComponent(o.branch)}`).catch(() => {});
+    }
+    return { merged: !!j.merged, sha: j.sha || '', message: j.message || '' };
+  }
+  const res = await forgeRequest(ctx, 'PUT', `/projects/${glProject(ctx)}/merge_requests/${n}/merge`, {
+    squash: method === 'squash',
+    should_remove_source_branch: !!o.deleteBranch
+  });
+  if (res.status === 405 || res.status === 406 || res.status === 409) {
+    throw new Error((res.json && res.json.message) || `${ctx.host} refused the merge (${res.status}).`);
+  }
+  const j = forgeCheck(res, ctx, `Merge request #${n}`);
+  return { merged: j.state === 'merged', sha: j.merge_commit_sha || j.sha || '', message: '' };
+}));
+
+// Check out the request's head locally. This deliberately does not check out the source
+// *branch*: on a fork that branch is not on this remote at all. Both forges publish every
+// request's head under a ref of their own (refs/pull/N/head, refs/merge-requests/N/head),
+// which works the same whether the request came from a fork or not.
+ipcMain.handle('forge:checkoutRequest', wrap(async (_, opts) => {
+  const o = opts || {};
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  const g = ensureGit();
+  const tag = ctx.provider === 'github' ? 'pr' : 'mr';
+  const remoteRef = ctx.provider === 'github' ? `refs/pull/${n}/head` : `refs/merge-requests/${n}/head`;
+  const local = `${tag}-${n}`;
+  const tracking = `refs/remotes/${ctx.remote}/${tag}/${n}`;
+
+  await g.raw(['fetch', ctx.remote, `+${remoteRef}:${tracking}`]);
+  // -B rather than -b: re-checking-out a request should land on its current head, and the
+  // local pr-N branch is ours to move. Uncommitted work still blocks the checkout, as it
+  // should — git refuses and the error is surfaced.
+  await g.raw(['checkout', '-B', local, tracking]);
+  return { branch: local, ref: remoteRef };
+}));

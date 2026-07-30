@@ -1441,6 +1441,10 @@ function setDiffMode(mode) {
     renderHistoryDetail(state.selectedCommit, d);
   }
 
+  // The Forge tab's Files pane renders a request's changes through this same pipeline,
+  // and already holds the patches, so it re-renders in place without another API call.
+  if (typeof rerenderForgeFiles === 'function') rerenderForgeFiles();
+
   // Keep the pop-out window in sync if it's open.
   refreshPopoutDiff();
 }

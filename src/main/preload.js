@@ -82,6 +82,16 @@ const api = {
   forgeIssues: (opts) => ipcRenderer.invoke('forge:issues', opts),
   forgeCreatePullRequest: (opts) => ipcRenderer.invoke('forge:createPullRequest', opts),
   forgeChecks: (opts) => ipcRenderer.invoke('forge:checks', opts),
+  // Reading a request or issue in the app. One pane per call: the detail view only asks
+  // for the tab you are looking at.
+  forgeDetail: (opts) => ipcRenderer.invoke('forge:detail', opts),
+  forgeTimeline: (opts) => ipcRenderer.invoke('forge:timeline', opts),
+  forgeComment: (opts) => ipcRenderer.invoke('forge:comment', opts),
+  forgeRequestCommits: (opts) => ipcRenderer.invoke('forge:requestCommits', opts),
+  forgeRequestFiles: (opts) => ipcRenderer.invoke('forge:requestFiles', opts),
+  forgeSetState: (opts) => ipcRenderer.invoke('forge:setState', opts),
+  forgeMerge: (opts) => ipcRenderer.invoke('forge:merge', opts),
+  forgeCheckoutRequest: (opts) => ipcRenderer.invoke('forge:checkoutRequest', opts),
 
   // Worktrees. Opening one is just openRepo(path) — a linked worktree is a repository as
   // far as every other handler is concerned.

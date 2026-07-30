@@ -15,13 +15,17 @@ const forgeState = {
   items: [],
   loading: false,
   loadedFor: null,   // repo path the current list belongs to
-  checks: new Map()  // sha -> forge:checks result, so the graph doesn't re-ask per click
+  checks: new Map(), // sha -> forge:checks result, so the graph doesn't re-ask per click
+  // The request or issue being read in the right-hand pane. Panes are filled lazily and
+  // then kept, so flipping between Conversation and Files costs nothing the second time.
+  detail: null       // { kind, number, data, tab, timeline, commits, files, error }
 };
 
 function forgeReset() {
   forgeState.info = null;
   forgeState.items = [];
   forgeState.loadedFor = null;
+  forgeState.detail = null;
   forgeState.checks.clear();
   const badge = document.getElementById('forge-tab-badge');
   if (badge) badge.style.display = 'none';
@@ -38,6 +42,9 @@ async function refreshForge() {
   const body = document.getElementById('forge-body');
   if (!body || !state.repo) return;
   forgeState.loading = true;
+  // Everything below this point that is not the list+reader (spinner, error, token setup)
+  // owns the whole body and scrolls itself.
+  body.classList.remove('has-split');
   body.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
 
   const info = await gs.forgeInfo({});
@@ -81,6 +88,9 @@ function forgeErrorHtml(msg) {
   </div>`;
 }
 
+// The list is the left half of the tab and the reader is the right half. Rendering them
+// together (rather than swapping one for the other) is what makes walking a queue of
+// requests cheap: the list never reloads, and the selected row stays visible.
 function renderForge() {
   const body = document.getElementById('forge-body');
   if (!body) return;
@@ -95,28 +105,50 @@ function renderForge() {
     badge.style.display = open ? 'inline-block' : 'none';
   }
 
-  if (!items.length) {
-    body.innerHTML = `<div class="empty-state">
-      <div class="empty-icon">${forgeState.view === 'issues' ? '☰' : '⇄'}</div>
-      <p>Nothing here${(document.getElementById('forge-state') || {}).value === 'open' ? ' that is still open' : ''}.</p>
-    </div>`;
-    return;
-  }
-
   const current = (state.branches.local && state.branches.local.current) || '';
-  body.innerHTML = `<ul class="forge-list">${items.map(it => forgeState.view === 'issues'
-    ? forgeIssueRowHtml(it)
-    : forgeRequestRowHtml(it, current)).join('')}</ul>`;
+  const listHtml = items.length
+    ? `<ul class="forge-list">${items.map(it => forgeState.view === 'issues'
+        ? forgeIssueRowHtml(it)
+        : forgeRequestRowHtml(it, current)).join('')}</ul>`
+    : `<div class="empty-state">
+        <div class="empty-icon">${forgeState.view === 'issues' ? '☰' : '⇄'}</div>
+        <p>Nothing here${(document.getElementById('forge-state') || {}).value === 'open' ? ' that is still open' : ''}.</p>
+      </div>`;
+
+  body.innerHTML = `
+    <div class="forge-split">
+      <div class="forge-list-pane">${listHtml}</div>
+      <div class="forge-detail" id="forge-detail"></div>
+    </div>`;
+  body.classList.add('has-split');
+  renderForgeDetail();
+}
+
+// Rows carry what it takes to open them here (kind + number); the ↗ button is the only
+// thing left that leaves the app, and it is deliberately a separate target.
+function forgeRowAttrs(it) {
+  return `data-forge-open="${it.kind === 'issue' ? 'issue' : 'request'}:${it.number}"`;
+}
+
+function forgeRowClass(it) {
+  const d = forgeState.detail;
+  const kind = it.kind === 'issue' ? 'issue' : 'request';
+  return d && d.number === it.number && d.kind === kind ? ' active' : '';
+}
+
+function forgeOpenExternalBtnHtml(url) {
+  return `<button class="forge-ext" title="Open on the forge in a browser" data-forge-url="${forgeAttr(url)}">↗</button>`;
 }
 
 function forgeRequestRowHtml(pr, currentBranch) {
   const mine = pr.source && pr.source === currentBranch;
-  return `<li class="forge-item${mine ? ' current-branch-pr' : ''}" data-forge-url="${escapeHtml(pr.url)}">
+  return `<li class="forge-item${mine ? ' current-branch-pr' : ''}${forgeRowClass(pr)}" ${forgeRowAttrs(pr)}>
     <div class="forge-item-head">
       <span class="forge-state forge-state-${escapeHtml(pr.state)}">${escapeHtml(pr.state)}</span>
       <span class="forge-num">#${pr.number}</span>
       <span class="forge-title">${escapeHtml(pr.title)}</span>
       ${mine ? '<span class="forge-flag" title="Opened from the branch you are on">current branch</span>' : ''}
+      ${forgeOpenExternalBtnHtml(pr.url)}
     </div>
     <div class="forge-item-meta">
       <span class="text-mono">${escapeHtml(pr.source)}</span> → <span class="text-mono">${escapeHtml(pr.target)}</span>
@@ -128,28 +160,597 @@ function forgeRequestRowHtml(pr, currentBranch) {
 }
 
 function forgeIssueRowHtml(it) {
-  return `<li class="forge-item" data-forge-url="${escapeHtml(it.url)}">
+  const st = it.state === 'opened' ? 'open' : it.state;
+  return `<li class="forge-item${forgeRowClass(it)}" ${forgeRowAttrs(it)}>
     <div class="forge-item-head">
-      <span class="forge-state forge-state-${escapeHtml(it.state === 'opened' ? 'open' : it.state)}">${escapeHtml(it.state === 'opened' ? 'open' : it.state)}</span>
+      <span class="forge-state forge-state-${escapeHtml(st)}">${escapeHtml(st)}</span>
       <span class="forge-num">#${it.number}</span>
       <span class="forge-title">${escapeHtml(it.title)}</span>
+      ${forgeOpenExternalBtnHtml(it.url)}
     </div>
     <div class="forge-item-meta">
       ${escapeHtml(it.author)}
       ${it.updatedAt ? ' · updated ' + escapeHtml(relativeTime(it.updatedAt)) : ''}
-      ${(it.labels || []).length ? ' · ' + it.labels.slice(0, 4).map(l => `<span class="forge-label">${escapeHtml(l)}</span>`).join(' ') : ''}
+      ${forgeLabelsHtml(it.labels, 4)}
     </div>
   </li>`;
 }
 
-// Clicking a row opens it in the browser — the forge's own page is a better place to read
-// a discussion than anything this app could render.
+function forgeLabelsHtml(labels, limit) {
+  const list = (labels || []).slice(0, limit || 99);
+  if (!list.length) return '';
+  return ' · ' + list.map(l => {
+    const name = typeof l === 'string' ? l : l.name;
+    const color = typeof l === 'string' ? '' : l.color;
+    // GitHub gives a background colour and expects the reader to pick a legible foreground;
+    // luminance decides, the same way the forge does it.
+    const style = /^[0-9a-f]{6}$/i.test(color || '')
+      ? ` style="background:#${color};border-color:#${color};color:${forgeReadableInk(color)}"`
+      : '';
+    return `<span class="forge-label"${style}>${escapeHtml(name)}</span>`;
+  }).join(' ');
+}
+
+function forgeReadableInk(hex) {
+  const n = parseInt(hex, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#111' : '#fff';
+}
+
+// escapeHtml() leaves quotes alone, which is fine for a file path and not fine for text
+// written by a stranger on the internet and dropped into an attribute.
+function forgeAttr(s) {
+  return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Clicking a row opens it in the detail pane; the ↗ affordances (and links inside a
+// rendered comment) are the only things that hand the user to a browser.
 document.addEventListener('click', (e) => {
-  const row = e.target.closest('[data-forge-url]');
-  if (!row) return;
-  const url = row.dataset.forgeUrl;
-  if (url) gs.openExternal(url);
+  const ext = e.target.closest('[data-forge-url]');
+  if (ext) {
+    e.preventDefault();
+    e.stopPropagation();
+    const url = ext.dataset.forgeUrl;
+    if (url) gs.openExternal(url);
+    return;
+  }
+  const row = e.target.closest('[data-forge-open]');
+  if (row) {
+    const [kind, number] = String(row.dataset.forgeOpen).split(':');
+    openForgeItem(kind, parseInt(number, 10));
+  }
 });
+
+// ============================================
+// THE READER — a request or issue, in the app
+// ============================================
+// Four panes' worth of data, each fetched the first time it is looked at and then kept on
+// forgeState.detail. Re-rendering is cheap and happens on every change; re-fetching is not
+// and happens only when asked (the ⟳ in the detail header, or a successful action).
+
+async function openForgeItem(kind, number) {
+  if (!number || !state.repo) return;
+  const want = kind === 'issue' ? 'issue' : kind === 'auto' ? 'auto' : 'request';
+  forgeState.detail = {
+    kind: want === 'auto' ? 'request' : want, number,
+    tab: 'conversation', data: null, timeline: null, commits: null, files: null,
+    loading: true, error: ''
+  };
+  renderForge();   // repaint at once so the clicked row highlights before the network answers
+
+  let r = await gs.forgeDetail({ kind: want === 'auto' ? 'request' : want, number });
+  // A bare "#123" in a description does not say which kind it is. GitHub numbers requests
+  // and issues from one sequence, so the wrong guess is a 404 and the other kind is right.
+  if (want === 'auto' && (!r || !r.ok)) r = await gs.forgeDetail({ kind: 'issue', number });
+
+  const d = forgeState.detail;
+  if (!d || d.number !== number) return;      // the user clicked something else meanwhile
+  d.loading = false;
+  if (!r || !r.ok) { d.error = (r && r.error) || 'Could not load it.'; renderForgeDetail(); return; }
+  d.data = r.data;
+  d.kind = r.data.kind === 'issue' ? 'issue' : 'request';
+  renderForge();                              // the row may now need a different highlight
+  loadForgePane('conversation');
+}
+
+function closeForgeDetail() {
+  forgeState.detail = null;
+  renderForge();
+}
+
+// Fetch whatever the named tab needs, once. `force` is the ⟳ button.
+async function loadForgePane(tab, force) {
+  const d = forgeState.detail;
+  if (!d || !d.data) return;
+  const key = tab === 'commits' ? 'commits' : tab === 'files' ? 'files' : 'timeline';
+  if (d[key] && !force) return;
+  d[key + 'Loading'] = true;
+  renderForgeDetail();
+
+  const call = key === 'commits' ? gs.forgeRequestCommits({ number: d.number })
+    : key === 'files' ? gs.forgeRequestFiles({ number: d.number })
+    : gs.forgeTimeline({ kind: d.kind, number: d.number });
+  const r = await call;
+
+  const now = forgeState.detail;
+  if (!now || now.number !== d.number || now.kind !== d.kind) return;
+  now[key + 'Loading'] = false;
+  if (!r || !r.ok) { now[key + 'Error'] = r && r.error; renderForgeDetail(); return; }
+  now[key + 'Error'] = '';
+  now[key] = r.data;
+  renderForgeDetail();
+}
+
+async function refreshForgeDetail() {
+  const d = forgeState.detail;
+  if (!d) return;
+  const r = await gs.forgeDetail({ kind: d.kind, number: d.number });
+  if (!handleResult(r)) return;
+  const now = forgeState.detail;
+  if (!now || now.number !== d.number) return;
+  now.data = r.data;
+  now.timeline = null; now.commits = null; now.files = null;
+  renderForgeDetail();
+  loadForgePane(now.tab, true);
+}
+
+// Keeping the scroll position across a re-render is what stops the pane jumping when a
+// comment posts or a pane finishes loading. A tab change is a new view and starts at the top.
+let _forgeDetailScrollKey = '';
+
+function renderForgeDetail() {
+  const host = document.getElementById('forge-detail');
+  if (!host) return;
+  const d = forgeState.detail;
+
+  if (!d) {
+    host.innerHTML = `<div class="empty-state forge-detail-hint">
+      <div class="empty-icon">⚑</div>
+      <p>Pick one on the left to read it here.</p>
+    </div>`;
+    _forgeDetailScrollKey = '';
+    return;
+  }
+  if (d.loading) { host.innerHTML = '<div class="empty-state"><span class="loading"></span></div>'; return; }
+  if (d.error) { host.innerHTML = forgeErrorHtml(d.error); return; }
+
+  const key = `${d.kind}:${d.number}:${d.tab}`;
+  const keepScroll = key === _forgeDetailScrollKey ? host.scrollTop : 0;
+  // A half-written comment must survive a re-render — a pane finishing its load while the
+  // user types would otherwise throw the draft away.
+  const box = document.getElementById('forge-comment-box');
+  const draft = key === _forgeDetailScrollKey && box ? box.value : '';
+
+  const x = d.data;
+  const isReq = d.kind === 'request';
+  host.innerHTML = forgeDetailHeadHtml(d, x, isReq) +
+    `<div class="forge-detail-body">${
+      d.tab === 'commits' ? forgeCommitsPaneHtml(d)
+      : d.tab === 'files' ? forgeFilesPaneHtml(d)
+      : forgeConversationPaneHtml(d, x)
+    }</div>`;
+
+  _forgeDetailScrollKey = key;
+  host.scrollTop = keepScroll;
+  if (draft) {
+    const fresh = document.getElementById('forge-comment-box');
+    if (fresh) fresh.value = draft;
+  }
+
+  // CI for the head commit, filled in by the same helper the commit panes use.
+  const checksHost = host.querySelector('.forge-detail-checks');
+  if (checksHost && x.sha) {
+    checksHost.dataset.checksSha = x.sha;
+    hydrateChecksBadge(checksHost, x.sha);
+  }
+}
+
+function forgeDetailHeadHtml(d, x, isReq) {
+  const st = x.state === 'opened' ? 'open' : x.state;
+  const open = st === 'open' || st === 'draft';
+  const counts = isReq && (x.additions || x.deletions)
+    ? `<span class="forge-plusminus"><span class="text-add">+${x.additions}</span> <span class="text-del">−${x.deletions}</span></span>` : '';
+
+  const tabs = isReq ? [
+    ['conversation', '☰ Conversation', x.comments || 0],
+    ['commits', '✠ Commits', x.commitsCount || 0],
+    ['files', '⚔ Files', x.changedFiles || 0]
+  ] : [['conversation', '☰ Conversation', x.comments || 0]];
+
+  return `
+    <div class="forge-detail-head">
+      <div class="forge-detail-title">
+        <span class="forge-state forge-state-${escapeHtml(st)}">${escapeHtml(st)}</span>
+        <span class="forge-num">#${x.number}</span>
+        <span class="forge-detail-name">${escapeHtml(x.title)}</span>
+        <button class="forge-ext" title="Close this and go back to the list" data-forge-act="close-detail">✕</button>
+      </div>
+      <div class="forge-detail-meta">
+        ${escapeHtml(x.author || '')}
+        ${x.createdAt ? ' opened ' + escapeHtml(relativeTime(x.createdAt)) : ''}
+        ${isReq ? ` · <span class="text-mono">${escapeHtml(x.source)}</span> → <span class="text-mono">${escapeHtml(x.target)}</span>` : ''}
+        ${isReq && x.isFork ? ' <span class="forge-flag">fork</span>' : ''}
+        ${counts}
+        ${forgeLabelsHtml(x.labels)}
+        ${(x.assignees || []).length ? ' · assigned ' + x.assignees.map(a => escapeHtml(a)).join(', ') : ''}
+        ${isReq && (x.reviewers || []).length ? ' · review ' + x.reviewers.map(a => escapeHtml(a)).join(', ') : ''}
+      </div>
+      ${isReq ? forgeMergeStateHtml(x) : ''}
+      ${isReq ? '<div class="forge-detail-checks"></div>' : ''}
+      <div class="forge-detail-actions">
+        ${isReq && open ? '<button class="mini-btn" data-forge-act="checkout" title="Fetch this request’s head and check it out locally">⤓ Checkout</button>' : ''}
+        ${isReq && open ? '<button class="mini-btn" data-forge-act="merge" title="Merge on the forge">⑃ Merge</button>' : ''}
+        ${x.merged ? '' : `<button class="mini-btn" data-forge-act="${open ? 'close' : 'reopen'}">${open ? '✕ Close' : '↺ Reopen'}</button>`}
+        <span class="graph-spacer"></span>
+        <button class="mini-btn" data-forge-act="refresh" title="Reload from the forge">⟳</button>
+        <button class="mini-btn" data-forge-url="${forgeAttr(x.url)}" title="Open on the forge in a browser">↗ Browser</button>
+      </div>
+      <div class="forge-detail-tabs">
+        ${tabs.map(([id, label, n]) => `<button class="mini-btn${d.tab === id ? ' active' : ''}" data-forge-tab="${id}">${label}${n ? ` <span class="forge-num">${n}</span>` : ''}</button>`).join('')}
+      </div>
+    </div>`;
+}
+
+// What the forge thinks of merging this, in one line. "unknown" is a real answer — both
+// providers compute mergeability asynchronously — and must not read as a conflict.
+function forgeMergeStateHtml(x) {
+  if (x.merged) return `<div class="forge-mergestate ok">⑃ Merged${x.mergedAt ? ' ' + escapeHtml(relativeTime(x.mergedAt)) : ''}</div>`;
+  if (x.state === 'closed') return `<div class="forge-mergestate">✕ Closed without merging</div>`;
+  if (x.conflicts || x.mergeable === false) {
+    return `<div class="forge-mergestate bad">⚠ Cannot merge cleanly${x.mergeableState ? ` (${escapeHtml(x.mergeableState)})` : ''}</div>`;
+  }
+  if (x.mergeable === true) return `<div class="forge-mergestate ok">✓ No conflicts with ${escapeHtml(x.target)}</div>`;
+  return `<div class="forge-mergestate">◌ The forge has not finished checking for conflicts</div>`;
+}
+
+// ---- conversation --------------------------------------------------------------------
+
+function forgeConversationPaneHtml(d, x) {
+  const entries = d.timeline || [];
+  const body = `
+    <article class="forge-comment forge-comment-body">
+      <header class="forge-comment-head">
+        <span class="forge-comment-author">${escapeHtml(x.author || '')}</span>
+        <span class="forge-comment-when">${x.createdAt ? escapeHtml(relativeTime(x.createdAt)) : ''}</span>
+      </header>
+      <div class="forge-md">${forgeMarkdown(x.body)}</div>
+    </article>`;
+
+  const list = d.timelineLoading && !d.timeline
+    ? '<div class="empty-state"><span class="loading"></span></div>'
+    : d.timelineError
+      ? forgeErrorHtml(d.timelineError)
+      : entries.map(forgeCommentHtml).join('');
+
+  return body + list + `
+    <div class="forge-composer">
+      <textarea class="modal-input" id="forge-comment-box" rows="3" placeholder="Leave a comment (Ctrl+Enter to send)"></textarea>
+      <div class="forge-composer-foot">
+        <span class="text-muted">Markdown is rendered here and sent as written.</span>
+        <button class="btn-medieval primary" data-forge-act="comment">✎ Comment</button>
+      </div>
+    </div>`;
+}
+
+function forgeCommentHtml(c) {
+  if (c.kind === 'system') {
+    return `<div class="forge-sysnote">${escapeHtml(c.author)} ${forgeMarkdownInlineOnly(c.body)} · ${escapeHtml(relativeTime(c.createdAt))}</div>`;
+  }
+  const verdict = c.kind === 'review' && c.state
+    ? `<span class="forge-verdict forge-verdict-${escapeHtml(c.state)}">${escapeHtml(c.state.replace(/_/g, ' '))}</span>` : '';
+  const where = c.kind === 'inline' && c.path
+    ? `<span class="forge-comment-where text-mono">${escapeHtml(c.path)}${c.line ? ':' + c.line : ''}</span>` : '';
+  return `<article class="forge-comment${c.kind === 'inline' ? ' is-inline' : ''}">
+    <header class="forge-comment-head">
+      <span class="forge-comment-author">${escapeHtml(c.author)}</span>
+      ${verdict}${where}
+      <span class="forge-comment-when">${c.createdAt ? escapeHtml(relativeTime(c.createdAt)) : ''}</span>
+      ${c.url ? forgeOpenExternalBtnHtml(c.url) : ''}
+    </header>
+    ${c.diffHunk ? `<pre class="forge-hunk">${escapeHtml(c.diffHunk.split('\n').slice(-6).join('\n'))}</pre>` : ''}
+    <div class="forge-md">${forgeMarkdown(c.body)}</div>
+  </article>`;
+}
+
+// ---- commits -------------------------------------------------------------------------
+
+function forgeCommitsPaneHtml(d) {
+  if (d.commitsLoading && !d.commits) return '<div class="empty-state"><span class="loading"></span></div>';
+  if (d.commitsError) return forgeErrorHtml(d.commitsError);
+  const list = d.commits || [];
+  if (!list.length) return '<div class="empty-state"><p>No commits.</p></div>';
+  return `<ul class="forge-commits">${list.map(c => `
+    <li class="forge-commit">
+      <span class="text-mono forge-commit-hash" title="Copy" data-forge-hash="${forgeAttr(c.hash)}">${escapeHtml((c.hash || '').slice(0, 7))}</span>
+      <span class="forge-commit-msg">${escapeHtml(c.message)}</span>
+      <span class="forge-commit-meta">${escapeHtml(c.author)}${c.date ? ' · ' + escapeHtml(relativeTime(c.date)) : ''}</span>
+    </li>`).join('')}</ul>`;
+}
+
+// ---- files ---------------------------------------------------------------------------
+
+function forgeFilesPaneHtml(d) {
+  if (d.filesLoading && !d.files) return '<div class="empty-state"><span class="loading"></span></div>';
+  if (d.filesError) return forgeErrorHtml(d.filesError);
+  const payload = d.files || { files: [] };
+  const files = payload.files || [];
+  if (!files.length) return '<div class="empty-state"><p>No file changes.</p></div>';
+
+  // One combined diff through the app's own renderer: the request's changes read exactly
+  // like a commit's, including the line cap that keeps a 40k-line diff from freezing the
+  // window, and the unified/split preference set anywhere else in the app.
+  const combined = files.map(f => f.diff).join('\n');
+  const summary = `<ul class="forge-filelist">${files.map(f => `
+    <li class="forge-fileline">
+      <span class="file-status ${escapeHtml(f.status)}">${({ added: 'A', deleted: 'D', renamed: 'R', modified: 'M' })[f.status] || 'M'}</span>
+      <span class="forge-filepath text-mono">${escapeHtml(f.path)}</span>
+      <span class="forge-plusminus"><span class="text-add">+${f.additions}</span> <span class="text-del">−${f.deletions}</span></span>
+    </li>`).join('')}</ul>`;
+
+  return `<div class="forge-files-head">
+      <span>${files.length} file${files.length === 1 ? '' : 's'} changed</span>
+      ${payload.truncated ? '<span class="text-red">· the forge returned only the first page</span>' : ''}
+      <span class="graph-spacer"></span>
+      <span class="diff-view-toggle">
+        <button class="diff-view-btn${state.diffMode === 'split' ? '' : ' active'}" data-diffmode="unified">☰ Unified</button>
+        <button class="diff-view-btn${state.diffMode === 'split' ? ' active' : ''}" data-diffmode="split">◫ Split</button>
+      </span>
+    </div>
+    ${summary}
+    <div class="forge-diff diff-content">${renderDiff(combined, {})}</div>`;
+}
+
+// Called by setDiffMode so the Files pane follows the unified/split toggle like every
+// other diff in the app. Cheap: the patches are already in hand.
+function rerenderForgeFiles() {
+  const d = forgeState.detail;
+  if (!d || d.tab !== 'files' || !d.files) return;
+  renderForgeDetail();
+}
+
+// ---- actions -------------------------------------------------------------------------
+
+async function forgePostComment() {
+  const d = forgeState.detail;
+  const box = document.getElementById('forge-comment-box');
+  if (!d || !box) return;
+  const text = box.value.trim();
+  if (!text) { showToast('Write something first', 'error'); return; }
+  const r = await withLoading('Posting the comment', () => gs.forgeComment({ kind: d.kind, number: d.number, body: text }));
+  if (!handleResult(r, 'Comment posted')) return;
+  box.value = '';   // before the re-render, which otherwise restores it as an unsent draft
+  const now = forgeState.detail;
+  if (!now || now.number !== d.number) return;
+  now.timeline = (now.timeline || []).concat([r.data]);
+  if (now.data) now.data.comments = (now.data.comments || 0) + 1;
+  renderForgeDetail();
+  const host = document.getElementById('forge-detail');
+  if (host) host.scrollTop = host.scrollHeight;
+}
+
+async function forgeSetItemState(open) {
+  const d = forgeState.detail;
+  if (!d) return;
+  const noun = d.kind === 'issue' ? 'issue' : 'request';
+  const ok = await modal.confirm({
+    title: open ? 'Reopen' : 'Close',
+    message: `${open ? 'Reopen' : 'Close'} ${noun} #${d.number} — ${d.data.title}?`,
+    confirmText: open ? 'Reopen' : 'Close it',
+    danger: !open
+  });
+  if (!ok) return;
+  const r = await withLoading(open ? 'Reopening' : 'Closing', () => gs.forgeSetState({ kind: d.kind, number: d.number, state: open ? 'open' : 'closed' }));
+  if (!handleResult(r, open ? 'Reopened' : 'Closed')) return;
+  const now = forgeState.detail;
+  if (now && now.number === d.number) now.data = r.data;
+  await refreshForge();
+}
+
+async function forgeCheckoutRequest() {
+  const d = forgeState.detail;
+  if (!d || d.kind !== 'request') return;
+  const gitlab = (forgeState.info || {}).provider === 'gitlab';
+  const local = `${gitlab ? 'mr' : 'pr'}-${d.number}`;
+  const ok = await modal.confirm({
+    title: '⤓ Check Out Request',
+    message: `Fetch #${d.number} from the remote and check it out as "${local}".\n\n` +
+      `If "${local}" already exists it is moved to the request's current head — it is a branch GitGood maintains for reading requests, not one to commit on.`,
+    confirmText: 'Check It Out'
+  });
+  if (!ok) return;
+  const r = await withLoading('Fetching the request', () => gs.forgeCheckoutRequest({ number: d.number }));
+  if (!handleResult(r, `On ${local}`)) return;
+  await refreshAll();
+}
+
+async function forgeMergeRequest() {
+  const d = forgeState.detail;
+  if (!d || d.kind !== 'request' || !d.data) return;
+  const x = d.data;
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Merge <strong>#${x.number}</strong> — ${escapeHtml(x.title)}<br>
+      <span class="text-muted text-mono">${escapeHtml(x.source)} → ${escapeHtml(x.target)}</span></p>
+    ${x.mergeable === false || x.conflicts ? '<p class="modal-text text-red">The forge reports this cannot merge cleanly. It will refuse.</p>' : ''}
+    <div class="modal-field">
+      <label>How</label>
+      <select class="modal-input" id="forge-merge-method">
+        <option value="merge">Merge commit</option>
+        <option value="squash">Squash and merge</option>
+        <option value="rebase">Rebase and merge</option>
+      </select>
+    </div>
+    <label class="modal-checkbox"><input type="checkbox" id="forge-merge-del" /> Delete <span class="text-mono">${escapeHtml(x.source)}</span> on the remote afterwards</label>`;
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const goBtn = document.createElement('button');
+  goBtn.className = 'btn-medieval primary';
+  goBtn.innerHTML = '<span class="btn-icon">⑃</span> Merge';
+  goBtn.onclick = async () => {
+    const method = body.querySelector('#forge-merge-method').value;
+    const deleteBranch = body.querySelector('#forge-merge-del').checked;
+    modal.hide();
+    const r = await withLoading('Merging', () => gs.forgeMerge({ number: x.number, method, deleteBranch, branch: x.source }));
+    if (!handleResult(r, 'Merged')) return;
+    await refreshForgeDetail();
+    await refreshForge();
+  };
+
+  modal.show({ title: '⑃ Merge Request', body, footer: [cancelBtn, goBtn] });
+}
+
+// One delegated listener for everything inside the detail pane, because the pane is
+// rebuilt from scratch on every render.
+document.addEventListener('click', (e) => {
+  const tabBtn = e.target.closest('[data-forge-tab]');
+  if (tabBtn) {
+    const d = forgeState.detail;
+    if (!d) return;
+    d.tab = tabBtn.dataset.forgeTab;
+    renderForgeDetail();
+    loadForgePane(d.tab);
+    return;
+  }
+  const hash = e.target.closest('[data-forge-hash]');
+  if (hash) { copyText(hash.dataset.forgeHash, 'Hash copied'); return; }
+
+  const act = e.target.closest('[data-forge-act]');
+  if (!act) return;
+  switch (act.dataset.forgeAct) {
+    case 'close-detail': closeForgeDetail(); break;
+    case 'refresh': refreshForgeDetail(); break;
+    case 'comment': forgePostComment(); break;
+    case 'checkout': forgeCheckoutRequest(); break;
+    case 'merge': forgeMergeRequest(); break;
+    case 'close': forgeSetItemState(false); break;
+    case 'reopen': forgeSetItemState(true); break;
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey)) return;
+  if (e.target && e.target.id === 'forge-comment-box') { e.preventDefault(); forgePostComment(); }
+});
+
+// ============================================
+// MARKDOWN
+// ============================================
+// Enough of it to read a request: the bodies here are written by other people and go
+// straight into the app's own window, so the text is escaped *first* and the only tags
+// that come back are the ones written below. No HTML from the forge is ever passed through.
+
+function forgeMdInline(s) {
+  let out = s;
+  // Inline code first, so nothing below rewrites what is inside it.
+  const code = [];
+  out = out.replace(/`([^`]+)`/g, (m, c) => { code.push(c); return `\u0000C${code.length - 1}\u0000`; });
+
+  out = out
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, (m, alt, url) => forgeMdLink(url, alt || url, m, true))
+    .replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (m, text, url) => forgeMdLink(url, text, m))
+    .replace(/(^|[\s(])((?:https?:)\/\/[^\s<>()]+)/g, (m, pre, url) => pre + forgeMdLink(url, url, url))
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|\W)_([^_]+)_(?=\W|$)/g, '$1<em>$2</em>')
+    .replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+    // A "#123" is a request or issue on this same forge, so it opens here rather than away.
+    .replace(/(^|[\s(])#(\d+)\b/g, (m, pre, n) => `${pre}<a class="forge-ref" data-forge-open="auto:${n}">#${n}</a>`)
+    .replace(/(^|[\s(])!(\d+)\b/g, (m, pre, n) => `${pre}<a class="forge-ref" data-forge-open="request:${n}">!${n}</a>`)
+    .replace(/(^|[\s(])@([A-Za-z0-9][A-Za-z0-9-_.]{0,38})\b/g, (m, pre, who) => {
+      const host = (forgeState.info || {}).host;
+      return host ? `${pre}<a class="forge-ref" data-forge-url="https://${forgeAttr(host)}/${forgeAttr(who)}">@${who}</a>` : m;
+    });
+
+  return out.replace(/\u0000C(\d+)\u0000/g, (m, i) => `<code>${code[+i]}</code>`);
+}
+
+// Only what a one-line system note needs — no links, no lists.
+function forgeMarkdownInlineOnly(s) {
+  return forgeMdInline(escapeHtml(String(s || '')).replace(/\n+/g, ' '));
+}
+
+function forgeMdLink(url, text, original, isImage) {
+  // The text arrived escaped, so "&amp;" in a URL has to be put back before it is used.
+  const raw = String(url).replace(/&amp;/g, '&');
+  // Only http(s) becomes a link. Anything else (javascript:, file:, data:) is left exactly
+  // as it was written — already-escaped text, so it reads as source and does nothing.
+  if (!/^https?:\/\//i.test(raw)) return original;
+  return `<a class="forge-link" data-forge-url="${forgeAttr(raw)}">${isImage ? '🖼 ' : ''}${text}</a>`;
+}
+
+function forgeMarkdown(src) {
+  const text = String(src == null ? '' : src);
+  if (!text.trim()) return '<p class="text-muted">No description.</p>';
+
+  // Escape everything up front. From here on the input is inert text and every tag added
+  // below is one of ours.
+  let s = escapeHtml(text).replace(/\r\n/g, '\n');
+
+  // Fenced code blocks are lifted out whole so no inline rule touches their contents.
+  const fences = [];
+  s = s.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+    fences.push(`<pre class="forge-code"><code>${code.replace(/\n+$/, '')}</code></pre>`);
+    return `\u0000F${fences.length - 1}\u0000`;
+  });
+
+  const out = [];
+  const lines = s.split('\n');
+  let para = [];
+  let list = null;          // 'ul' | 'ol'
+
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p>${forgeMdInline(para.join('<br>'))}</p>`);
+    para = [];
+  };
+  const flushList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const flushAll = () => { flushPara(); flushList(); };
+
+  for (const line of lines) {
+    const t = line.trim();
+
+    if (!t) { flushAll(); continue; }
+    const fence = /^\u0000F(\d+)\u0000$/.exec(t);
+    if (fence) { flushAll(); out.push(fences[+fence[1]]); continue; }
+    if (/^(---+|\*\*\*+|___+)$/.test(t)) { flushAll(); out.push('<hr class="forge-hr">'); continue; }
+
+    const head = /^(#{1,6})\s+(.*)$/.exec(t);
+    if (head) {
+      flushAll();
+      const level = Math.min(6, head[1].length) + 2;   // an h1 in a comment is not an h1 here
+      out.push(`<div class="forge-h forge-h${level}">${forgeMdInline(head[2])}</div>`);
+      continue;
+    }
+
+    const quote = /^&gt;\s?(.*)$/.exec(t);
+    if (quote) { flushAll(); out.push(`<blockquote class="forge-quote">${forgeMdInline(quote[1])}</blockquote>`); continue; }
+
+    const item = /^([-*+]|\d+\.)\s+(.*)$/.exec(t);
+    if (item) {
+      flushPara();
+      const want = /^\d/.test(item[1]) ? 'ol' : 'ul';
+      if (list !== want) { flushList(); list = want; out.push(`<${want} class="forge-ul">`); }
+      // Task list items keep their box, drawn rather than made interactive: ticking it
+      // here would not write anything back to the forge.
+      const task = /^\[([ xX])\]\s+(.*)$/.exec(item[2]);
+      out.push(task
+        ? `<li class="forge-task">${task[1] === ' ' ? '☐' : '☑'} ${forgeMdInline(task[2])}</li>`
+        : `<li>${forgeMdInline(item[2])}</li>`);
+      continue;
+    }
+
+    flushList();
+    para.push(t);
+  }
+  flushAll();
+  // A fence that opened mid-line leaves its marker inside a paragraph rather than on a
+  // line of its own; put those back too so no marker can ever reach the screen.
+  return out.join('').replace(/\u0000F(\d+)\u0000/g, (m, i) => fences[+i] || '');
+}
 
 function renderForgeUnknownHost() {
   const i = forgeState.info || {};
@@ -308,14 +909,11 @@ async function showCreatePrDialog() {
     }));
     if (!handleResult(r)) return;
     showToast(`Opened #${r.data.number}`, 'success');
+    // Straight into the reader rather than a "open it in a browser?" prompt — the request
+    // now has a home in the app.
+    goToTab('forge');
     await refreshForge();
-    const go = await modal.confirm({
-      title: 'Request Opened',
-      message: `#${r.data.number} — ${r.data.title}\n\n${r.data.url}`,
-      confirmText: 'Open in Browser',
-      cancelText: 'Stay Here'
-    });
-    if (go) gs.openExternal(r.data.url);
+    await openForgeItem('request', r.data.number);
   };
 
   modal.show({ title: forgeState.info.provider === 'gitlab' ? '⇄ New Merge Request' : '⇄ New Pull Request', body, footer: [cancelBtn, createBtn] });
@@ -387,6 +985,9 @@ async function hydrateChecksBadge(hostEl, sha) {
     const btn = e.target.closest('[data-forge-view]');
     if (!btn) return;
     forgeState.view = btn.dataset.forgeView;
+    // A request left open in the reader while the list switches to issues reads as though
+    // it belonged to that list. Switching the list closes it.
+    forgeState.detail = null;
     subtabs.querySelectorAll('[data-forge-view]').forEach(b => b.classList.toggle('active', b === btn));
     refreshForge();
   };
