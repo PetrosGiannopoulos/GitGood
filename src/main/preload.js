@@ -81,6 +81,7 @@ const api = {
   forgePullRequests: (opts) => ipcRenderer.invoke('forge:pullRequests', opts),
   forgeIssues: (opts) => ipcRenderer.invoke('forge:issues', opts),
   forgeCreatePullRequest: (opts) => ipcRenderer.invoke('forge:createPullRequest', opts),
+  forgeCreateIssue: (opts) => ipcRenderer.invoke('forge:createIssue', opts),
   forgeChecks: (opts) => ipcRenderer.invoke('forge:checks', opts),
   // Reading a request or issue in the app. One pane per call: the detail view only asks
   // for the tab you are looking at.
@@ -92,6 +93,8 @@ const api = {
   forgeSetState: (opts) => ipcRenderer.invoke('forge:setState', opts),
   forgeLabels: (opts) => ipcRenderer.invoke('forge:labels', opts),
   forgeSetLabels: (opts) => ipcRenderer.invoke('forge:setLabels', opts),
+  forgeUpdateItem: (opts) => ipcRenderer.invoke('forge:updateItem', opts),
+  forgeDeleteIssue: (opts) => ipcRenderer.invoke('forge:deleteIssue', opts),
   forgeMerge: (opts) => ipcRenderer.invoke('forge:merge', opts),
   forgeCheckoutRequest: (opts) => ipcRenderer.invoke('forge:checkoutRequest', opts),
   // Boards & work items. GitHub Projects v2 (GraphQL) and GitLab issue boards (REST) are

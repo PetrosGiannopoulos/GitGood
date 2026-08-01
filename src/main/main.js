@@ -5858,6 +5858,40 @@ ipcMain.handle('forge:createPullRequest', wrap(async (_, opts) => {
   return normalizeGitlabMr(forgeCheck(res, ctx, 'Merge request'), await glLabelPalette(ctx));
 }));
 
+// Issues are the one thing here with no git side at all — no branch to push first, nothing
+// to check against the working tree. Title, body, labels, and the forge does the rest.
+ipcMain.handle('forge:createIssue', wrap(async (_, opts) => {
+  const o = opts || {};
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Add a ${ctx.host} token in Settings → Forge first — opening an issue needs one.`);
+  const title = String(o.title || '').trim();
+  if (!title) throw new Error('A title is required');
+  const labels = [...new Set((Array.isArray(o.labels) ? o.labels : [])
+    .map(s => String(s == null ? '' : s).trim())
+    .filter(Boolean))];
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'POST', `/repos/${ghRepo(ctx)}/issues`, {
+      title, body: o.body || '', labels
+    });
+    // A repository with the issue tracker switched off answers 410 Gone, which on its own
+    // reads like the repository is missing rather than the feature being off.
+    if (res.status === 410) {
+      throw new Error(`Issues are turned off for this repository on ${ctx.host}. Enable them in the repository's settings first.`);
+    }
+    return normalizeGithubIssue(forgeCheck(res, ctx, 'Issue'));
+  }
+
+  const res = await forgeRequest(ctx, 'POST', `/projects/${glProject(ctx)}/issues`, {
+    title,
+    description: o.body || '',
+    // Same comma-joined form the label picker uses; a comma is not legal in a GitLab label
+    // name, so this can never be ambiguous.
+    labels: labels.join(',')
+  });
+  return normalizeGitlabIssue(forgeCheck(res, ctx, 'Issue'), await glLabelPalette(ctx));
+}));
+
 // CI state for one commit, normalised to a single verdict plus the runs behind it.
 // GitHub splits this across two APIs — check-runs (Actions, most apps) and commit statuses
 // (older integrations) — and a repository can use either or both, so both are read.
@@ -6305,6 +6339,66 @@ ipcMain.handle('forge:merge', wrap(async (_, opts) => {
   return { merged: j.state === 'merged', sha: j.merge_commit_sha || j.sha || '', message: '' };
 }));
 
+// Edit the title and body. Both forges take the same edit on a request as on an issue, so
+// this covers the reader's whole contents; only the field name for the body differs.
+ipcMain.handle('forge:updateItem', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Editing needs a ${ctx.host} token — add one in Settings → Forge.`);
+  const title = String(o.title || '').trim();
+  if (!title) throw new Error('A title is required');
+
+  if (ctx.provider === 'github') {
+    const res = await forgeRequest(ctx, 'PATCH',
+      `/repos/${ghRepo(ctx)}/${forgeResource(ctx, kind)}/${n}`, { title, body: o.body || '' });
+    const j = forgeCheck(res, ctx, `#${n}`);
+    return kind === 'issue' ? normalizeGithubIssue(j) : normalizeGithubPrDetail(j);
+  }
+  const res = await forgeRequest(ctx, 'PUT',
+    `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}`, { title, description: o.body || '' });
+  const j = forgeCheck(res, ctx, `#${n}`);
+  const pal = await glLabelPalette(ctx);
+  return kind === 'issue' ? normalizeGitlabIssue(j, pal) : normalizeGitlabMrDetail(j, pal);
+}));
+
+// Permanent deletion, and only for issues. Neither forge can delete a pull/merge request at
+// all, and GitHub cannot delete an issue over REST either — the only route is the GraphQL
+// deleteIssue mutation, which needs the issue's node ID rather than its number.
+//
+// Both providers require more than write access here: GitHub wants admin on the repository,
+// GitLab wants Owner. That refusal is the expected outcome for most tokens, so it is worth
+// translating rather than passing through as a bare 403.
+ipcMain.handle('forge:deleteIssue', wrap(async (_, opts) => {
+  const o = opts || {};
+  if (o.kind && o.kind !== 'issue') throw new Error('Only issues can be deleted — no forge can delete a pull or merge request.');
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Deleting an issue needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  if (ctx.provider === 'github') {
+    // The node ID is not the number and is not in the normalised shape the renderer holds,
+    // so it is read here rather than threaded through the UI.
+    const look = await forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/issues/${n}`);
+    const issue = forgeCheck(look, ctx, `Issue #${n}`);
+    if (issue.pull_request) throw new Error(`#${n} is a pull request, and GitHub cannot delete those.`);
+    if (!issue.node_id) throw new Error(`${ctx.host} did not return an internal ID for #${n}, so it cannot be deleted.`);
+    await forgeGraphql(ctx, GQL_DELETE_ISSUE, { id: issue.node_id },
+      `${ctx.host} will not let this token delete issues. Deleting an issue needs *admin* access to the repository — a classic token needs the "repo" scope and the account must be an administrator of it; a fine-grained token needs Issues: Read and write plus Administration. Most tokens that can edit an issue still cannot delete one.`);
+    return { deleted: true, number: n };
+  }
+
+  const res = await forgeRequest(ctx, 'DELETE', `/projects/${glProject(ctx)}/issues/${n}`);
+  if (res.status === 403) {
+    throw new Error(`${ctx.host} refused (403). Deleting an issue on GitLab requires the Owner role on the project — Maintainer is not enough.`);
+  }
+  // A successful DELETE is 204 with no body, which forgeCheck is happy with; anything else
+  // is a real failure worth reporting in its own words.
+  forgeCheck(res, ctx, `Issue #${n}`);
+  return { deleted: true, number: n };
+}));
+
 // ============================================
 // FORGE — BOARDS & WORK ITEMS
 // ============================================
@@ -6346,7 +6440,10 @@ function forgeProjectScopeHelp(ctx) {
 
 // GraphQL answers 200 with an `errors` array rather than an HTTP status, so the usual
 // forgeCheck is not enough on its own.
-async function forgeGraphql(ctx, query, variables) {
+// deniedHelp is what to say when the token is refused. It defaults to the Projects advice
+// because that is what almost every GraphQL call here is for; deleteIssue is refused for an
+// entirely different reason and passes its own.
+async function forgeGraphql(ctx, query, variables, deniedHelp) {
   const res = await forgeRequest(ctx, 'POST', graphqlUrlFor(ctx.host), { query, variables: variables || {} });
   if (res.status >= 400) forgeCheck(res, ctx, 'Projects');
   const j = res.json || {};
@@ -6357,7 +6454,7 @@ async function forgeGraphql(ctx, query, variables) {
     const denied = j.errors.some(e =>
       e.type === 'INSUFFICIENT_SCOPES' || e.type === 'FORBIDDEN' ||
       /scope|permission|not accessible/i.test(e.message || ''));
-    if (denied) throw new Error(forgeProjectScopeHelp(ctx));
+    if (denied) throw new Error(deniedHelp || forgeProjectScopeHelp(ctx));
     throw new Error(j.errors.map(e => e.message).filter(Boolean).join('; ') || 'The projects API refused the query.');
   }
   return j.data || {};
@@ -6404,6 +6501,10 @@ const GQL_SET_FIELD = `mutation($project:ID!,$item:ID!,$field:ID!,$option:String
   updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,
     value:{singleSelectOptionId:$option}}){ projectV2Item{ id } }
 }`;
+
+// The only way to delete an issue on GitHub — there is no REST equivalent. It takes the
+// issue's node ID, not its number.
+const GQL_DELETE_ISSUE = `mutation($id:ID!){ deleteIssue(input:{issueId:$id}){ clientMutationId } }`;
 
 // Moving a card back to "no status" is a different mutation, not an empty value.
 const GQL_CLEAR_FIELD = `mutation($project:ID!,$item:ID!,$field:ID!){

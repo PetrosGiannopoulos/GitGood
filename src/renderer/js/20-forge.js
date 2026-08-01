@@ -106,15 +106,34 @@ async function refreshForgeInner() {
   renderForge();
 }
 
+// Switching view is state plus the subtab highlight plus the toolbar, and it happens from
+// two places — the subtabs themselves, and landing on a freshly opened issue.
+function setForgeView(view) {
+  forgeState.view = view;
+  const subtabs = document.getElementById('forge-subtabs');
+  if (subtabs) {
+    subtabs.querySelectorAll('[data-forge-view]')
+      .forEach(b => b.classList.toggle('active', b.dataset.forgeView === view));
+  }
+  updateForgeToolbar();
+}
+
 // The open/closed filter belongs to the request and issue lists; the board picker belongs
 // to the other two. Showing all of it at once would offer controls that do nothing.
+//
+// The two "new" buttons follow the list they add to: opening a request from the Issues tab
+// (or an issue from the Requests tab) is a button that does not belong to what is on screen.
+// Neither shows on the board views — an issue created there would not join the board, and a
+// card that never appears reads as a bug.
 function updateForgeToolbar() {
   const boardView = forgeIsBoardView();
   const stateSel = document.getElementById('forge-state');
   const boardSel = document.getElementById('forge-board');
   const newPr = document.getElementById('forge-new-pr');
+  const newIssue = document.getElementById('forge-new-issue');
   if (stateSel) stateSel.style.display = boardView ? 'none' : '';
-  if (newPr) newPr.style.display = boardView ? 'none' : '';
+  if (newPr) newPr.style.display = forgeState.view === 'prs' ? '' : 'none';
+  if (newIssue) newIssue.style.display = forgeState.view === 'issues' ? '' : 'none';
   if (boardSel) boardSel.style.display = boardView ? '' : 'none';
 }
 
@@ -744,6 +763,8 @@ function forgeDetailHeadHtml(d, x, isReq) {
         ${isReq && open ? '<button class="mini-btn" data-forge-act="checkout" title="Fetch this request’s head and check it out locally">⤓ Checkout</button>' : ''}
         ${isReq && open ? '<button class="mini-btn" data-forge-act="merge" title="Merge on the forge">⑃ Merge</button>' : ''}
         ${x.merged ? '' : `<button class="mini-btn" data-forge-act="${open ? 'close' : 'reopen'}">${open ? '✕ Close' : '↺ Reopen'}</button>`}
+        <button class="mini-btn" data-forge-act="edit" title="Edit the title and description">✎ Edit</button>
+        ${isReq ? '' : '<button class="mini-btn danger" data-forge-act="delete" title="Delete this issue permanently — it cannot be undone">✗ Delete</button>'}
         <span class="graph-spacer"></span>
         <button class="mini-btn" data-forge-act="refresh" title="Reload from the forge">⟳</button>
         <button class="mini-btn" data-forge-url="${forgeAttr(x.url)}" title="Open on the forge in a browser">↗ Browser</button>
@@ -778,38 +799,14 @@ async function forgeEditLabels() {
   if (!r || !r.ok) { showToast((r && r.error) || 'Could not read the labels.', 'error', 6000); return; }
   const all = r.data || [];
 
-  const host = (forgeState.info || {}).host || 'the forge';
   const chosen = new Set((x.labels || []).map(l => (typeof l === 'string' ? l : l.name)));
-  // A label the item carries that the project no longer defines still has to be tickable,
-  // or applying the dialog would silently strip it.
-  const known = new Set(all.map(l => l.name));
-  const rows = all.concat([...chosen].filter(n => !known.has(n)).map(n => ({ name: n, color: '', ink: '', description: 'not defined on the project' })));
+  const rows = forgeLabelRows(all, chosen);
 
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="modal-text">Labels on <strong>#${x.number}</strong> — ${escapeHtml(x.title)}</p>
-    ${rows.length ? `
-      <input class="modal-input" id="forge-label-filter" placeholder="Filter labels…" autocomplete="off" />
-      <div class="forge-label-picker" id="forge-label-list">
-        ${rows.map(l => `
-          <label class="forge-label-row" data-label-name="${forgeAttr(l.name)}">
-            <input type="checkbox" value="${forgeAttr(l.name)}"${chosen.has(l.name) ? ' checked' : ''} />
-            ${forgeLabelChipHtml(l)}
-            ${l.description ? `<span class="forge-label-desc">${escapeHtml(l.description)}</span>` : ''}
-          </label>`).join('')}
-      </div>
-      <p class="modal-text text-muted">Ticked labels are what the item will have. New labels are created on ${escapeHtml(host)}, not here.</p>`
-    : `<p class="modal-text text-muted">This project defines no labels yet. Create them on ${escapeHtml(host)} and they will show up here.</p>`}`;
-
-  const filter = body.querySelector('#forge-label-filter');
-  if (filter) {
-    filter.addEventListener('input', () => {
-      const q = filter.value.trim().toLowerCase();
-      for (const row of body.querySelectorAll('.forge-label-row')) {
-        row.style.display = !q || row.dataset.labelName.toLowerCase().includes(q) ? '' : 'none';
-      }
-    });
-  }
+    ${forgeLabelPickerHtml(rows, chosen)}`;
+  forgeWireLabelPicker(body);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-medieval';
@@ -821,7 +818,7 @@ async function forgeEditLabels() {
   applyBtn.innerHTML = '<span class="btn-icon">✎</span> Apply';
   applyBtn.disabled = !rows.length;
   applyBtn.onclick = async () => {
-    const want = [...body.querySelectorAll('.forge-label-row input:checked')].map(i => i.value);
+    const want = forgeChosenLabels(body);
     modal.hide();
     // Nothing ticked or unticked is not worth a write, and a no-op PUT still costs a request
     // against a rate-limited API.
@@ -837,7 +834,146 @@ async function forgeEditLabels() {
   };
 
   modal.show({ title: '✎ Labels', body, footer: [cancelBtn, applyBtn] });
+  const filter = body.querySelector('#forge-label-filter');
   if (filter) setTimeout(() => filter.focus(), 0);
+}
+
+// The title and body, as they are. Both forges accept the same edit on a request as on an
+// issue, so this is offered for either — what differs is only what can be deleted.
+async function forgeEditItem() {
+  const d = forgeState.detail;
+  if (!d || !d.data || d.draftId) return;
+  const x = d.data;
+  const noun = d.kind === 'issue' ? 'Issue' : (forgeState.info || {}).provider === 'gitlab' ? 'Merge Request' : 'Pull Request';
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <div class="modal-field">
+      <label>Title</label>
+      <input class="modal-input" id="forge-edit-title" value="${forgeAttr(x.title || '')}" />
+    </div>
+    <div class="modal-field">
+      <label>Description</label>
+      <textarea class="modal-input" id="forge-edit-body" rows="10"></textarea>
+    </div>`;
+  // Set through .value rather than in the markup: a body containing "</textarea>" would
+  // otherwise close the field early and spill the rest of it into the dialog as HTML.
+  body.querySelector('#forge-edit-body').value = x.body || '';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn-medieval primary';
+  saveBtn.innerHTML = '<span class="btn-icon">✎</span> Save';
+  saveBtn.onclick = async () => {
+    const title = body.querySelector('#forge-edit-title').value.trim();
+    const text = body.querySelector('#forge-edit-body').value;
+    if (!title) { showToast('A title is required', 'error'); return; }
+    modal.hide();
+    if (title === (x.title || '') && text === (x.body || '')) return;   // nothing to write
+
+    const r = await withLoading('Saving', () => gs.forgeUpdateItem({ kind: d.kind, number: d.number, title, body: text }));
+    if (!handleResult(r, 'Saved')) return;
+    const now = forgeState.detail;
+    if (now && now.number === d.number) now.data = r.data;
+    renderForgeDetail();
+    await refreshForge();
+  };
+
+  modal.show({ title: `✎ Edit ${noun} #${x.number}`, body, footer: [cancelBtn, saveBtn] });
+  setTimeout(() => { const t = body.querySelector('#forge-edit-title'); if (t) t.focus(); }, 0);
+}
+
+// Deleting an issue on a forge is permanent and takes its comments with it — there is no
+// trash to recover it from, on either provider. So this asks for the number to be typed
+// rather than for one more click: the confirmation should cost as much as the mistake does.
+async function forgeDeleteIssue() {
+  const d = forgeState.detail;
+  if (!d || !d.data || d.draftId || d.kind !== 'issue') return;
+  const x = d.data;
+  const host = (forgeState.info || {}).host || 'the forge';
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Permanently delete issue <strong>#${x.number}</strong> — ${escapeHtml(x.title)}?</p>
+    <p class="modal-text text-red">This cannot be undone. The issue and all of its comments are removed from ${escapeHtml(host)}. Closing it instead keeps the record and can be reversed.</p>
+    <div class="modal-field">
+      <label>Type <span class="text-mono">${x.number}</span> to confirm</label>
+      <input class="modal-input" id="forge-del-confirm" autocomplete="off" placeholder="${x.number}" />
+    </div>`;
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn-medieval danger';
+  delBtn.innerHTML = '<span class="btn-icon">✗</span> Delete Permanently';
+  delBtn.disabled = true;
+  delBtn.onclick = async () => {
+    modal.hide();
+    const r = await withLoading('Deleting', () => gs.forgeDeleteIssue({ kind: 'issue', number: d.number }));
+    if (!handleResult(r, `Issue #${d.number} deleted`)) return;
+    // Nothing left to read, so the pane goes back to the list rather than showing a 404.
+    closeForgeDetail();
+    await refreshForge();
+  };
+
+  const input = body.querySelector('#forge-del-confirm');
+  input.addEventListener('input', () => { delBtn.disabled = input.value.trim() !== String(x.number); });
+
+  modal.show({ title: '✗ Delete Issue', body, footer: [cancelBtn, delBtn] });
+  setTimeout(() => input.focus(), 0);
+}
+
+// ---- the label picker, shared by the reader's pencil and the new-issue dialog ----------
+
+// A label the item already carries but the project no longer defines still has to be
+// tickable, or applying the dialog would silently strip it.
+function forgeLabelRows(all, chosen) {
+  const known = new Set((all || []).map(l => l.name));
+  return (all || []).concat([...chosen]
+    .filter(n => !known.has(n))
+    .map(n => ({ name: n, color: '', ink: '', description: 'not defined on the project' })));
+}
+
+function forgeLabelPickerHtml(rows, chosen) {
+  const host = (forgeState.info || {}).host || 'the forge';
+  if (!rows.length) {
+    return `<p class="modal-text text-muted">This project defines no labels yet. Create them on ${escapeHtml(host)} and they will show up here.</p>`;
+  }
+  return `
+    <input class="modal-input" id="forge-label-filter" placeholder="Filter labels…" autocomplete="off" />
+    <div class="forge-label-picker">
+      ${rows.map(l => `
+        <label class="forge-label-row" data-label-name="${forgeAttr(l.name)}">
+          <input type="checkbox" value="${forgeAttr(l.name)}"${chosen.has(l.name) ? ' checked' : ''} />
+          ${forgeLabelChipHtml(l)}
+          ${l.description ? `<span class="forge-label-desc">${escapeHtml(l.description)}</span>` : ''}
+        </label>`).join('')}
+    </div>
+    <p class="modal-text text-muted">New labels are created on ${escapeHtml(host)}, not here.</p>`;
+}
+
+// Filtering hides rows rather than redrawing the list, so a tick survives typing in the box.
+function forgeWireLabelPicker(body) {
+  const filter = body.querySelector('#forge-label-filter');
+  if (!filter) return;
+  filter.addEventListener('input', () => {
+    const q = filter.value.trim().toLowerCase();
+    for (const row of body.querySelectorAll('.forge-label-row')) {
+      row.style.display = !q || row.dataset.labelName.toLowerCase().includes(q) ? '' : 'none';
+    }
+  });
+}
+
+// Every ticked box, including the ones the filter is currently hiding.
+function forgeChosenLabels(body) {
+  return [...body.querySelectorAll('.forge-label-row input:checked')].map(i => i.value);
 }
 
 // What the forge thinks of merging this, in one line. "unknown" is a real answer — both
@@ -1081,6 +1217,8 @@ document.addEventListener('click', (e) => {
     case 'close': forgeSetItemState(false); break;
     case 'reopen': forgeSetItemState(true); break;
     case 'labels': forgeEditLabels(); break;
+    case 'edit': forgeEditItem(); break;
+    case 'delete': forgeDeleteIssue(); break;
   }
 });
 
@@ -1373,6 +1511,66 @@ async function showCreatePrDialog() {
   modal.show({ title: forgeState.info.provider === 'gitlab' ? '⇄ New Merge Request' : '⇄ New Pull Request', body, footer: [cancelBtn, createBtn] });
 }
 
+// An issue has no git side at all — no branch, no push, nothing to check against the working
+// tree — so this is the whole of it: a title, a description, and the labels to open it with.
+async function showCreateIssueDialog() {
+  if (!state.repo) return;
+  const info = forgeState.info || ((await gs.forgeInfo({})).data);
+  if (!info || !info.supported) { showToast('This repository has no recognised forge remote.', 'error', 6000); return; }
+  if (!info.hasToken) { goToTab('forge'); await refreshForge(); showToast('Connect a token first', 'error'); return; }
+  forgeState.info = info;
+
+  // Labels are a convenience here, not a requirement: a project whose labels cannot be read
+  // still gets a dialog that opens an issue, just without the picker.
+  const lr = await withLoading('Reading labels', () => gs.forgeLabels({}));
+  const rows = (lr && lr.ok && lr.data) || [];
+  const chosen = new Set();
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <div class="modal-field">
+      <label>Title</label>
+      <input class="modal-input" id="issue-title" placeholder="What is wrong, or what should exist" />
+    </div>
+    <div class="modal-field">
+      <label>Description (optional)</label>
+      <textarea class="modal-input" id="issue-body" rows="7" placeholder="Steps, context, anything the next person needs"></textarea>
+    </div>
+    <div class="modal-field">
+      <label>Labels (optional)</label>
+      ${forgeLabelPickerHtml(rows, chosen)}
+    </div>`;
+  forgeWireLabelPicker(body);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const createBtn = document.createElement('button');
+  createBtn.className = 'btn-medieval primary';
+  createBtn.innerHTML = '<span class="btn-icon">☰</span> Open Issue';
+  createBtn.onclick = async () => {
+    const title = body.querySelector('#issue-title').value.trim();
+    if (!title) { showToast('A title is required', 'error'); return; }
+    const desc = body.querySelector('#issue-body').value;
+    const labels = forgeChosenLabels(body);
+    modal.hide();
+
+    const r = await withLoading('Opening the issue', () => gs.forgeCreateIssue({ title, body: desc, labels }));
+    if (!handleResult(r)) return;
+    showToast(`Opened #${r.data.number}`, 'success');
+    // Into the reader, the same as a new request: the issue has a home in the app now.
+    goToTab('forge');
+    setForgeView('issues');
+    await refreshForge();
+    await openForgeItem('issue', r.data.number);
+  };
+
+  modal.show({ title: '☰ New Issue', body, footer: [cancelBtn, createBtn] });
+  setTimeout(() => { const t = body.querySelector('#issue-title'); if (t) t.focus(); }, 0);
+}
+
 // ============================================
 // CI CHECKS ON A COMMIT
 // ============================================
@@ -1433,6 +1631,9 @@ async function hydrateChecksBadge(hostEl, sha) {
   const newPr = document.getElementById('forge-new-pr');
   if (newPr) newPr.onclick = () => showCreatePrDialog();
 
+  const newIssue = document.getElementById('forge-new-issue');
+  if (newIssue) newIssue.onclick = () => showCreateIssueDialog();
+
   const stateSel = document.getElementById('forge-state');
   if (stateSel) stateSel.onchange = () => refreshForge();
 
@@ -1444,9 +1645,7 @@ async function hydrateChecksBadge(hostEl, sha) {
     const btn = e.target.closest('[data-forge-view]');
     if (!btn) return;
     const was = forgeState.view;
-    forgeState.view = btn.dataset.forgeView;
-    subtabs.querySelectorAll('[data-forge-view]').forEach(b => b.classList.toggle('active', b === btn));
-    updateForgeToolbar();
+    setForgeView(btn.dataset.forgeView);
 
     // Work Items and Board are two drawings of one payload: flipping between them is a
     // re-render, never another round trip.
