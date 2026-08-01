@@ -290,7 +290,7 @@ function forgeWorkItemsHtml(b) {
         <span class="forge-type">${escapeHtml(c.type)}</span>
         ${c.author ? ' · ' + escapeHtml(c.author) : ''}
         ${c.updatedAt ? ' · updated ' + escapeHtml(relativeTime(c.updatedAt)) : ''}
-        ${forgeLabelsHtml(c.labels, 3)}
+        ${forgeMetaLabelsHtml(c.labels, 4)}
       </div>
     </li>`).join('')}</ul>`;
 }
@@ -328,7 +328,7 @@ function forgeCardHtml(c, b) {
       ${c.url ? forgeOpenExternalBtnHtml(c.url) : ''}
     </div>
     <div class="forge-card-title">${escapeHtml(c.title)}</div>
-    ${(c.labels || []).length ? `<div class="forge-card-labels">${forgeLabelsHtml(c.labels, 3).replace(/^ · /, '')}</div>` : ''}
+    ${(c.labels || []).length ? `<div class="forge-card-labels">${forgeLabelsHtml(c.labels, 4)}</div>` : ''}
     <div class="forge-card-foot">
       <span class="forge-type">${escapeHtml(c.type)}</span>
       ${(c.assignees || []).length ? '<span>' + escapeHtml(c.assignees.join(', ')) + '</span>' : ''}
@@ -477,6 +477,7 @@ function forgeRequestRowHtml(pr, currentBranch) {
       · ${escapeHtml(pr.author)}
       ${pr.updatedAt ? ' · updated ' + escapeHtml(relativeTime(pr.updatedAt)) : ''}
       ${pr.comments ? ` · ${pr.comments} comment${pr.comments === 1 ? '' : 's'}` : ''}
+      ${forgeMetaLabelsHtml(pr.labels, 4)}
     </div>
   </li>`;
 }
@@ -493,24 +494,57 @@ function forgeIssueRowHtml(it) {
     <div class="forge-item-meta">
       ${escapeHtml(it.author)}
       ${it.updatedAt ? ' · updated ' + escapeHtml(relativeTime(it.updatedAt)) : ''}
-      ${forgeLabelsHtml(it.labels, 4)}
+      ${forgeMetaLabelsHtml(it.labels, 4)}
     </div>
   </li>`;
 }
 
+// Labels wear the forge's own colours. Both providers let a project pick them, and they are
+// the fastest thing to read in a list — "bug" red and "docs" blue are recognised before the
+// title is — so they are drawn filled rather than outlined, which is how both sites draw them.
+//
+// A truncated set says so with a +N rather than quietly showing three of seven: a label the
+// reader cannot see is worse than no labels, because the ones on screen look complete.
 function forgeLabelsHtml(labels, limit) {
-  const list = (labels || []).slice(0, limit || 99);
-  if (!list.length) return '';
-  return ' · ' + list.map(l => {
-    const name = typeof l === 'string' ? l : l.name;
-    const color = typeof l === 'string' ? '' : l.color;
-    // GitHub gives a background colour and expects the reader to pick a legible foreground;
-    // luminance decides, the same way the forge does it.
-    const style = /^[0-9a-f]{6}$/i.test(color || '')
-      ? ` style="background:#${color};border-color:#${color};color:${forgeReadableInk(color)}"`
-      : '';
-    return `<span class="forge-label"${style}>${escapeHtml(name)}</span>`;
-  }).join(' ');
+  const all = (labels || []).filter(l => (typeof l === 'string' ? l : l && l.name));
+  if (!all.length) return '';
+  const cap = limit || 99;
+  const shown = all.slice(0, cap);
+  const rest = all.length - shown.length;
+
+  const chips = shown.map(l => forgeLabelChipHtml(l));
+  if (rest > 0) {
+    chips.push(`<span class="forge-label forge-label-more" title="${forgeAttr(all.map(l => (typeof l === 'string' ? l : l.name)).join(', '))}">+${rest}</span>`);
+  }
+  return `<span class="forge-labels">${chips.join('')}</span>`;
+}
+
+// One chip, wearing the forge's colours. Shared with the picker so a label looks the same
+// where it is chosen as it does where it is read.
+function forgeLabelChipHtml(l, extraClass) {
+  const name = typeof l === 'string' ? l : l.name;
+  const color = typeof l === 'string' ? '' : forgeHex(l.color);
+  // GitLab publishes the foreground it uses; GitHub publishes only the background and
+  // leaves the reader to find an ink that stays legible on it. Prefer the stated answer.
+  const ink = typeof l === 'string' ? '' : forgeHex(l.ink);
+  const style = color
+    ? ` style="background:#${color};border-color:#${color};color:${ink ? '#' + ink : forgeReadableInk(color)}"`
+    : '';
+  return `<span class="forge-label${extraClass ? ' ' + extraClass : ''}"${style} title="${forgeAttr(name)}">${escapeHtml(name)}</span>`;
+}
+
+// The same chips on a meta line, where they follow other facts and need the separator.
+function forgeMetaLabelsHtml(labels, limit) {
+  const html = forgeLabelsHtml(labels, limit);
+  return html ? ' · ' + html : '';
+}
+
+// Accepts what either forge sends: with or without the #, three digits or six.
+function forgeHex(v) {
+  const s = String(v || '').replace(/^#/, '').trim();
+  if (/^[0-9a-f]{6}$/i.test(s)) return s.toLowerCase();
+  if (/^[0-9a-f]{3}$/i.test(s)) return s.toLowerCase().split('').map(c => c + c).join('');
+  return '';
 }
 
 function forgeReadableInk(hex) {
@@ -699,7 +733,7 @@ function forgeDetailHeadHtml(d, x, isReq) {
         ${isReq ? ` · <span class="text-mono">${escapeHtml(x.source)}</span> → <span class="text-mono">${escapeHtml(x.target)}</span>` : ''}
         ${isReq && x.isFork ? ' <span class="forge-flag">fork</span>' : ''}
         ${counts}
-        ${forgeLabelsHtml(x.labels)}
+        ${forgeDetailLabelsHtml(x, draft)}
         ${(x.assignees || []).length ? ' · assigned ' + x.assignees.map(a => escapeHtml(a)).join(', ') : ''}
         ${isReq && (x.reviewers || []).length ? ' · review ' + x.reviewers.map(a => escapeHtml(a)).join(', ') : ''}
       </div>
@@ -718,6 +752,92 @@ function forgeDetailHeadHtml(d, x, isReq) {
         ${tabs.map(([id, label, n]) => `<button class="mini-btn${d.tab === id ? ' active' : ''}" data-forge-tab="${id}">${label}${n ? ` <span class="forge-num">${n}</span>` : ''}</button>`).join('')}
       </div>`}
     </div>`;
+}
+
+// Labels in the reader are the editable copy, so they carry the pencil. A draft board item
+// has no issue behind it on the forge and nothing to write labels to, so it gets the plain
+// chips — the same reason it has no actions and no comment box.
+//
+// The row is drawn even when there are no labels: "no labels ✎" is how the first one gets
+// added, and a pencil that only appears once a label exists cannot be found.
+function forgeDetailLabelsHtml(x, draft) {
+  if (draft) return forgeMetaLabelsHtml(x.labels);
+  const chips = forgeLabelsHtml(x.labels);
+  return ` · ${chips || '<span class="text-muted">no labels</span>'}` +
+    ` <button class="forge-label-edit" data-forge-act="labels" title="Change the labels on this item">✎</button>`;
+}
+
+// Tick what it should have. The set is replaced wholesale, which is what the dialog shows,
+// so there is no add/remove vocabulary to get backwards.
+async function forgeEditLabels() {
+  const d = forgeState.detail;
+  if (!d || !d.data || d.draftId) return;
+  const x = d.data;
+
+  const r = await withLoading('Reading labels', () => gs.forgeLabels({}));
+  if (!r || !r.ok) { showToast((r && r.error) || 'Could not read the labels.', 'error', 6000); return; }
+  const all = r.data || [];
+
+  const host = (forgeState.info || {}).host || 'the forge';
+  const chosen = new Set((x.labels || []).map(l => (typeof l === 'string' ? l : l.name)));
+  // A label the item carries that the project no longer defines still has to be tickable,
+  // or applying the dialog would silently strip it.
+  const known = new Set(all.map(l => l.name));
+  const rows = all.concat([...chosen].filter(n => !known.has(n)).map(n => ({ name: n, color: '', ink: '', description: 'not defined on the project' })));
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Labels on <strong>#${x.number}</strong> — ${escapeHtml(x.title)}</p>
+    ${rows.length ? `
+      <input class="modal-input" id="forge-label-filter" placeholder="Filter labels…" autocomplete="off" />
+      <div class="forge-label-picker" id="forge-label-list">
+        ${rows.map(l => `
+          <label class="forge-label-row" data-label-name="${forgeAttr(l.name)}">
+            <input type="checkbox" value="${forgeAttr(l.name)}"${chosen.has(l.name) ? ' checked' : ''} />
+            ${forgeLabelChipHtml(l)}
+            ${l.description ? `<span class="forge-label-desc">${escapeHtml(l.description)}</span>` : ''}
+          </label>`).join('')}
+      </div>
+      <p class="modal-text text-muted">Ticked labels are what the item will have. New labels are created on ${escapeHtml(host)}, not here.</p>`
+    : `<p class="modal-text text-muted">This project defines no labels yet. Create them on ${escapeHtml(host)} and they will show up here.</p>`}`;
+
+  const filter = body.querySelector('#forge-label-filter');
+  if (filter) {
+    filter.addEventListener('input', () => {
+      const q = filter.value.trim().toLowerCase();
+      for (const row of body.querySelectorAll('.forge-label-row')) {
+        row.style.display = !q || row.dataset.labelName.toLowerCase().includes(q) ? '' : 'none';
+      }
+    });
+  }
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const applyBtn = document.createElement('button');
+  applyBtn.className = 'btn-medieval primary';
+  applyBtn.innerHTML = '<span class="btn-icon">✎</span> Apply';
+  applyBtn.disabled = !rows.length;
+  applyBtn.onclick = async () => {
+    const want = [...body.querySelectorAll('.forge-label-row input:checked')].map(i => i.value);
+    modal.hide();
+    // Nothing ticked or unticked is not worth a write, and a no-op PUT still costs a request
+    // against a rate-limited API.
+    if (want.length === chosen.size && want.every(n => chosen.has(n))) return;
+
+    const res = await withLoading('Applying labels', () => gs.forgeSetLabels({ kind: d.kind, number: d.number, labels: want }));
+    if (!handleResult(res, 'Labels updated')) return;
+    // The forge's answer, not what was ticked: it is the one that knows what actually stuck.
+    const now = forgeState.detail;
+    if (now && now.number === d.number && now.data) now.data.labels = (res.data && res.data.labels) || [];
+    renderForgeDetail();
+    await refreshForge();
+  };
+
+  modal.show({ title: '✎ Labels', body, footer: [cancelBtn, applyBtn] });
+  if (filter) setTimeout(() => filter.focus(), 0);
 }
 
 // What the forge thinks of merging this, in one line. "unknown" is a real answer — both
@@ -960,6 +1080,7 @@ document.addEventListener('click', (e) => {
     case 'merge': forgeMergeRequest(); break;
     case 'close': forgeSetItemState(false); break;
     case 'reopen': forgeSetItemState(true); break;
+    case 'labels': forgeEditLabels(); break;
   }
 });
 

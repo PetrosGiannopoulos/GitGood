@@ -90,6 +90,8 @@ const api = {
   forgeRequestCommits: (opts) => ipcRenderer.invoke('forge:requestCommits', opts),
   forgeRequestFiles: (opts) => ipcRenderer.invoke('forge:requestFiles', opts),
   forgeSetState: (opts) => ipcRenderer.invoke('forge:setState', opts),
+  forgeLabels: (opts) => ipcRenderer.invoke('forge:labels', opts),
+  forgeSetLabels: (opts) => ipcRenderer.invoke('forge:setLabels', opts),
   forgeMerge: (opts) => ipcRenderer.invoke('forge:merge', opts),
   forgeCheckoutRequest: (opts) => ipcRenderer.invoke('forge:checkoutRequest', opts),
   // Boards & work items. GitHub Projects v2 (GraphQL) and GitLab issue boards (REST) are

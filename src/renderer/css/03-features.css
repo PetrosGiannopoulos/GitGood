@@ -2659,13 +2659,82 @@ body.resizing-panes * {
   flex-shrink: 0;
 }
 
+/* Labels carry the forge's own colours, which arrive as inline background/border/color and
+   override everything here. What is left to this rule is the shape, and the uncoloured
+   fallback: a project that never picked a colour, or a GitLab palette that could not be
+   read, still gets a legible chip rather than an invisible one. */
+.forge-labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  vertical-align: middle;
+}
 .forge-label {
   display: inline-block;
-  padding: 0 5px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 6px;
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
   color: var(--text-dim);
+  /* A dark label on the app's dark chrome would otherwise have no edge at all. The ring is
+     drawn inside the chip so it reads on a pale colour too. */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
+}
+.forge-label-more {
+  background: transparent !important;
+  border-color: var(--border) !important;
+  color: var(--text-muted) !important;
+  box-shadow: none;
+  font-weight: 500;
+}
+
+/* The pencil sits with the labels rather than in the action row: it edits what is beside
+   it, and the action row is for things that happen to the whole item. */
+.forge-label-edit {
+  background: none;
+  border: none;
+  padding: 0 3px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.forge-label-edit:hover { color: var(--gold-accent); }
+
+/* The picker scrolls on its own so the dialog's buttons never leave the screen on a
+   project with eighty labels. */
+.forge-label-picker {
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.forge-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.forge-label-row:last-child { border-bottom: none; }
+.forge-label-row:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.forge-label-row input { cursor: pointer; flex-shrink: 0; }
+.forge-label-row .forge-label { max-width: 220px; flex-shrink: 0; }
+.forge-label-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The tab is a list on the left and a reader on the right. Only the two panes scroll —

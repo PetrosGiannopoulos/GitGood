@@ -5320,25 +5320,7 @@ async function forgeRepoContext(remoteName) {
 
 // ---- HTTP ----------------------------------------------------------------------------
 
-function forgeRequest(ctx, method, urlPath, body) {
-  const token = readForgeToken(ctx.host);
-  const full = urlPath.startsWith('http') ? urlPath : ctx.apiBase + urlPath;
-  const u = new URL(full);
-  const payload = body ? Buffer.from(JSON.stringify(body)) : null;
-
-  const headers = {
-    'User-Agent': 'GitGood',
-    'Accept': ctx.provider === 'github' ? 'application/vnd.github+json' : 'application/json'
-  };
-  if (payload) {
-    headers['Content-Type'] = 'application/json';
-    headers['Content-Length'] = payload.length;
-  }
-  if (token) {
-    if (ctx.provider === 'gitlab') headers['PRIVATE-TOKEN'] = token;
-    else headers['Authorization'] = 'Bearer ' + token;
-  }
-
+function forgeHttp(ctx, u, method, headers, payload) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: u.hostname,
@@ -5364,6 +5346,81 @@ function forgeRequest(ctx, method, urlPath, body) {
   });
 }
 
+// Two hosts are the same forge if they differ only by a leading "www." — that is the one
+// canonicalisation both gitlab.com and github.com actually perform, and treating it as a
+// different host would mean dropping the token on every request.
+function sameForgeHost(a, b) {
+  const strip = h => String(h || '').toLowerCase().replace(/^www\./, '');
+  return strip(a) === strip(b);
+}
+
+const FORGE_MAX_REDIRECTS = 5;
+
+// Node's HTTP client does not follow redirects, and a forge API redirects in several
+// situations the user cannot see coming: a repository or group that was renamed (both
+// forges keep the old path alive as a redirect), a host that canonicalises itself, or a
+// reverse proxy in front of a self-hosted install. Without this, every one of those reaches
+// the user as a bare "returned 301" with nothing to act on.
+//
+// Two rules, both about the token. It only ever goes to the host GitGood itself addressed —
+// a redirect is an easy way to ask a client to hand its credential to somebody else — so a
+// redirect that leaves that host stops here and says so instead. And only GET, plus the
+// method-preserving redirects (307/308), are followed: replaying a POST as a GET is how a
+// comment or a merge silently turns into a no-op that reports success.
+//
+// "The host GitGood addressed" is the API host, not the remote's. On github.com those are
+// different names — the repository is at github.com and its API is at api.github.com — so
+// comparing against ctx.host would drop the Authorization header on every GitHub request
+// and every one of them would come back 401.
+async function forgeRequest(ctx, method, urlPath, body) {
+  const token = readForgeToken(ctx.host);
+  const payload = body ? Buffer.from(JSON.stringify(body)) : null;
+  let url = urlPath.startsWith('http') ? urlPath : ctx.apiBase + urlPath;
+  const apiHost = new URL(url).hostname;
+
+  for (let hop = 0; ; hop++) {
+    const u = new URL(url);
+    const headers = {
+      'User-Agent': 'GitGood',
+      'Accept': ctx.provider === 'github' ? 'application/vnd.github+json' : 'application/json'
+    };
+    if (payload) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = payload.length;
+    }
+    if (token && sameForgeHost(u.hostname, apiHost)) {
+      if (ctx.provider === 'gitlab') headers['PRIVATE-TOKEN'] = token;
+      else headers['Authorization'] = 'Bearer ' + token;
+    }
+
+    const res = await forgeHttp(ctx, u, method, headers, payload);
+    if (res.status < 300 || res.status >= 400) return res;
+
+    const loc = res.headers && res.headers.location;
+    if (!loc) return res;                       // no Location — forgeCheck explains the 3xx
+    if (hop >= FORGE_MAX_REDIRECTS) {
+      throw new Error(`${ctx.host} redirected more than ${FORGE_MAX_REDIRECTS} times — the API address in the remote URL is probably not where the API lives.`);
+    }
+
+    let next;
+    try { next = new URL(loc, url); }
+    catch (e) { throw new Error(`${ctx.host} answered ${res.status} with a redirect GitGood could not read: ${loc}`); }
+
+    if (next.protocol !== 'https:') {
+      throw new Error(`${ctx.host} redirected the API to ${next.protocol}//${next.host}. GitGood will not follow a forge redirect off HTTPS, because the token travels with it.`);
+    }
+    // Compared against where this started, not against the previous hop: hop-by-hop would
+    // let a chain of same-looking steps walk the token off the API host one name at a time.
+    if (!sameForgeHost(next.hostname, apiHost)) {
+      throw new Error(`${ctx.host} redirected the API to ${next.hostname}. GitGood does not send your token to a different host — point this repository's remote at ${next.hostname}, and add a token for it in Settings → Forge.`);
+    }
+    if (method !== 'GET' && res.status !== 307 && res.status !== 308) {
+      throw new Error(`${ctx.host} answered ${res.status} and redirected ${method} ${u.pathname} to ${next.pathname}. GitGood will not replay it as a GET, which is what that redirect asks for — the action was not performed.`);
+    }
+    url = next.href;
+  }
+}
+
 // One place to turn an HTTP status into something worth showing a user. The distinction
 // that matters most: 404 on a private repository means "your token cannot see it", which
 // looks nothing like "not found" from the outside.
@@ -5386,6 +5443,13 @@ function forgeCheck(res, ctx, what) {
   if (res.status === 422 && res.json && res.json.errors) {
     throw new Error(apiMsg + ': ' + res.json.errors.map(e => e.message || `${e.field} ${e.code}`).join('; '));
   }
+  // A 3xx that survived forgeRequest's redirect following had no Location to follow, so the
+  // only useful thing left to say is where the API was being looked for. Almost always this
+  // is a self-hosted install whose API is not at https://<remote host>/api/... — typically
+  // one served under a path (https://host/gitlab/) or behind a proxy on another name.
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`${ctx.host} redirected ${ctx.apiBase} (${res.status}) without saying where to. If this is a self-hosted ${ctx.provider === 'gitlab' ? 'GitLab' : 'GitHub'} that is not served at the root of ${ctx.host}, its API is not at ${ctx.apiBase} and GitGood cannot reach it from this remote URL.`);
+  }
   throw new Error(`${ctx.host} returned ${res.status}${apiMsg ? ': ' + apiMsg : ''}`);
 }
 
@@ -5406,11 +5470,12 @@ function normalizeGithubPr(p) {
     createdAt: p.created_at,
     updatedAt: p.updated_at,
     comments: p.comments || 0,
+    labels: forgeLabels(p.labels),
     sha: (p.head && p.head.sha) || ''
   };
 }
 
-function normalizeGitlabMr(m) {
+function normalizeGitlabMr(m, pal) {
   return {
     kind: 'request',
     number: m.iid,                        // iid is the per-project number shown in the UI
@@ -5426,17 +5491,105 @@ function normalizeGitlabMr(m) {
     createdAt: m.created_at,
     updatedAt: m.updated_at,
     comments: m.user_notes_count || 0,
+    labels: forgeLabels(m.labels, pal),
     sha: m.sha || ''
   };
 }
 
-// A label is a name plus, on GitHub, a colour; GitLab's list endpoints hand back bare
-// strings. One shape either way, so the renderer never branches on provider.
-function forgeLabels(raw) {
-  return (raw || []).map(l => (typeof l === 'string'
-    ? { name: l, color: '' }
-    : { name: l.name || l.title || '', color: String(l.color || '').replace(/^#/, '') }
-  )).filter(l => l.name);
+// A label is a name, a background colour, and the ink that stays legible on it. GitHub
+// embeds the colour in every label object and leaves the foreground to the reader; GitLab's
+// list endpoints hand back bare strings and nothing else, so its colours arrive separately
+// (glLabelPalette) and are merged in here. One shape either way, so the renderer never
+// branches on provider.
+//
+// `ink` is only set when the forge stated it. Empty means "decide by luminance", which is
+// what the renderer does — guessing is right for GitHub, and wrong to do when GitLab has
+// already published its own answer.
+function forgeLabels(raw, palette) {
+  return (raw || []).map(l => {
+    const name = typeof l === 'string' ? l : ((l && (l.name || l.title)) || '');
+    const own = typeof l === 'string' ? '' : String((l && l.color) || '').replace(/^#/, '');
+    const pal = (palette && palette.get(name)) || null;
+    return {
+      name,
+      color: own || (pal ? pal.color : ''),
+      ink: pal && pal.ink ? pal.ink : ''
+    };
+  }).filter(l => l.name);
+}
+
+// GitLab publishes label colours on one endpoint and nowhere else: every issue, merge
+// request and board card names its labels as plain strings. So the project's palette is
+// fetched once and looked up, rather than being read off the items themselves.
+//
+// Cached, because it is consulted on every list, detail and board render while a label's
+// colour changes about as often as the project is renamed. A failure here is deliberately
+// not an error the user sees — labels fall back to the app's own grey, which is exactly
+// what every GitLab label looked like before this existed.
+// The same fetch serves two callers with opposite needs, which is why the catalog and the
+// palette are separate functions over one cache. The label *picker* must know why it is
+// empty, so forgeLabelCatalog throws; the colours on a list must never turn a network
+// hiccup into a failed render, so glLabelPalette swallows and hands back grey.
+const forgeLabelCache = new Map();     // "host|project path" -> { at, labels } | { at, failed, message }
+const FORGE_LABEL_TTL = 10 * 60 * 1000;
+const FORGE_LABEL_FAIL_TTL = 60 * 1000;
+
+async function forgeFetchLabels(ctx) {
+  // include_ancestor_groups defaults to true on GitLab and that default is load-bearing: in
+  // any organisation the interesting labels are defined on the parent group, not the project.
+  const path = ctx.provider === 'github'
+    ? `/repos/${ghRepo(ctx)}/labels?per_page=100`
+    : `/projects/${glProject(ctx)}/labels?per_page=100&with_counts=false`;
+  const res = await forgeRequest(ctx, 'GET', path);
+  return (forgeCheck(res, ctx, 'Labels') || []).filter(l => l && l.name).map(l => ({
+    name: l.name,
+    color: String(l.color || '').replace(/^#/, ''),
+    // GitLab works out the readable foreground itself and ships it alongside the background;
+    // using its answer is what makes a label look here as it does there. GitHub sends no
+    // such field, and forgeLabels leaves ink empty so luminance decides.
+    ink: String(l.text_color || '').replace(/^#/, ''),
+    description: l.description || ''
+  }));
+}
+
+async function forgeLabelCatalog(ctx) {
+  const key = `${ctx.host}|${ctx.projectPath}`;
+  const hit = forgeLabelCache.get(key);
+  if (hit && (Date.now() - hit.at) < (hit.failed ? FORGE_LABEL_FAIL_TTL : FORGE_LABEL_TTL)) {
+    if (hit.failed) throw new Error(hit.message);
+    return hit.labels;
+  }
+  try {
+    const labels = await forgeFetchLabels(ctx);
+    forgeLabelCache.set(key, { at: Date.now(), labels });
+    return labels;
+  } catch (e) {
+    // Remembered briefly, because the palette below is consulted on every list and board
+    // render: without this a project whose labels cannot be read would re-attempt the same
+    // failing request on each one.
+    forgeLabelCache.set(key, { at: Date.now(), failed: true, message: e.message });
+    throw e;
+  }
+}
+
+// GitLab publishes label colours on that endpoint and nowhere else: every issue, merge
+// request and board card names its labels as plain strings. GitHub embeds the colour in
+// every label object and needs none of this, so it is never fetched for GitHub.
+async function glLabelPalette(ctx) {
+  if (!ctx || ctx.provider !== 'gitlab') return null;
+  let labels = [];
+  try { labels = await forgeLabelCatalog(ctx); }
+  catch (e) { /* offline, no token, or no permission — grey labels, no error */ }
+  return new Map(labels.map(l => [l.name, { color: l.color, ink: l.ink }]));
+}
+
+// A token arriving or leaving changes what the labels endpoint will answer — a private
+// project returns nothing at all without one — so the cached labels for that host stop
+// being the truth the moment either happens.
+function forgeForgetLabels(host) {
+  for (const key of forgeLabelCache.keys()) {
+    if (key.slice(0, key.indexOf('|')) === host) forgeLabelCache.delete(key);
+  }
 }
 
 function forgeLogins(users) {
@@ -5467,7 +5620,7 @@ function normalizeGithubIssue(i) {
   };
 }
 
-function normalizeGitlabIssue(i) {
+function normalizeGitlabIssue(i, pal) {
   return {
     kind: 'issue',
     number: i.iid,
@@ -5481,7 +5634,7 @@ function normalizeGitlabIssue(i) {
     updatedAt: i.updated_at,
     closedAt: i.closed_at || '',
     comments: i.user_notes_count || 0,
-    labels: forgeLabels(i.labels),
+    labels: forgeLabels(i.labels, pal),
     assignees: forgeLogins(i.assignees && i.assignees.length ? i.assignees : (i.assignee ? [i.assignee] : [])),
     milestone: (i.milestone && i.milestone.title) || ''
   };
@@ -5518,8 +5671,8 @@ function normalizeGithubPrDetail(p) {
   });
 }
 
-function normalizeGitlabMrDetail(m) {
-  return Object.assign(normalizeGitlabMr(m), {
+function normalizeGitlabMrDetail(m, pal) {
+  return Object.assign(normalizeGitlabMr(m, pal), {
     kind: 'request',
     body: m.description || '',
     avatar: forgeAvatar(m.author),
@@ -5532,7 +5685,7 @@ function normalizeGitlabMrDetail(m) {
     deletions: 0,
     changedFiles: parseInt(String(m.changes_count || '0'), 10) || 0,
     commitsCount: 0,
-    labels: forgeLabels(m.labels),
+    labels: forgeLabels(m.labels, pal),
     assignees: forgeLogins(m.assignees && m.assignees.length ? m.assignees : (m.assignee ? [m.assignee] : [])),
     reviewers: forgeLogins(m.reviewers),
     milestone: (m.milestone && m.milestone.title) || '',
@@ -5599,6 +5752,7 @@ ipcMain.handle('forge:setToken', wrap(async (_, opts) => {
   // failure — simpler than threading a candidate token through the request helper.
   const previous = loadForgeTokens()[host];
   saveForgeToken(host, token);
+  forgeForgetLabels(host);
   try {
     const res = await forgeRequest(ctx, 'GET', '/user');
     if (res.status === 401 || res.status === 403) {
@@ -5625,6 +5779,7 @@ ipcMain.handle('forge:clearToken', wrap(async (_, opts) => {
   const all = loadSettings();
   if (all.forgeTokens) delete all.forgeTokens[host];
   saveSettings(all);
+  forgeForgetLabels(host);
   return { host, cleared: true };
 }));
 
@@ -5641,9 +5796,12 @@ ipcMain.handle('forge:pullRequests', wrap(async (_, opts) => {
     return (forgeCheck(res, ctx, 'Pull requests') || []).map(normalizeGithubPr);
   }
   const state = wantState === 'all' ? 'all' : wantState === 'closed' ? 'closed' : 'opened';
-  const res = await forgeRequest(ctx, 'GET',
-    `/projects/${encodeURIComponent(ctx.projectPath)}/merge_requests?state=${state}&per_page=50&order_by=updated_at`);
-  return (forgeCheck(res, ctx, 'Merge requests') || []).map(normalizeGitlabMr);
+  const [res, pal] = await Promise.all([
+    forgeRequest(ctx, 'GET',
+      `/projects/${encodeURIComponent(ctx.projectPath)}/merge_requests?state=${state}&per_page=50&order_by=updated_at`),
+    glLabelPalette(ctx)
+  ]);
+  return (forgeCheck(res, ctx, 'Merge requests') || []).map(m => normalizeGitlabMr(m, pal));
 }));
 
 ipcMain.handle('forge:issues', wrap(async (_, opts) => {
@@ -5660,9 +5818,12 @@ ipcMain.handle('forge:issues', wrap(async (_, opts) => {
     return (forgeCheck(res, ctx, 'Issues') || []).filter(i => !i.pull_request).map(normalizeGithubIssue);
   }
   const state = o.state === 'closed' ? 'closed' : o.state === 'all' ? 'all' : 'opened';
-  const res = await forgeRequest(ctx, 'GET',
-    `/projects/${encodeURIComponent(ctx.projectPath)}/issues?state=${state}&per_page=50&order_by=updated_at`);
-  return (forgeCheck(res, ctx, 'Issues') || []).map(normalizeGitlabIssue);
+  const [res, pal] = await Promise.all([
+    forgeRequest(ctx, 'GET',
+      `/projects/${encodeURIComponent(ctx.projectPath)}/issues?state=${state}&per_page=50&order_by=updated_at`),
+    glLabelPalette(ctx)
+  ]);
+  return (forgeCheck(res, ctx, 'Issues') || []).map(i => normalizeGitlabIssue(i, pal));
 }));
 
 ipcMain.handle('forge:createPullRequest', wrap(async (_, opts) => {
@@ -5694,7 +5855,7 @@ ipcMain.handle('forge:createPullRequest', wrap(async (_, opts) => {
     target_branch: base,
     remove_source_branch: !!o.deleteBranch
   });
-  return normalizeGitlabMr(forgeCheck(res, ctx, 'Merge request'));
+  return normalizeGitlabMr(forgeCheck(res, ctx, 'Merge request'), await glLabelPalette(ctx));
 }));
 
 // CI state for one commit, normalised to a single verdict plus the runs behind it.
@@ -5828,10 +5989,12 @@ ipcMain.handle('forge:detail', wrap(async (_, opts) => {
     const j = forgeCheck(res, ctx, what);
     return kind === 'issue' ? normalizeGithubIssue(j) : normalizeGithubPrDetail(j);
   }
-  const res = await forgeRequest(ctx, 'GET',
-    `/projects/${glProject(ctx)}/${kind === 'issue' ? 'issues' : 'merge_requests'}/${n}`);
+  const [res, pal] = await Promise.all([
+    forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/${kind === 'issue' ? 'issues' : 'merge_requests'}/${n}`),
+    glLabelPalette(ctx)
+  ]);
   const j = forgeCheck(res, ctx, what);
-  return kind === 'issue' ? normalizeGitlabIssue(j) : normalizeGitlabMrDetail(j);
+  return kind === 'issue' ? normalizeGitlabIssue(j, pal) : normalizeGitlabMrDetail(j, pal);
 }));
 
 // ---- timeline ------------------------------------------------------------------------
@@ -6057,7 +6220,52 @@ ipcMain.handle('forge:setState', wrap(async (_, opts) => {
   const res = await forgeRequest(ctx, 'PUT',
     `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}`, { state_event: close ? 'close' : 'reopen' });
   const j = forgeCheck(res, ctx, `#${n}`);
-  return kind === 'issue' ? normalizeGitlabIssue(j) : normalizeGitlabMrDetail(j);
+  const pal = await glLabelPalette(ctx);
+  return kind === 'issue' ? normalizeGitlabIssue(j, pal) : normalizeGitlabMrDetail(j, pal);
+}));
+
+// Every label the project defines, for the picker to tick. Both providers answer with the
+// same field names for the parts that matter, so forgeFetchLabels needs no normalisation
+// beyond stripping the "#" GitLab puts on its colours.
+ipcMain.handle('forge:labels', wrap(async (_, opts) => {
+  const ctx = await forgeCtxFor(opts);
+  const labels = await forgeLabelCatalog(ctx);
+  // Alphabetical, case-insensitive: neither forge returns them in an order worth keeping,
+  // and a picker is something you scan for a name you already have in mind.
+  return labels.slice().sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+}));
+
+// The picker means "these are the labels this item has", so this replaces the set rather
+// than applying a delta — one request either way, and what was ticked is what you get.
+//
+// The cost of that choice is worth naming: a label somebody else added while the picker was
+// open is removed by applying it. That is the same bargain both forges' own bulk-edit UIs
+// make, and the alternative (add/remove deltas) costs a request per label on GitHub.
+ipcMain.handle('forge:setLabels', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Changing labels needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  const names = [...new Set((Array.isArray(o.labels) ? o.labels : [])
+    .map(s => String(s == null ? '' : s).trim())
+    .filter(Boolean))];
+
+  if (ctx.provider === 'github') {
+    // A pull request *is* an issue on GitHub, so the issues endpoint labels both. PUT
+    // replaces the whole set; an empty array clears it.
+    const res = await forgeRequest(ctx, 'PUT', `/repos/${ghRepo(ctx)}/issues/${n}/labels`, { labels: names });
+    const j = forgeCheck(res, ctx, `Labels on #${n}`);
+    return { labels: forgeLabels(Array.isArray(j) ? j : (j && j.labels) || []) };
+  }
+
+  // GitLab takes the replacement set as one comma-joined string, and "" clears it. A comma
+  // is not legal in a GitLab label name, so joining can never be ambiguous.
+  const res = await forgeRequest(ctx, 'PUT',
+    `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}`, { labels: names.join(',') });
+  const j = forgeCheck(res, ctx, `Labels on #${n}`);
+  return { labels: forgeLabels((j && j.labels) || [], await glLabelPalette(ctx)) };
 }));
 
 ipcMain.handle('forge:merge', wrap(async (_, opts) => {
@@ -6279,7 +6487,7 @@ async function githubBoard(ctx, projectId) {
 
 // ---- GitLab ---------------------------------------------------------------------------
 
-function glBoardCard(i) {
+function glBoardCard(i, pal) {
   return {
     itemId: String(i.iid),
     kind: 'issue',
@@ -6291,7 +6499,7 @@ function glBoardCard(i) {
     url: i.web_url,
     state: i.state === 'opened' ? 'open' : i.state,
     author: (i.author && i.author.username) || '',
-    labels: forgeLabels(i.labels),
+    labels: forgeLabels(i.labels, pal),
     assignees: forgeLogins(i.assignees && i.assignees.length ? i.assignees : (i.assignee ? [i.assignee] : [])),
     updatedAt: i.updated_at || ''
   };
@@ -6307,9 +6515,10 @@ async function gitlabBoard(ctx, boardId) {
     .filter(l => l.label && l.label.name)
     .sort((a, b) => (a.position || 0) - (b.position || 0));
 
-  const [openRes, closedRes] = await Promise.all([
+  const [openRes, closedRes, pal] = await Promise.all([
     forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/issues?state=opened&per_page=100&order_by=updated_at`),
-    forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/issues?state=closed&per_page=20&order_by=updated_at`)
+    forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/issues?state=closed&per_page=20&order_by=updated_at`),
+    glLabelPalette(ctx)
   ]);
   const openIssues = forgeCheck(openRes, ctx, 'Issues') || [];
   const closedIssues = (closedRes && Array.isArray(closedRes.json)) ? closedRes.json : [];
@@ -6323,12 +6532,12 @@ async function gitlabBoard(ctx, boardId) {
     const names = (i.labels || []).map(l => (typeof l === 'string' ? l : l.name));
     let target = 'open';
     for (const l of lists) if (names.includes(l.label.name)) target = 'label:' + l.label.name;
-    const card = glBoardCard(i);
+    const card = glBoardCard(i, pal);
     card.columnId = target;
     byId.get(target).items.push(card);
   }
   for (const i of closedIssues) {
-    const card = glBoardCard(i);
+    const card = glBoardCard(i, pal);
     card.columnId = 'closed';
     byId.get('closed').items.push(card);
   }
