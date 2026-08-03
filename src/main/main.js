@@ -5900,48 +5900,157 @@ ipcMain.handle('forge:clearToken', wrap(async (_, opts) => {
   return { host, cleared: true };
 }));
 
-ipcMain.handle('forge:pullRequests', wrap(async (_, opts) => {
-  const o = opts || {};
+// ---- the lists: paging and filtering ---------------------------------------------------
+//
+// Both lists answer with a page plus what it takes to know the page is a page:
+// `{ items, page, total, totalPages, hasMore, … }`. A bare array was the thing that made
+// fifty of two hundred rows look like the whole list — the same failure the label chips
+// already guard against with their "+N".
+
+const FORGE_PAGE_SIZE = 50;
+
+function forgeLinkPage(link, rel) {
+  const seg = String(link || '').split(',').find(s => s.includes(`rel="${rel}"`));
+  const m = seg && seg.match(/[?&]page=(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+// Neither forge puts this in the body. GitHub sends a Link header with rel="next"/"last"
+// and no count at all; GitLab sends X-Total and X-Total-Pages *and* a Link header. GitHub's
+// search endpoint is the one exception — total_count is in the body, and it is the only
+// place a GitHub total is ever available, which is why the caller may pass one in.
+function forgePageInfo(res, count, page, bodyTotal) {
+  const h = res.headers || {};
+  const link = String(h.link || '');
+  const glTotal = parseInt(h['x-total'], 10);
+  const glPages = parseInt(h['x-total-pages'], 10);
+
+  const total = typeof bodyTotal === 'number' ? bodyTotal : (isNaN(glTotal) ? null : glTotal);
+  const totalPages = !isNaN(glPages) ? glPages : (forgeLinkPage(link, 'last') || null);
+
+  let hasMore;
+  if (forgeLinkPage(link, 'next')) hasMore = true;
+  else if (link) hasMore = false;                       // a Link header that has no next is the end
+  else if (total !== null) hasMore = total > page * FORGE_PAGE_SIZE;
+  else hasMore = count >= FORGE_PAGE_SIZE;             // nothing to go on but a full page
+
+  return { page, perPage: FORGE_PAGE_SIZE, total, totalPages, hasMore };
+}
+
+// Everything the filter controls can ask for. All of it optional — an empty filter is the
+// unfiltered list, which still takes the plain list endpoints it always did.
+//
+// "mentioned" is deliberately not here: GitHub has it and GitLab's list endpoints do not,
+// and a control that silently does nothing on one provider is worse than one that is absent.
+function forgeFilterOf(o) {
+  return {
+    text: String(o.text || '').trim(),
+    scope: ['assigned', 'created', 'review'].includes(o.scope) ? o.scope : '',
+    label: String(o.label || '').trim(),
+    milestone: String(o.milestone || '').trim()
+  };
+}
+
+function forgeFilterActive(f) { return !!(f.text || f.scope || f.label || f.milestone); }
+
+// GitHub's list endpoints filter unevenly: /issues takes assignee, creator, labels and
+// milestone but has no text search, and /pulls takes none of them at all. The search API
+// takes the lot for both kinds, so any active filter goes there — one path instead of four,
+// and a total_count for free.
+//
+// The cost is worth naming: a pull request out of search carries no head/base, because
+// GitHub's search index does not hold them. That is what `degraded` reports, so the row can
+// drop its branch arrow rather than draw an empty one.
+function ghSearchPath(ctx, kind, f, state, page, me) {
+  const q = [`repo:${ctx.owner}/${ctx.repo}`, kind === 'issue' ? 'is:issue' : 'is:pr'];
+  if (state === 'open') q.push('is:open');
+  else if (state === 'closed') q.push('is:closed');
+  if (f.scope === 'assigned') q.push(`assignee:${me}`);
+  if (f.scope === 'created') q.push(`author:${me}`);
+  if (f.scope === 'review') q.push(`review-requested:${me}`);
+  // Quoted because both can contain spaces. Search matches a milestone by *title*, unlike
+  // /issues which wants its number — another reason the two paths do not mix.
+  if (f.label) q.push(`label:"${f.label}"`);
+  if (f.milestone) q.push(`milestone:"${f.milestone}"`);
+  if (f.text) q.push(f.text);
+  return `/search/issues?q=${encodeURIComponent(q.join(' '))}` +
+    `&per_page=${FORGE_PAGE_SIZE}&page=${page}&sort=updated&order=desc`;
+}
+
+// A pull request out of the search index is shaped like an issue, and the one field that
+// difference loses visibly is merged_at — search puts it inside `pull_request` instead of
+// at the top level, and without it every merged request in a filtered list would draw as
+// "closed". The branches are simply not there to recover (see `degraded`).
+function ghSearchPr(p) {
+  const mergedAt = p.pull_request && p.pull_request.merged_at;
+  return normalizeGithubPr(mergedAt && !p.merged_at ? Object.assign({}, p, { merged_at: mergedAt }) : p);
+}
+
+async function forgeList(o, kind) {
   const ctx = await forgeRepoContext(o.remote);
   if (!ctx.provider) throw new Error(`GitGood does not know whether ${ctx.host} is GitHub or GitLab. Set it in Settings → Forge.`);
-  const wantState = o.state || 'open';
+  const f = forgeFilterOf(o);
+  const active = forgeFilterActive(f);
+  const page = Math.max(1, parseInt(o.page, 10) || 1);
+  const want = o.state === 'all' ? 'all' : o.state === 'closed' ? 'closed' : 'open';
+  const what = kind === 'issue' ? 'Issues' : ctx.provider === 'gitlab' ? 'Merge requests' : 'Pull requests';
+  // The scope filters are all "…me", and only the renderer knows who that is — it already
+  // holds forge:info's answer, so asking again here would be a request per keystroke.
+  const me = String(o.me || '').trim();
+  if (f.scope && !me) throw new Error(`GitGood does not know who you are on ${ctx.host} yet. Refresh the tab, or check the token in Settings → Forge.`);
 
   if (ctx.provider === 'github') {
-    const state = wantState === 'all' ? 'all' : wantState === 'closed' ? 'closed' : 'open';
-    const res = await forgeRequest(ctx, 'GET',
-      `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/pulls?state=${state}&per_page=50&sort=updated&direction=desc`);
-    return (forgeCheck(res, ctx, 'Pull requests') || []).map(normalizeGithubPr);
-  }
-  const state = wantState === 'all' ? 'all' : wantState === 'closed' ? 'closed' : 'opened';
-  const [res, pal] = await Promise.all([
-    forgeRequest(ctx, 'GET',
-      `/projects/${encodeURIComponent(ctx.projectPath)}/merge_requests?state=${state}&per_page=50&order_by=updated_at`),
-    glLabelPalette(ctx)
-  ]);
-  return (forgeCheck(res, ctx, 'Merge requests') || []).map(m => normalizeGitlabMr(m, pal));
-}));
-
-ipcMain.handle('forge:issues', wrap(async (_, opts) => {
-  const o = opts || {};
-  const ctx = await forgeRepoContext(o.remote);
-  if (!ctx.provider) throw new Error(`Unknown forge for ${ctx.host}.`);
-
-  if (ctx.provider === 'github') {
-    const state = o.state === 'closed' ? 'closed' : o.state === 'all' ? 'all' : 'open';
-    const res = await forgeRequest(ctx, 'GET',
-      `/repos/${ctx.owner}/${encodeURIComponent(ctx.repo)}/issues?state=${state}&per_page=50&sort=updated`);
+    if (active) {
+      const res = await forgeRequest(ctx, 'GET', ghSearchPath(ctx, kind, f, want, page, me));
+      // Search has its own, far smaller budget than the rest of the API — about 30 a minute
+      // against 5000 an hour — so forgeCheck's "resets within the hour" would be wrong here.
+      if (res.status === 403 && (res.headers || {})['x-ratelimit-remaining'] === '0') {
+        throw new Error(`${ctx.host} rate-limited the search. Searching has its own budget of roughly 30 a minute, separate from the rest of the API — it frees up within a minute.`);
+      }
+      const j = forgeCheck(res, ctx, what) || {};
+      const items = (j.items || []).map(kind === 'issue' ? normalizeGithubIssue : ghSearchPr);
+      return Object.assign({ items, filtered: true, degraded: kind !== 'issue' },
+        forgePageInfo(res, (j.items || []).length, page,
+          typeof j.total_count === 'number' ? j.total_count : undefined));
+    }
+    const path = kind === 'issue'
+      ? `/repos/${ghRepo(ctx)}/issues?state=${want}&per_page=${FORGE_PAGE_SIZE}&page=${page}&sort=updated`
+      : `/repos/${ghRepo(ctx)}/pulls?state=${want}&per_page=${FORGE_PAGE_SIZE}&page=${page}&sort=updated&direction=desc`;
+    const res = await forgeRequest(ctx, 'GET', path);
+    const raw = forgeCheck(res, ctx, what) || [];
     // GitHub returns pull requests from the issues endpoint too — they are issues under the
-    // hood — and listing them twice in two panels is confusing, so drop them here.
-    return (forgeCheck(res, ctx, 'Issues') || []).filter(i => !i.pull_request).map(normalizeGithubIssue);
+    // hood — and listing them twice in two panels is confusing, so drop them here. The page
+    // info still counts the raw rows: dropping some does not mean the page was short.
+    const items = kind === 'issue'
+      ? raw.filter(i => !i.pull_request).map(normalizeGithubIssue)
+      : raw.map(normalizeGithubPr);
+    return Object.assign({ items, filtered: false, degraded: false },
+      forgePageInfo(res, raw.length, page));
   }
-  const state = o.state === 'closed' ? 'closed' : o.state === 'all' ? 'all' : 'opened';
+
+  // GitLab needs none of that: one endpoint per kind, and every filter is a query parameter
+  // it already understands.
+  const state = want === 'all' ? 'all' : want === 'closed' ? 'closed' : 'opened';
+  const qs = [`state=${state}`, `per_page=${FORGE_PAGE_SIZE}`, `page=${page}`, 'order_by=updated_at'];
+  if (f.scope === 'assigned') qs.push(`assignee_username=${encodeURIComponent(me)}`);
+  if (f.scope === 'created') qs.push(`author_username=${encodeURIComponent(me)}`);
+  if (f.scope === 'review' && kind !== 'issue') qs.push(`reviewer_username=${encodeURIComponent(me)}`);
+  if (f.label) qs.push(`labels=${encodeURIComponent(f.label)}`);
+  if (f.milestone) qs.push(`milestone=${encodeURIComponent(f.milestone)}`);
+  if (f.text) qs.push(`search=${encodeURIComponent(f.text)}`);
+
   const [res, pal] = await Promise.all([
-    forgeRequest(ctx, 'GET',
-      `/projects/${encodeURIComponent(ctx.projectPath)}/issues?state=${state}&per_page=50&order_by=updated_at`),
+    forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/${kind === 'issue' ? 'issues' : 'merge_requests'}?${qs.join('&')}`),
     glLabelPalette(ctx)
   ]);
-  return (forgeCheck(res, ctx, 'Issues') || []).map(i => normalizeGitlabIssue(i, pal));
-}));
+  const raw = forgeCheck(res, ctx, what) || [];
+  const items = raw.map(x => kind === 'issue' ? normalizeGitlabIssue(x, pal) : normalizeGitlabMr(x, pal));
+  return Object.assign({ items, filtered: active, degraded: false },
+    forgePageInfo(res, raw.length, page));
+}
+
+ipcMain.handle('forge:pullRequests', wrap(async (_, opts) => forgeList(opts || {}, 'request')));
+ipcMain.handle('forge:issues', wrap(async (_, opts) => forgeList(opts || {}, 'issue')));
 
 ipcMain.handle('forge:createPullRequest', wrap(async (_, opts) => {
   const o = opts || {};

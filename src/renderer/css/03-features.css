@@ -2805,6 +2805,60 @@ body.resizing-panes * {
   overflow: auto;
   border-right: 1px solid var(--border);
 }
+
+/* The request/issue and Work Items splits are a grid so the shared pane resizer can drive
+   grid-template-columns; the board stays flex. The list pane's authored 340px becomes the
+   grid track instead — leaving the width on the element would pin it against the drag. */
+.forge-split-cols {
+  display: grid;
+  grid-template-columns: 340px 5px 1fr;
+}
+.forge-split-cols > .forge-list-pane {
+  width: auto;
+  min-width: 0;
+  border-right: none;      /* the resizer draws the line now */
+}
+.forge-split-cols > .forge-detail { min-width: 0; }
+
+/* How much of the list is on screen, and the way to ask for the rest. Sticks to the bottom
+   of the pane so it stays readable however far down the list you are. */
+.forge-list-foot {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  font-size: 10px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+.forge-foot-note { flex-basis: 100%; opacity: 0.75; }
+
+/* A second toolbar row. It is static markup rather than part of the rendered list, so the
+   text box keeps focus and caret while the list under it is replaced. */
+.forge-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.forge-filter-input {
+  flex: 1;
+  min-width: 140px;
+  background: var(--bg-input, var(--bg-panel));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--bone-white);
+  font-family: var(--font-body);
+  font-size: 11px;
+  padding: 3px 7px;
+}
+.forge-filter-input:focus { outline: none; border-color: var(--gold-accent); }
 .forge-detail {
   flex: 1;
   min-width: 0;

@@ -23,7 +23,20 @@ const forgeState = {
   // a single fetch — switching between them costs nothing.
   boards: null,      // [{ id, title, url }] — null until asked for
   boardId: null,
-  board: null        // the loaded board: { columns: [{ id, name, items: [] }], fieldId, … }
+  board: null,       // the loaded board: { columns: [{ id, name, items: [] }], fieldId, … }
+  // What the list is currently showing, and how much of it there is. `items` holds every
+  // page loaded so far — "Load more" appends rather than replacing, so scroll position and
+  // the open reader both survive it.
+  filters: { text: '', scope: '', label: '', milestone: '' },
+  page: 1,
+  total: null,       // null when the forge would not say (GitHub's list endpoints never do)
+  totalPages: null,
+  hasMore: false,
+  degraded: false,   // GitHub search answered, so requests have no head/base to draw
+  loadingMore: false,
+  // The label and milestone names behind the two filter selects, fetched once per repo.
+  catalog: null,
+  catalogFor: null
 };
 
 // Which views are drawn from the board payload rather than from a list of requests/issues.
@@ -41,6 +54,9 @@ function forgeReset() {
   forgeState.boardId = null;
   forgeState.board = null;
   forgeState.checks.clear();
+  forgeState.catalog = null;
+  forgeState.catalogFor = null;
+  forgeClearFilters();
   const badge = document.getElementById('forge-tab-badge');
   if (badge) badge.style.display = 'none';
 }
@@ -94,16 +110,59 @@ async function refreshForgeInner() {
 
   if (forgeIsBoardView()) { await refreshForgeBoard(); return; }
 
-  const stateFilter = (document.getElementById('forge-state') || {}).value || 'open';
-  const r = forgeState.view === 'issues'
-    ? await gs.forgeIssues({ state: stateFilter })
-    : await gs.forgePullRequests({ state: stateFilter });
+  const r = await forgeFetchListPage(1);
   forgeState.loading = false;
 
   if (!r || !r.ok) { body.innerHTML = forgeErrorHtml(r && r.error); return; }
-  forgeState.items = r.data || [];
+  const d = r.data || {};
+  forgeState.items = d.items || [];
   forgeState.loadedFor = state.repo.path;
+  forgeApplyPageInfo(d);
   renderForge();
+  forgeLoadFilterCatalog();
+}
+
+// One page of the current view, under the current filters. The scope filters are all
+// "…me", and only forge:info knows who that is here — main is told rather than asked, so
+// filtering does not cost an extra round trip per query.
+function forgeFetchListPage(page) {
+  const f = forgeState.filters;
+  const opts = {
+    state: (document.getElementById('forge-state') || {}).value || 'open',
+    page,
+    me: ((forgeState.info || {}).user || {}).login || '',
+    text: f.text, scope: f.scope, label: f.label, milestone: f.milestone
+  };
+  return forgeState.view === 'issues' ? gs.forgeIssues(opts) : gs.forgePullRequests(opts);
+}
+
+function forgeApplyPageInfo(d) {
+  forgeState.page = d.page || 1;
+  forgeState.total = d.total === undefined ? null : d.total;
+  forgeState.totalPages = d.totalPages === undefined ? null : d.totalPages;
+  forgeState.hasMore = !!d.hasMore;
+  forgeState.degraded = !!d.degraded;
+}
+
+// Appends rather than replaces, so the reader stays open and the list does not jump back
+// to the top — which is the whole reason this is a button and not a page number.
+async function forgeLoadMore() {
+  if (forgeState.loadingMore || !forgeState.hasMore) return;
+  forgeState.loadingMore = true;
+  renderForge();
+  try {
+    const r = await forgeFetchListPage(forgeState.page + 1);
+    if (!r || !r.ok) { showToast((r && r.error) || 'Could not load more.', 'error', 6000); return; }
+    const d = r.data || {};
+    // A row already on screen must not appear twice: paging by offset over a list ordered
+    // by "recently updated" will re-serve an item that was bumped between the two requests.
+    const seen = new Set(forgeState.items.map(i => `${i.kind}:${i.number}`));
+    forgeState.items = forgeState.items.concat((d.items || []).filter(i => !seen.has(`${i.kind}:${i.number}`)));
+    forgeApplyPageInfo(d);
+  } finally {
+    forgeState.loadingMore = false;
+    renderForge();
+  }
 }
 
 // Switching view is state plus the subtab highlight plus the toolbar, and it happens from
@@ -135,6 +194,108 @@ function updateForgeToolbar() {
   if (newPr) newPr.style.display = forgeState.view === 'prs' ? '' : 'none';
   if (newIssue) newIssue.style.display = forgeState.view === 'issues' ? '' : 'none';
   if (boardSel) boardSel.style.display = boardView ? '' : 'none';
+
+  // The filter bar belongs to the request and issue lists. A board is drawn from one
+  // payload the forge composed itself, and filtering it here would hide cards from columns
+  // whose counts would then no longer add up.
+  const bar = document.getElementById('forge-filterbar');
+  const ready = !!(forgeState.info && forgeState.info.supported && forgeState.info.hasToken && !forgeState.info.tokenInvalid);
+  if (bar) bar.style.display = boardView || !ready ? 'none' : '';
+  // Review is something only a request can be waiting for.
+  const scope = document.getElementById('forge-filter-scope');
+  const reviewOpt = scope && scope.querySelector('option[value="review"]');
+  if (reviewOpt) {
+    reviewOpt.hidden = forgeState.view !== 'prs';
+    if (reviewOpt.hidden && scope.value === 'review') { scope.value = ''; forgeState.filters.scope = ''; }
+  }
+  const clear = document.getElementById('forge-filter-clear');
+  if (clear) clear.style.display = forgeFiltersActive() ? '' : 'none';
+}
+
+function forgeFiltersActive() {
+  const f = forgeState.filters;
+  return !!(f.text || f.scope || f.label || f.milestone);
+}
+
+function forgeClearFilters() {
+  forgeState.filters = { text: '', scope: '', label: '', milestone: '' };
+  const ids = ['forge-filter-text', 'forge-filter-scope', 'forge-filter-label', 'forge-filter-milestone'];
+  for (const id of ids) { const el = document.getElementById(id); if (el) el.value = ''; }
+}
+
+// The two name-based selects. Fetched once per repository and reused for both lists —
+// labels and milestones belong to the project, not to what is being listed. Failures are
+// silent on purpose: a filter that cannot be populated should leave the list working, and
+// both catalogues are the same ones the pickers use, cached in main for ten minutes.
+async function forgeLoadFilterCatalog() {
+  if (!state.repo || forgeState.catalogFor === state.repo.path) return;
+  forgeState.catalogFor = state.repo.path;
+  const [lr, mr] = await Promise.all([gs.forgeLabels({}), gs.forgeIssueMeta({ kind: 'issue' })]);
+  if (!state.repo || forgeState.catalogFor !== state.repo.path) return;   // repo changed meanwhile
+  forgeState.catalog = {
+    labels: (lr && lr.ok && lr.data) || [],
+    milestones: (mr && mr.ok && mr.data && mr.data.milestones) || []
+  };
+  forgeFillFilterSelect('forge-filter-label', forgeState.catalog.labels.map(l => l.name), forgeState.filters.label);
+  forgeFillFilterSelect('forge-filter-milestone', forgeState.catalog.milestones.map(m => m.title), forgeState.filters.milestone);
+}
+
+// Keeps the first option (the "Any …" one) and replaces the rest. A value that is currently
+// filtered on is re-added even if the catalogue no longer lists it, or repopulating would
+// silently drop the filter the list is actually showing.
+function forgeFillFilterSelect(id, names, current) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  const all = names.slice();
+  if (current && !all.includes(current)) all.unshift(current);
+  while (sel.options.length > 1) sel.remove(1);
+  for (const n of all) {
+    const opt = document.createElement('option');
+    opt.value = n;
+    opt.textContent = n;
+    sel.appendChild(opt);
+  }
+  sel.value = current || '';
+}
+
+// A changed filter is a new query, so it goes back to page one and drops the reader: the
+// item being read may not be in the new list at all, and leaving it open beside a list that
+// no longer contains it reads as a bug.
+async function forgeApplyFilters() {
+  forgeState.detail = null;
+  updateForgeToolbar();
+  await refreshForge();
+}
+
+function wireForgeFilterBar() {
+  const text = document.getElementById('forge-filter-text');
+  if (text) {
+    let timer = null;
+    text.addEventListener('input', () => {
+      clearTimeout(timer);
+      // Typing is not a query. GitHub's search endpoint allows roughly thirty calls a
+      // minute, separately from the rest of the API, so a request per keystroke would
+      // exhaust it inside one sentence.
+      timer = setTimeout(() => {
+        const v = text.value.trim();
+        if (v === forgeState.filters.text) return;
+        forgeState.filters.text = v;
+        forgeApplyFilters();
+      }, 450);
+    });
+    text.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      clearTimeout(timer);                 // Enter means now, not in another 450ms
+      forgeState.filters.text = text.value.trim();
+      forgeApplyFilters();
+    });
+  }
+  for (const [id, key] of [['forge-filter-scope', 'scope'], ['forge-filter-label', 'label'], ['forge-filter-milestone', 'milestone']]) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => { forgeState.filters[key] = el.value; forgeApplyFilters(); });
+  }
+  const clear = document.getElementById('forge-filter-clear');
+  if (clear) clear.addEventListener('click', () => { forgeClearFilters(); forgeApplyFilters(); });
 }
 
 // Load the board list once per repository, then the selected board. Both views land here.
@@ -237,19 +398,94 @@ function renderForge() {
   const listHtml = items.length
     ? `<ul class="forge-list">${items.map(it => forgeState.view === 'issues'
         ? forgeIssueRowHtml(it)
-        : forgeRequestRowHtml(it, current)).join('')}</ul>`
-    : `<div class="empty-state">
-        <div class="empty-icon">${forgeState.view === 'issues' ? '☰' : '⇄'}</div>
-        <p>Nothing here${(document.getElementById('forge-state') || {}).value === 'open' ? ' that is still open' : ''}.</p>
-      </div>`;
+        : forgeRequestRowHtml(it, current)).join('')}</ul>${forgeListFootHtml()}`
+    : forgeEmptyListHtml();
 
-  body.innerHTML = `
-    <div class="forge-split">
-      <div class="forge-list-pane">${listHtml}</div>
+  // The pane is rebuilt wholesale on every render — including the one that follows "Load
+  // more" — so without this the list would jump back to the top at the exact moment it grew.
+  // Switching view or repository is a different list and legitimately starts at the top.
+  const key = `${forgeState.view}:${forgeState.loadedFor || ''}`;
+  const oldPane = body.querySelector('.forge-list-pane');
+  const keepScroll = oldPane && key === _forgeListScrollKey ? oldPane.scrollTop : 0;
+
+  body.innerHTML = forgeSplitHtml(`<div class="forge-list-pane">${listHtml}</div>`);
+  body.classList.add('has-split');
+  _forgeListScrollKey = key;
+  if (keepScroll) {
+    const pane = body.querySelector('.forge-list-pane');
+    if (pane) pane.scrollTop = keepScroll;
+  }
+  renderForgeDetail();
+  forgeSetupSplitResizer();
+}
+
+let _forgeListScrollKey = '';
+
+// The list pane, a drag handle, and the reader. A grid rather than a flex row because the
+// shared resizer in 08-lfs-settings drives grid-template-columns — the board keeps the flex
+// `.forge-split` because it has a variable number of children and no handle.
+function forgeSplitHtml(paneHtml) {
+  return `
+    <div class="forge-split forge-split-cols" id="forge-split">
+      ${paneHtml}
+      <div class="pane-resizer" data-resizer="forge-list" data-target="forge-split" data-cols="340px 1fr" title="Drag to resize"></div>
       <div class="forge-detail" id="forge-detail"></div>
     </div>`;
-  body.classList.add('has-split');
-  renderForgeDetail();
+}
+
+// The resizers in 08-lfs-settings are wired once at startup, over the DOM as it stood then.
+// This split is rebuilt by innerHTML on every render, so its handle is a different element
+// each time and has to be wired again — which is safe precisely *because* it is new: there
+// is no previous listener left on it to double up.
+function forgeSetupSplitResizer() {
+  const el = document.querySelector('#forge-split > .pane-resizer');
+  if (!el || typeof setupResizer !== 'function') return;
+  applyResizerWidths(el);
+  setupResizer(el);
+}
+
+// An empty list has two quite different causes, and saying which is the difference between
+// "there is nothing to do" and "your filter is too narrow".
+function forgeEmptyListHtml() {
+  const issues = forgeState.view === 'issues';
+  if (forgeFiltersActive()) {
+    return `<div class="empty-state">
+      <div class="empty-icon">⌕</div>
+      <p>Nothing matches these filters.</p>
+      <button class="mini-btn" data-forge-act="clear-filters">✕ Clear filters</button>
+    </div>`;
+  }
+  const openOnly = (document.getElementById('forge-state') || {}).value === 'open';
+  return `<div class="empty-state">
+    <div class="empty-icon">${issues ? '☰' : '⇄'}</div>
+    <p>Nothing here${openOnly ? ' that is still open' : ''}.</p>
+    ${issues ? '<button class="mini-btn" data-forge-act="new-issue">+ New Issue</button>' : ''}
+  </div>`;
+}
+
+// What the list is and is not showing. Without this a first page of fifty out of two
+// hundred looks exactly like the whole list — the same trap the label chips avoid with
+// their "+N", and the reason the count is stated even when there is no more to load.
+function forgeListFootHtml() {
+  const loaded = (forgeState.items || []).length;
+  if (!loaded) return '';
+  const total = forgeState.total;
+  const summary = (total !== null && total !== undefined)
+    ? `Showing ${loaded} of ${total}`
+    : forgeState.totalPages
+      ? `${loaded} loaded · page ${forgeState.page} of ${forgeState.totalPages}`
+      : `${loaded} loaded`;
+
+  return `<div class="forge-list-foot">
+    <span class="text-muted">${escapeHtml(summary)}</span>
+    ${forgeState.hasMore
+      ? `<button class="mini-btn" data-forge-act="load-more"${forgeState.loadingMore ? ' disabled' : ''}>${
+          forgeState.loadingMore ? '<span class="loading"></span> Loading' : '↓ Load more'}</button>`
+      : ''}
+    ${forgeState.degraded
+      ? '<span class="text-muted forge-foot-note" title="GitHub&#39;s search index does not carry a request&#39;s branches, so the source → target line is left out while a filter is on">Filtered through search — branch names unavailable</span>'
+      : ''}
+  </div>`;
 }
 
 // ============================================
@@ -280,13 +516,18 @@ function renderForgeBoardView(body) {
   // Items list is narrow and keeps the reader alongside it permanently, like the other lists.
   const isBoard = forgeState.view === 'board';
   const showReader = !isBoard || !!forgeState.detail;
-  body.innerHTML = `
-    <div class="forge-split">
-      ${isBoard ? forgeBoardHtml(b) : `<div class="forge-list-pane forge-items-pane">${forgeWorkItemsHtml(b)}</div>`}
-      ${showReader ? '<div class="forge-detail" id="forge-detail"></div>' : ''}
-    </div>`;
+  // Work Items is a list beside the reader like the other two, so it gets the same drag
+  // handle and shares its remembered width. The board is a different shape — a wide pane
+  // whose reader comes and goes — and keeps the plain flex split.
+  body.innerHTML = isBoard
+    ? `<div class="forge-split">
+         ${forgeBoardHtml(b)}
+         ${showReader ? '<div class="forge-detail" id="forge-detail"></div>' : ''}
+       </div>`
+    : forgeSplitHtml(`<div class="forge-list-pane forge-items-pane">${forgeWorkItemsHtml(b)}</div>`);
   body.classList.add('has-split');
   if (showReader) renderForgeDetail();
+  if (!isBoard) forgeSetupSplitResizer();
 }
 
 function forgeWorkItemsHtml(b) {
@@ -492,8 +733,9 @@ function forgeRequestRowHtml(pr, currentBranch) {
       ${forgeOpenExternalBtnHtml(pr.url)}
     </div>
     <div class="forge-item-meta">
-      <span class="text-mono">${escapeHtml(pr.source)}</span> → <span class="text-mono">${escapeHtml(pr.target)}</span>
-      · ${escapeHtml(pr.author)}
+      ${pr.source && pr.target
+        ? `<span class="text-mono">${escapeHtml(pr.source)}</span> → <span class="text-mono">${escapeHtml(pr.target)}</span> · `
+        : ''}${escapeHtml(pr.author)}
       ${pr.updatedAt ? ' · updated ' + escapeHtml(relativeTime(pr.updatedAt)) : ''}
       ${pr.comments ? ` · ${pr.comments} comment${pr.comments === 1 ? '' : 's'}` : ''}
       ${(pr.assignees || []).length ? ' · ' + forgePeopleHtml(pr.assignees) : ''}
@@ -1539,6 +1781,11 @@ document.addEventListener('click', (e) => {
     // this one — it hides the menu, then this reopens it. That order is what makes a
     // left-click trigger work here at all.
     case 'more': forgeShowMoreMenu(act); break;
+    // These three belong to the list rather than the reader, but the listener is on
+    // document either way and the switch is the one place forge buttons are read.
+    case 'load-more': forgeLoadMore(); break;
+    case 'clear-filters': forgeClearFilters(); forgeApplyFilters(); break;
+    case 'new-issue': showCreateIssueDialog(); break;
     case 'labels': forgeEditLabels(); break;
     case 'props': forgeEditProperties(); break;
     case 'edit': forgeEditItem(); break;
@@ -1998,6 +2245,8 @@ async function hydrateChecksBadge(hostEl, sha) {
 
   const stateSel = document.getElementById('forge-state');
   if (stateSel) stateSel.onchange = () => refreshForge();
+
+  wireForgeFilterBar();
 
   const settings = document.getElementById('forge-settings');
   if (settings) settings.onclick = () => showForgeSettings();

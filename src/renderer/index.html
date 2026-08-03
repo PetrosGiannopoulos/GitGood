@@ -622,6 +622,24 @@
             <button class="mini-btn" id="forge-refresh" title="Reload from the forge">⟳ Refresh</button>
             <button class="mini-btn" id="forge-settings" title="Token & host settings">⚙</button>
           </div>
+          <!-- Static, not rebuilt by renderForge: a filter bar redrawn under the cursor
+               would lose focus and caret on every keystroke. Hidden on the board views. -->
+          <div class="forge-filterbar" id="forge-filterbar" style="display:none">
+            <input type="text" id="forge-filter-text" class="forge-filter-input" placeholder="Filter by title…" autocomplete="off" />
+            <select id="forge-filter-scope" class="commit-search-mode" title="Whose">
+              <option value="">Anyone</option>
+              <option value="assigned">Assigned to me</option>
+              <option value="created">Created by me</option>
+              <option value="review">Review requested</option>
+            </select>
+            <select id="forge-filter-label" class="commit-search-mode" title="Label">
+              <option value="">Any label</option>
+            </select>
+            <select id="forge-filter-milestone" class="commit-search-mode" title="Milestone">
+              <option value="">Any milestone</option>
+            </select>
+            <button class="mini-btn" id="forge-filter-clear" title="Clear every filter" style="display:none">✕ Clear</button>
+          </div>
           <div class="forge-body" id="forge-body">
             <div class="empty-state">
               <div class="empty-icon">⚑</div>
