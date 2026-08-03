@@ -28,6 +28,11 @@ const forgeState = {
   // page loaded so far — "Load more" appends rather than replacing, so scroll position and
   // the open reader both survive it.
   filters: { text: '', scope: '', label: '', milestone: '' },
+  // `filters.text` narrows what is already loaded, here, as you type. This is the text that
+  // was last handed to the *forge* — empty unless the ⌕ button was used. The two are
+  // separate because they cannot do each other's job: a forge search reaches items that
+  // were never loaded, and a local filter is the only one that can match half a word.
+  forgeSearch: '',
   page: 1,
   total: null,       // null when the forge would not say (GitHub's list endpoints never do)
   totalPages: null,
@@ -131,9 +136,27 @@ function forgeFetchListPage(page) {
     state: (document.getElementById('forge-state') || {}).value || 'open',
     page,
     me: ((forgeState.info || {}).user || {}).login || '',
-    text: f.text, scope: f.scope, label: f.label, milestone: f.milestone
+    // Deliberately forgeSearch, not filters.text: typing must never become a query. Both
+    // forges index issue text by whole word, so "Issue Te" matches nothing at all in
+    // "Issue Test" — sending every keystroke would empty the list mid-word.
+    text: forgeState.forgeSearch,
+    scope: f.scope, label: f.label, milestone: f.milestone
   };
   return forgeState.view === 'issues' ? gs.forgeIssues(opts) : gs.forgePullRequests(opts);
+}
+
+// What the list actually shows: everything loaded, narrowed by the text box. Every space-
+// separated word has to appear somewhere, in any order — the same idiom the branch and path
+// filters use, and the one thing that finds "Issue Test" from "issue te".
+function forgeVisibleItems() {
+  const q = (forgeState.filters.text || '').trim().toLowerCase();
+  const items = forgeState.items || [];
+  if (!q) return items;
+  const terms = q.split(/\s+/).filter(Boolean);
+  return items.filter(it => {
+    const hay = `#${it.number} ${it.title || ''} ${it.author || ''}`.toLowerCase();
+    return terms.every(t => hay.includes(t));
+  });
 }
 
 function forgeApplyPageInfo(d) {
@@ -212,15 +235,33 @@ function updateForgeToolbar() {
   if (clear) clear.style.display = forgeFiltersActive() ? '' : 'none';
 }
 
+// Anything at all is set — what the Clear button watches.
 function forgeFiltersActive() {
   const f = forgeState.filters;
-  return !!(f.text || f.scope || f.label || f.milestone);
+  return !!(f.text || f.scope || f.label || f.milestone || forgeState.forgeSearch);
+}
+
+// Only the ones that change what was *asked of the forge*. Clearing a purely local text
+// filter must not spend a request, and an empty list under one of these means something
+// different from an empty list under the text box.
+function forgeServerFiltersActive() {
+  const f = forgeState.filters;
+  return !!(f.scope || f.label || f.milestone || forgeState.forgeSearch);
 }
 
 function forgeClearFilters() {
   forgeState.filters = { text: '', scope: '', label: '', milestone: '' };
+  forgeState.forgeSearch = '';
   const ids = ['forge-filter-text', 'forge-filter-scope', 'forge-filter-label', 'forge-filter-milestone'];
   for (const id of ids) { const el = document.getElementById(id); if (el) el.value = ''; }
+}
+
+async function forgeClearAllFilters() {
+  const hadServer = forgeServerFiltersActive();
+  forgeClearFilters();
+  // Only the server-side ones need the list fetching again; dropping local text is a redraw.
+  if (hadServer) await forgeApplyFilters();
+  else renderForgeListOnly();
 }
 
 // The two name-based selects. Fetched once per repository and reused for both lists —
@@ -267,27 +308,53 @@ async function forgeApplyFilters() {
   await refreshForge();
 }
 
+// Hand the text box's contents to the forge, for the case the local filter cannot serve:
+// an item that has not been loaded. Both forges match whole words here — that is their
+// index, not something GitGood can widen — so this is a button rather than something that
+// happens while typing.
+async function forgeSearchOnForge() {
+  const text = (forgeState.filters.text || '').trim();
+  if (!text || text === forgeState.forgeSearch) return;
+  if (!forgeState.hasMore) {
+    // Nothing is hidden from the box, so a search could only ever return less. Said out
+    // loud because Enter doing nothing at all reads as a broken key.
+    showToast('The whole list is loaded — the filter box is already searching all of it.', 'info', 4000);
+    return;
+  }
+  forgeState.forgeSearch = text;
+  await forgeApplyFilters();
+}
+
+async function forgeClearForgeSearch() {
+  if (!forgeState.forgeSearch) return;
+  forgeState.forgeSearch = '';
+  await forgeApplyFilters();
+}
+
 function wireForgeFilterBar() {
   const text = document.getElementById('forge-filter-text');
   if (text) {
-    let timer = null;
+    // Local and immediate — no debounce, because there is no request to spare. Every other
+    // filter box in the app (branches, paths, conflicts) narrows what is on screen as you
+    // type, and this one now behaves the same.
     text.addEventListener('input', () => {
-      clearTimeout(timer);
-      // Typing is not a query. GitHub's search endpoint allows roughly thirty calls a
-      // minute, separately from the rest of the API, so a request per keystroke would
-      // exhaust it inside one sentence.
-      timer = setTimeout(() => {
-        const v = text.value.trim();
-        if (v === forgeState.filters.text) return;
-        forgeState.filters.text = v;
-        forgeApplyFilters();
-      }, 450);
-    });
-    text.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter') return;
-      clearTimeout(timer);                 // Enter means now, not in another 450ms
       forgeState.filters.text = text.value.trim();
-      forgeApplyFilters();
+      renderForgeListOnly();
+    });
+    // Enter is "I meant it" — the one keystroke that will spend a request, and only when
+    // there is more on the forge than has been loaded.
+    text.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && text.value) {
+        e.preventDefault();
+        e.stopPropagation();             // Escape in this box clears it, it does not close a modal
+        text.value = '';
+        forgeState.filters.text = '';
+        renderForgeListOnly();
+        return;
+      }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      forgeSearchOnForge();
     });
   }
   for (const [id, key] of [['forge-filter-scope', 'scope'], ['forge-filter-label', 'label'], ['forge-filter-milestone', 'milestone']]) {
@@ -295,7 +362,7 @@ function wireForgeFilterBar() {
     if (el) el.addEventListener('change', () => { forgeState.filters[key] = el.value; forgeApplyFilters(); });
   }
   const clear = document.getElementById('forge-filter-clear');
-  if (clear) clear.addEventListener('click', () => { forgeClearFilters(); forgeApplyFilters(); });
+  if (clear) clear.addEventListener('click', () => forgeClearAllFilters());
 }
 
 // Load the board list once per repository, then the selected board. Both views land here.
@@ -394,13 +461,6 @@ function renderForge() {
 
   if (forgeIsBoardView()) { renderForgeBoardView(body); return; }
 
-  const current = (state.branches.local && state.branches.local.current) || '';
-  const listHtml = items.length
-    ? `<ul class="forge-list">${items.map(it => forgeState.view === 'issues'
-        ? forgeIssueRowHtml(it)
-        : forgeRequestRowHtml(it, current)).join('')}</ul>${forgeListFootHtml()}`
-    : forgeEmptyListHtml();
-
   // The pane is rebuilt wholesale on every render — including the one that follows "Load
   // more" — so without this the list would jump back to the top at the exact moment it grew.
   // Switching view or repository is a different list and legitimately starts at the top.
@@ -408,7 +468,7 @@ function renderForge() {
   const oldPane = body.querySelector('.forge-list-pane');
   const keepScroll = oldPane && key === _forgeListScrollKey ? oldPane.scrollTop : 0;
 
-  body.innerHTML = forgeSplitHtml(`<div class="forge-list-pane">${listHtml}</div>`);
+  body.innerHTML = forgeSplitHtml(`<div class="forge-list-pane">${forgeListInnerHtml()}</div>`);
   body.classList.add('has-split');
   _forgeListScrollKey = key;
   if (keepScroll) {
@@ -420,6 +480,26 @@ function renderForge() {
 }
 
 let _forgeListScrollKey = '';
+
+function forgeListInnerHtml() {
+  const current = (state.branches.local && state.branches.local.current) || '';
+  const shown = forgeVisibleItems();
+  if (!shown.length) return forgeEmptyListHtml();
+  return `<ul class="forge-list">${shown.map(it => forgeState.view === 'issues'
+    ? forgeIssueRowHtml(it)
+    : forgeRequestRowHtml(it, current)).join('')}</ul>${forgeListFootHtml(shown.length)}`;
+}
+
+// A keystroke in the filter box changes which rows are shown and nothing else. Going
+// through renderForge would also rebuild the reader and re-wire the drag handle on every
+// character typed — and re-running the resizer setup mid-drag-free is wasted work, not a
+// bug, but the reader losing and regaining its scroll position on each letter is visible.
+function renderForgeListOnly() {
+  const pane = document.querySelector('#forge-split > .forge-list-pane');
+  if (!pane) { renderForge(); return; }   // board view, or nothing rendered yet
+  updateForgeToolbar();
+  pane.innerHTML = forgeListInnerHtml();
+}
 
 // The list pane, a drag handle, and the reader. A grid rather than a flex row because the
 // shared resizer in 08-lfs-settings drives grid-template-columns — the board keeps the flex
@@ -444,11 +524,24 @@ function forgeSetupSplitResizer() {
   setupResizer(el);
 }
 
-// An empty list has two quite different causes, and saying which is the difference between
-// "there is nothing to do" and "your filter is too narrow".
+// An empty list has three quite different causes, and saying which is the difference
+// between "there is nothing to do", "your text is too narrow for what is loaded", and
+// "the forge itself has nothing".
 function forgeEmptyListHtml() {
   const issues = forgeState.view === 'issues';
-  if (forgeFiltersActive()) {
+  const text = (forgeState.filters.text || '').trim();
+
+  // Rows were loaded; the text box hid all of them. The forge may still have a match that
+  // was never loaded, which is exactly what the ⌕ button is for.
+  if (text && (forgeState.items || []).length) {
+    return `<div class="empty-state">
+      <div class="empty-icon">⌕</div>
+      <p>Nothing loaded matches “${escapeHtml(text)}”.</p>
+      ${forgeSearchForgeBtnHtml(text)}
+      <button class="mini-btn" data-forge-act="clear-filters">✕ Clear filters</button>
+    </div>`;
+  }
+  if (forgeServerFiltersActive() || text) {
     return `<div class="empty-state">
       <div class="empty-icon">⌕</div>
       <p>Nothing matches these filters.</p>
@@ -463,24 +556,42 @@ function forgeEmptyListHtml() {
   </div>`;
 }
 
+// The escape hatch out of local filtering. Only offered when there is something the local
+// filter cannot see — with the whole list loaded, asking the forge could only ever return
+// less, and offering it would be a button that makes the answer worse.
+function forgeSearchForgeBtnHtml(text) {
+  if (!text || !forgeState.hasMore || text === forgeState.forgeSearch) return '';
+  return `<button class="mini-btn" data-forge-act="search-forge" title="Ask ${escapeHtml(
+    (forgeState.info || {}).host || 'the forge')} for matches beyond what is loaded. It matches whole words only.">⌕ Search the forge</button>`;
+}
+
 // What the list is and is not showing. Without this a first page of fifty out of two
 // hundred looks exactly like the whole list — the same trap the label chips avoid with
 // their "+N", and the reason the count is stated even when there is no more to load.
-function forgeListFootHtml() {
+function forgeListFootHtml(shown) {
   const loaded = (forgeState.items || []).length;
   if (!loaded) return '';
   const total = forgeState.total;
-  const summary = (total !== null && total !== undefined)
-    ? `Showing ${loaded} of ${total}`
-    : forgeState.totalPages
-      ? `${loaded} loaded · page ${forgeState.page} of ${forgeState.totalPages}`
-      : `${loaded} loaded`;
+  const text = (forgeState.filters.text || '').trim();
+
+  const summary = shown !== loaded
+    ? `${shown} of ${loaded} loaded match “${text}”`
+    : (total !== null && total !== undefined)
+      ? `Showing ${loaded} of ${total}`
+      : forgeState.totalPages
+        ? `${loaded} loaded · page ${forgeState.page} of ${forgeState.totalPages}`
+        : `${loaded} loaded`;
 
   return `<div class="forge-list-foot">
     <span class="text-muted">${escapeHtml(summary)}</span>
     ${forgeState.hasMore
       ? `<button class="mini-btn" data-forge-act="load-more"${forgeState.loadingMore ? ' disabled' : ''}>${
           forgeState.loadingMore ? '<span class="loading"></span> Loading' : '↓ Load more'}</button>`
+      : ''}
+    ${forgeSearchForgeBtnHtml(text)}
+    ${forgeState.forgeSearch
+      ? `<span class="text-muted forge-foot-note">Forge search: “${escapeHtml(forgeState.forgeSearch)}”
+          <button class="forge-label-edit" data-forge-act="clear-forge-search" title="Go back to the plain list">✕</button></span>`
       : ''}
     ${forgeState.degraded
       ? '<span class="text-muted forge-foot-note" title="GitHub&#39;s search index does not carry a request&#39;s branches, so the source → target line is left out while a filter is on">Filtered through search — branch names unavailable</span>'
@@ -1784,7 +1895,9 @@ document.addEventListener('click', (e) => {
     // These three belong to the list rather than the reader, but the listener is on
     // document either way and the switch is the one place forge buttons are read.
     case 'load-more': forgeLoadMore(); break;
-    case 'clear-filters': forgeClearFilters(); forgeApplyFilters(); break;
+    case 'search-forge': forgeSearchOnForge(); break;
+    case 'clear-forge-search': forgeClearForgeSearch(); break;
+    case 'clear-filters': forgeClearAllFilters(); break;
     case 'new-issue': showCreateIssueDialog(); break;
     case 'labels': forgeEditLabels(); break;
     case 'props': forgeEditProperties(); break;
