@@ -7203,3 +7203,491 @@ ipcMain.handle('forge:checkoutRequest', wrap(async (_, opts) => {
   await g.raw(['checkout', '-B', local, tracking]);
   return { branch: local, ref: remoteRef };
 }));
+
+// ============================================
+// THE SOUL WORLD — what git kept after you let go
+// ============================================
+// Stage 1: everything recoverable from the reflog alone. No `git fsck` here — that walks the
+// whole object database and would take tens of seconds on a repository with a fat binary
+// history, which is exactly the kind this app gets used on. Everything below is one file
+// read plus a few cheap plumbing commands, so the realm opens instantly.
+//
+// Two things live here:
+//
+// • Spirit branches — branches that were deleted. `git branch -D` removes the ref *and* its
+//   reflog file (verified, not assumed), so the branch's own record is gone. What survives
+//   is HEAD's reflog: the entry that checked *away* from the branch records its final tip in
+//   that entry's OLD sha. No porcelain command will hand you that field — `%H` on
+//   `git log -g` reports where a ref landed, never where it came from — which is why the log
+//   file is parsed directly instead of going through `git reflog`.
+//
+// • Shades — commits the reflog remembers that no ref can reach any more: the far side of a
+//   `reset --hard`, a pre-amend commit, a rebase casualty, a dropped stash.
+//
+// What has no soul at all, and what the UI must say plainly: a change discarded before it
+// was ever staged. `git checkout -- <file>` on unstaged work destroys bytes git never held.
+// Staging is the act that gives a change a soul, and nothing here can return what was never
+// given. Stage 2 (fsck) widens the net to objects the reflog has already forgotten — it
+// cannot widen it to objects that were never written.
+
+const SOUL_SHA = '[0-9a-f]{40}(?:[0-9a-f]{24})?';        // sha1, or sha256 on a newer repo
+const SOUL_NULL = /^0+$/;
+
+// One line per operation:  <old> <new> <who> <unix> <tz>\t<message>
+function parseReflogFile(text) {
+  const re = new RegExp(`^(${SOUL_SHA}) (${SOUL_SHA}) (.*?) (\\d+) ([+-]\\d{4})$`);
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) continue;
+    const tab = line.indexOf('\t');
+    const m = re.exec(tab >= 0 ? line.slice(0, tab) : line);
+    if (!m) continue;
+    out.push({
+      old: m[1],
+      now: m[2],
+      who: (m[3] || '').replace(/\s*<[^>]*>\s*$/, ''),   // "Name <email>" → "Name"
+      at: parseInt(m[4], 10) * 1000,
+      message: tab >= 0 ? line.slice(tab + 1) : ''
+    });
+  }
+  return out;
+}
+
+// A branch name, or the raw sha git writes there instead when HEAD went detached.
+function soulIsName(s) { return !!s && !new RegExp(`^${SOUL_SHA}$`).test(s); }
+
+// Names are harvested from "checkout: moving from A to B" and nothing else. Other subjects
+// mention branches too ("merge feature/x", "rebase (finish): returning to refs/heads/x"),
+// but only the checkout line pairs a name with the tip it held at that moment — and a name
+// whose tip nobody can act on is worse than no entry at all.
+//
+// The gap this leaves is real and belongs to Stage 2: a branch created and deleted without
+// ever being checked out never touches HEAD's reflog, so it surfaces only under fsck.
+function harvestBranchTips(entries) {
+  const seen = new Map();     // name -> { sha, at, leftFor }
+  const CHECKOUT = /^checkout: moving from (.+?) to (.+)$/;
+  for (const e of entries) {
+    const m = CHECKOUT.exec(e.message);
+    if (!m) continue;
+    const [, from, to] = m;
+    // Stepping off `from`: the entry's OLD sha is where that branch stood as we left it.
+    if (soulIsName(from) && !SOUL_NULL.test(e.old)) {
+      const prev = seen.get(from);
+      if (!prev || e.at >= prev.at) seen.set(from, { sha: e.old, at: e.at, leftFor: to });
+    }
+    // Arriving at `to` only helps if we never left again — which the branch above overwrites
+    // the moment we did.
+    if (soulIsName(to) && !SOUL_NULL.test(e.now) && !seen.has(to)) {
+      seen.set(to, { sha: e.now, at: e.at, leftFor: '' });
+    }
+  }
+  return seen;
+}
+
+// Which of these commits no ref can reach. One command for the whole set: `--no-walk` makes
+// rev-list consider only the commits named, and `--not --all` subtracts everything reachable
+// from any ref — so what comes back *is* the unreachable subset. Fed over stdin, because a
+// few hundred hashes as arguments would be a command line long enough to hit the Windows
+// argument limit.
+function soulUnreachable(hashes) {
+  const list = [...new Set(hashes)].filter(Boolean);
+  if (!list.length) return Promise.resolve(new Set());
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const proc = spawn('git', ['rev-list', '--no-walk', '--stdin', '--not', '--all'], { cwd: currentRepoPath });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString('utf8'); });
+    proc.stderr.on('data', () => {});
+    // An empty answer is the safe reading of any failure: it only ever means "nothing is
+    // shown as lost", never that something recoverable is offered when it is not.
+    proc.on('error', () => resolve(new Set()));
+    proc.on('close', () => resolve(new Set(out.split('\n').map(s => s.trim()).filter(Boolean))));
+    for (const h of list) proc.stdin.write(h + '\n');
+    proc.stdin.end();
+  });
+}
+
+// Type and existence for a batch of hashes. An object gc has already pruned is the one thing
+// that would turn a listed soul into a lie, so nothing is offered that this has not confirmed.
+function soulBatchCheck(hashes) {
+  const list = [...new Set(hashes)].filter(Boolean);
+  if (!list.length) return Promise.resolve(new Map());
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const proc = spawn('git', ['cat-file', '--batch-check=%(objectname) %(objecttype)'], { cwd: currentRepoPath });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString('utf8'); });
+    proc.stderr.on('data', () => {});
+    proc.on('error', () => resolve(new Map()));
+    proc.on('close', () => {
+      const map = new Map();
+      for (const line of out.split('\n')) {
+        const p = line.trim().split(/\s+/);
+        // A pruned object answers "<hash> missing", which is dropped rather than recorded.
+        if (p.length >= 2 && p[1] !== 'missing') map.set(p[0], p[1]);
+      }
+      resolve(map);
+    });
+    for (const h of list) proc.stdin.write(h + '\n');
+    proc.stdin.end();
+  });
+}
+
+// Subject, author and date for a batch of commits, in one process rather than one each.
+// `git show` per shade would be a process per row; this is a single pass over all of them.
+async function soulCommitInfo(hashes) {
+  const list = [...new Set(hashes)].filter(Boolean);
+  const map = new Map();
+  if (!list.length) return map;
+  const { spawn } = require('child_process');
+  const SEP = '\x1f';
+  await new Promise((resolve) => {
+    const proc = spawn('git', ['cat-file', `--batch=%(objectname)${SEP}%(objecttype)`], { cwd: currentRepoPath });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString('utf8'); });
+    proc.stderr.on('data', () => {});
+    proc.on('error', resolve);
+    proc.on('close', () => {
+      // --batch emits a header line and then the raw object, so records are split on the
+      // next header rather than on newlines — a commit message contains plenty of those.
+      for (const chunk of out.split(new RegExp(`(?=^[0-9a-f]{7,64}${SEP})`, 'm'))) {
+        const nl = chunk.indexOf('\n');
+        if (nl < 0) continue;
+        const [hash, type] = chunk.slice(0, nl).split(SEP);
+        if (type !== 'commit') continue;
+        const body = chunk.slice(nl + 1);
+        const blank = body.indexOf('\n\n');
+        const header = blank < 0 ? body : body.slice(0, blank);
+        const am = /^author (.*?) <[^>]*> (\d+)/m.exec(header);
+        map.set(hash, {
+          author: am ? am[1] : '',
+          at: am ? parseInt(am[2], 10) * 1000 : 0,
+          subject: (blank < 0 ? '' : body.slice(blank + 2).split('\n')[0]).trim()
+        });
+      }
+      resolve();
+    });
+    for (const h of list) proc.stdin.write(h + '\n');
+    proc.stdin.end();
+  });
+  return map;
+}
+
+// How long these souls have. gc drops unreachable reflog entries at 30 days by default and
+// prunes the loose objects behind them at 14 — after which only fsck sees them, and then
+// nothing does. Both are configurable, and a repository that has switched expiry off
+// entirely ("never") keeps them indefinitely, which is worth reporting rather than guessing.
+async function soulExpiry(g) {
+  const read = async (key, fallback) => {
+    try {
+      const v = (await g.raw(['config', '--get', key])).trim();
+      return v || fallback;
+    } catch (e) { return fallback; }     // unset: git exits 1
+  };
+  const unreachable = await read('gc.reflogExpireUnreachable', '30.days.ago');
+  const prune = await read('gc.pruneExpire', '2.weeks.ago');
+  const days = (s) => {
+    if (/never/i.test(s)) return null;                 // kept forever
+    const m = /(\d+(?:\.\d+)?)\s*\.?\s*(day|week|month|year)/i.exec(s);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    return Math.round(n * ({ day: 1, week: 7, month: 30, year: 365 }[m[2].toLowerCase()]));
+  };
+  return { reflogDays: days(unreachable), pruneDays: days(prune), raw: { unreachable, prune } };
+}
+
+// ---- Stage 2: what the reflog has already forgotten ------------------------------------
+//
+// `git fsck` finds what the reflog cannot: commits whose reflog entry has expired, branches
+// created and deleted without ever being checked out, and — the reason this stage exists at
+// all — **dangling blobs**, file contents that were staged and then discarded before any
+// commit existed to hold them.
+//
+// Three flag choices, each load-bearing:
+//
+// • **Dangling, not `--unreachable`.** They are alternative output modes, not additive. The
+//   unreachable set includes every object *inside* a dropped commit, which floods the list
+//   with blobs already recoverable by branching at the commit that holds them. The dangling
+//   set is the top-level orphans only: the tip of a dropped chain, and a blob nothing points
+//   at. That second one is exactly "staged, then discarded".
+// • **Reflogs left as roots** (i.e. *not* `--no-reflogs`). Verified: a commit the reflog
+//   still holds is not reported as dangling. That makes Stage 2's findings disjoint from
+//   Stage 1's rather than a superset of them — nothing has to be de-duplicated, and anything
+//   this returns is genuinely material the fast path could not see.
+// • **`--connectivity-only`.** Verified to still report dangling blobs while skipping
+//   per-object SHA-1 verification, which is the bulk of fsck's cost.
+//
+// It is still a full walk of the object database, so it is never on a refresh path — the
+// renderer asks for it explicitly, and progress goes over op:progress like any other long op.
+function soulFsck() {
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const proc = spawn('git', ['fsck', '--connectivity-only', '--progress'], { cwd: currentRepoPath });
+    let out = '';
+    let err = '';
+    proc.stdout.on('data', d => { out += d.toString('utf8'); });
+    proc.stderr.on('data', d => {
+      err += d.toString('utf8');
+      // fsck writes its progress to stderr as "Checking objects: 62% (267/430)". Only the
+      // last line of the chunk matters — it overwrites itself with \r.
+      const last = d.toString('utf8').split(/[\r\n]/).filter(Boolean).pop() || '';
+      const m = /^(.*?):\s+(\d+)%/.exec(last);
+      // Shaped as method/stage/progress because the app's global progress bar (07-graph)
+      // listens on this channel too — sending our own field names would leave it showing a
+      // bare "Working" for the longest operation in the app.
+      if (m) emitOpProgress({ op: 'souls', method: 'Communing', stage: m[1], progress: parseInt(m[2], 10) });
+    });
+    proc.on('error', () => resolve({ commits: [], blobs: [], failed: true }));
+    proc.on('close', () => {
+      const commits = [];
+      const blobs = [];
+      for (const line of out.split('\n')) {
+        const m = /^dangling (commit|blob) ([0-9a-f]{40,64})$/.exec(line.trim());
+        if (!m) continue;
+        (m[1] === 'commit' ? commits : blobs).push(m[2]);
+      }
+      resolve({ commits, blobs, failed: false, stderr: err.slice(-2000) });
+    });
+  });
+}
+
+// Size for a batch of objects, so a relic can state how much content it is before anyone
+// asks to see it.
+function soulSizes(hashes) {
+  const list = [...new Set(hashes)].filter(Boolean);
+  if (!list.length) return Promise.resolve(new Map());
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const proc = spawn('git', ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], { cwd: currentRepoPath });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString('utf8'); });
+    proc.stderr.on('data', () => {});
+    proc.on('error', () => resolve(new Map()));
+    proc.on('close', () => {
+      const map = new Map();
+      for (const line of out.split('\n')) {
+        const p = line.trim().split(/\s+/);
+        if (p.length >= 3 && p[1] !== 'missing') map.set(p[0], parseInt(p[2], 10) || 0);
+      }
+      resolve(map);
+    });
+    for (const h of list) proc.stdin.write(h + '\n');
+    proc.stdin.end();
+  });
+}
+
+// The raw bytes of one object. Buffers rather than strings: a relic may well be binary, and
+// decoding it as UTF-8 on the way out would corrupt exactly the file somebody is trying to
+// rescue.
+function soulReadObject(sha) {
+  const { spawn } = require('child_process');
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', ['cat-file', 'blob', sha], { cwd: currentRepoPath });
+    const chunks = [];
+    let err = '';
+    proc.stdout.on('data', d => chunks.push(d));
+    proc.stderr.on('data', d => { err += d.toString('utf8'); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(err.trim() || `git could not read ${sha.slice(0, 7)}`));
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
+// git's own rule, and the right one here: a NUL byte in the first 8000 bytes means binary.
+// It matters because the preview is the only way to recognise a relic — they have no name —
+// and rendering a .png as mojibake would make one unrecognisable rather than merely unread.
+function soulLooksBinary(buf) {
+  const n = Math.min(buf.length, 8000);
+  for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
+  return false;
+}
+
+ipcMain.handle('soul:survey', wrap(async (_, opts) => {
+  const deep = !!(opts && opts.deep);
+  const g = ensureGit();
+
+  // --git-path rather than joining ".git" ourselves: in a linked worktree .git is a *file*
+  // and the logs live in the main repository's directory, so the naive path is simply wrong.
+  let logPath = '';
+  try { logPath = (await g.raw(['rev-parse', '--git-path', 'logs/HEAD'])).trim(); } catch (e) {}
+  const abs = logPath ? path.resolve(currentRepoPath, logPath) : '';
+
+  let text = '';
+  try { text = abs && fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : ''; } catch (e) {}
+  // No reflog at all is not the same as nothing to find: a cloned-then-expired repository
+  // can still hold dangling objects, so the deep pass runs regardless.
+  if (!text && !deep) return { spirits: [], shades: [], relics: [], expiry: await soulExpiry(g), empty: true, deep: false };
+
+  const entries = parseReflogFile(text);
+  const tips = harvestBranchTips(entries);
+
+  // Branch names still in use — anything harvested that is not here has been deleted.
+  let living = new Set();
+  try {
+    const raw = await g.raw(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+    living = new Set(raw.split('\n').map(s => s.trim()).filter(Boolean));
+  } catch (e) {}
+
+  const candidates = [];
+  for (const [name, info] of tips) {
+    if (!living.has(name)) candidates.push({ name, sha: info.sha, at: info.at, leftFor: info.leftFor });
+  }
+
+  // Every commit the reflog ever pointed at, both sides of every entry: the pool the shades
+  // are drawn from.
+  const pool = [];
+  for (const e of entries) {
+    if (!SOUL_NULL.test(e.old)) pool.push(e.old);
+    if (!SOUL_NULL.test(e.now)) pool.push(e.now);
+  }
+
+  const [alive, lost] = await Promise.all([
+    soulBatchCheck(pool.concat(candidates.map(c => c.sha))),
+    soulUnreachable(pool)
+  ]);
+
+  // A spirit whose commit gc has already collected cannot be resurrected, so it is not
+  // listed: the whole promise of this panel is that what it shows is still there.
+  const spirits = candidates
+    .filter(c => alive.get(c.sha) === 'commit')
+    .map(c => Object.assign({}, c, { reachable: !lost.has(c.sha) }))
+    .sort((a, b) => b.at - a.at);
+
+  // A shade is a commit the reflog remembers and no ref can reach. The newest reflog entry
+  // that touched it says what happened to it, which is the difference between a hash and a
+  // story — "reset: moving to HEAD~1" is the whole explanation of where it went.
+  const lastTouch = new Map();
+  for (const e of entries) {
+    for (const h of [e.old, e.now]) {
+      if (!lost.has(h) || alive.get(h) !== 'commit') continue;
+      const prev = lastTouch.get(h);
+      if (!prev || e.at >= prev.at) lastTouch.set(h, { at: e.at, message: e.message, who: e.who });
+    }
+  }
+  // A spirit branch already appears as itself; showing its tip again as a nameless shade
+  // would be the same loss counted twice.
+  const claimed = new Set(spirits.map(s => s.sha));
+  const shadeHashes = [...lastTouch.keys()].filter(h => !claimed.has(h));
+
+  // Stage 2. Disjoint from everything above by construction (fsck keeps reflogs as roots),
+  // so these are merged in rather than reconciled — but claimed is still consulted, because
+  // a spirit branch's tip must not also appear as a nameless forgotten commit.
+  let forgotten = [];
+  let relics = [];
+  if (deep) {
+    const found = await soulFsck();
+    forgotten = found.commits.filter(h => !claimed.has(h) && !lastTouch.has(h));
+    const sizes = await soulSizes(found.blobs);
+    relics = found.blobs
+      .filter(h => sizes.has(h))
+      .map(h => ({ sha: h, short: h.slice(0, 7), size: sizes.get(h) }))
+      .sort((a, b) => b.size - a.size);
+  }
+
+  const info = await soulCommitInfo(shadeHashes.concat(forgotten));
+
+  const shades = shadeHashes.map(h => {
+    const t = lastTouch.get(h);
+    const c = info.get(h) || {};
+    return {
+      sha: h,
+      short: h.slice(0, 7),
+      at: t.at,
+      lastAction: t.message,
+      subject: c.subject || '',
+      author: c.author || t.who || '',
+      authoredAt: c.at || 0,
+      forgotten: false
+    };
+  }).concat(forgotten.map(h => {
+    const c = info.get(h) || {};
+    return {
+      sha: h,
+      short: h.slice(0, 7),
+      // No reflog entry survives for these, so the commit's own author date is the only
+      // time there is — and there is no record at all of what removed it.
+      at: c.at || 0,
+      lastAction: '',
+      subject: c.subject || '',
+      author: c.author || '',
+      authoredAt: c.at || 0,
+      forgotten: true
+    };
+  })).sort((a, b) => b.at - a.at);
+
+  return { spirits, shades, relics, expiry: await soulExpiry(g), empty: false, deep };
+}));
+
+// A relic has no name and no date — it is content and nothing else, because a blob staged
+// and never committed has no tree above it to name it. So the preview *is* the identity:
+// it is the only way anyone recognises which of their files this was.
+ipcMain.handle('soul:relic', wrap(async (_, opts) => {
+  const sha = String((opts && opts.sha) || '').trim();
+  if (!new RegExp(`^${SOUL_SHA}$`).test(sha)) throw new Error('That is not an object hash');
+  const buf = await soulReadObject(sha);
+  const binary = soulLooksBinary(buf);
+  const CAP = 64 * 1024;                      // enough to recognise a file, not enough to hang the renderer
+  return {
+    sha,
+    size: buf.length,
+    binary,
+    truncated: !binary && buf.length > CAP,
+    text: binary ? '' : buf.subarray(0, CAP).toString('utf8')
+  };
+}));
+
+// Writing a relic back out is the whole point of finding it. It goes through a save dialog
+// rather than guessing a path: the blob has no name, so only the person looking at it knows
+// what it should be called or where it belongs.
+ipcMain.handle('soul:saveRelic', wrap(async (_, opts) => {
+  const o = opts || {};
+  const sha = String(o.sha || '').trim();
+  if (!new RegExp(`^${SOUL_SHA}$`).test(sha)) throw new Error('That is not an object hash');
+  const buf = await soulReadObject(sha);
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Recovered Content',
+    defaultPath: path.join(currentRepoPath || app.getPath('documents'), String(o.name || `recovered-${sha.slice(0, 7)}`)),
+    properties: ['showOverwriteConfirmation']
+  });
+  if (result.canceled || !result.filePath) return { saved: false, canceled: true };
+
+  fs.mkdirSync(path.dirname(result.filePath), { recursive: true });
+  // The bytes as git stored them. No encoding conversion and no line-ending translation —
+  // a relic is recovered exactly, or it is not recovered.
+  fs.writeFileSync(result.filePath, buf);
+  return { saved: true, path: result.filePath, bytes: buf.length };
+}));
+
+// Bring a spirit branch back. `git branch <name> <sha>` touches nothing else — it cannot
+// overwrite an existing branch (git refuses) and it moves no ref that already exists, which
+// is what makes it the one action here that needs no warning beyond naming it.
+ipcMain.handle('soul:resurrect', wrap(async (_, opts) => {
+  const o = opts || {};
+  const name = String(o.name || '').trim();
+  const sha = String(o.sha || '').trim();
+  if (!name) throw new Error('A branch name is required');
+  if (!new RegExp(`^${SOUL_SHA}$`).test(sha)) throw new Error('That is not a commit hash');
+  const g = ensureGit();
+  if ((await soulBatchCheck([sha])).get(sha) !== 'commit') {
+    throw new Error(`${sha.slice(0, 7)} is no longer in this repository — git has already collected it. Nothing can bring it back.`);
+  }
+  await g.raw(['branch', name, sha]);
+  return { branch: name, sha };
+}));
+
+// Anchoring is the other half of the promise. A tag is a real ref, so gc stops treating the
+// commit as unreachable and it can never be collected — the soul stops fading. It is also
+// the only permanent thing this panel does, which is why it is its own action rather than
+// something that happens quietly alongside resurrection.
+ipcMain.handle('soul:anchor', wrap(async (_, opts) => {
+  const o = opts || {};
+  const sha = String(o.sha || '').trim();
+  if (!new RegExp(`^${SOUL_SHA}$`).test(sha)) throw new Error('That is not a commit hash');
+  const name = String(o.name || '').trim() || `souls/${sha.slice(0, 7)}`;
+  const g = ensureGit();
+  await g.raw(['tag', name, sha]);
+  return { tag: name, sha };
+}));

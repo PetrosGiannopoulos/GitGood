@@ -75,6 +75,13 @@ const api = {
 
   // Forge (GitHub / GitLab). Tokens live in the main process only — nothing here returns
   // one, and `hasToken` is the most the renderer ever learns.
+  // The Soul World — what git kept after you let go.
+  soulSurvey: (opts) => ipcRenderer.invoke('soul:survey', opts),
+  soulResurrect: (opts) => ipcRenderer.invoke('soul:resurrect', opts),
+  soulAnchor: (opts) => ipcRenderer.invoke('soul:anchor', opts),
+  soulRelic: (opts) => ipcRenderer.invoke('soul:relic', opts),
+  soulSaveRelic: (opts) => ipcRenderer.invoke('soul:saveRelic', opts),
+
   forgeInfo: (opts) => ipcRenderer.invoke('forge:info', opts),
   forgeSetToken: (opts) => ipcRenderer.invoke('forge:setToken', opts),
   forgeClearToken: (opts) => ipcRenderer.invoke('forge:clearToken', opts),
