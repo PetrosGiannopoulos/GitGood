@@ -496,6 +496,7 @@ function forgeRequestRowHtml(pr, currentBranch) {
       · ${escapeHtml(pr.author)}
       ${pr.updatedAt ? ' · updated ' + escapeHtml(relativeTime(pr.updatedAt)) : ''}
       ${pr.comments ? ` · ${pr.comments} comment${pr.comments === 1 ? '' : 's'}` : ''}
+      ${(pr.assignees || []).length ? ' · ' + forgePeopleHtml(pr.assignees) : ''}
       ${forgeMetaLabelsHtml(pr.labels, 4)}
     </div>
   </li>`;
@@ -513,6 +514,8 @@ function forgeIssueRowHtml(it) {
     <div class="forge-item-meta">
       ${escapeHtml(it.author)}
       ${it.updatedAt ? ' · updated ' + escapeHtml(relativeTime(it.updatedAt)) : ''}
+      ${(it.assignees || []).length ? ' · ' + forgePeopleHtml(it.assignees) : ''}
+      ${it.milestone ? ' · <span class="forge-flag">' + escapeHtml(it.milestone) + '</span>' : ''}
       ${forgeMetaLabelsHtml(it.labels, 4)}
     </div>
   </li>`;
@@ -744,7 +747,7 @@ function forgeDetailHeadHtml(d, x, isReq) {
         <span class="forge-state forge-state-${escapeHtml(st)}">${escapeHtml(st)}</span>
         ${draft ? '' : `<span class="forge-num">#${x.number}</span>`}
         <span class="forge-detail-name">${escapeHtml(x.title)}</span>
-        <button class="forge-ext" title="Close this and go back to the list" data-forge-act="close-detail">✕</button>
+        <button class="forge-ext" title="Close this panel and go back to the list — nothing happens to the ${draft ? 'item' : isReq ? 'request' : 'issue'} itself" data-forge-act="close-detail">✕</button>
       </div>
       <div class="forge-detail-meta">
         ${escapeHtml(x.author || '')}
@@ -753,18 +756,17 @@ function forgeDetailHeadHtml(d, x, isReq) {
         ${isReq && x.isFork ? ' <span class="forge-flag">fork</span>' : ''}
         ${counts}
         ${forgeDetailLabelsHtml(x, draft)}
-        ${(x.assignees || []).length ? ' · assigned ' + x.assignees.map(a => escapeHtml(a)).join(', ') : ''}
-        ${isReq && (x.reviewers || []).length ? ' · review ' + x.reviewers.map(a => escapeHtml(a)).join(', ') : ''}
       </div>
+      ${forgeDetailPropsHtml(x, isReq, draft)}
       ${isReq ? forgeMergeStateHtml(x) : ''}
       ${isReq ? '<div class="forge-detail-checks"></div>' : ''}
       ${draft ? '<div class="forge-detail-meta">A draft item on the board — it has no issue behind it yet.</div>' : `
       <div class="forge-detail-actions">
         ${isReq && open ? '<button class="mini-btn" data-forge-act="checkout" title="Fetch this request’s head and check it out locally">⤓ Checkout</button>' : ''}
         ${isReq && open ? '<button class="mini-btn" data-forge-act="merge" title="Merge on the forge">⑃ Merge</button>' : ''}
-        ${x.merged ? '' : `<button class="mini-btn" data-forge-act="${open ? 'close' : 'reopen'}">${open ? '✕ Close' : '↺ Reopen'}</button>`}
         <button class="mini-btn" data-forge-act="edit" title="Edit the title and description">✎ Edit</button>
-        ${isReq ? '' : '<button class="mini-btn danger" data-forge-act="delete" title="Delete this issue permanently — it cannot be undone">✗ Delete</button>'}
+        <button class="mini-btn" data-forge-act="props" title="Assignees, milestone and the rest of what this carries">⚙ Properties</button>
+        ${forgeMoreMenuItems().length ? '<button class="mini-btn" data-forge-act="more" title="Close, reopen or delete — the actions that change the item itself">⋯ More</button>' : ''}
         <span class="graph-spacer"></span>
         <button class="mini-btn" data-forge-act="refresh" title="Reload from the forge">⟳</button>
         <button class="mini-btn" data-forge-url="${forgeAttr(x.url)}" title="Open on the forge in a browser">↗ Browser</button>
@@ -773,6 +775,48 @@ function forgeDetailHeadHtml(d, x, isReq) {
         ${tabs.map(([id, label, n]) => `<button class="mini-btn${d.tab === id ? ' active' : ''}" data-forge-tab="${id}">${label}${n ? ` <span class="forge-num">${n}</span>` : ''}</button>`).join('')}
       </div>`}
     </div>`;
+}
+
+// Closing an issue and closing the panel it is being read in are different things, and a
+// "✕ Close" button sitting a few pixels from the panel's own ✕ made them look like the same
+// one. So the actions that change the item on the forge — close, reopen, delete — live
+// behind ⋯ instead: reaching them is a deliberate second click, and nothing in the action
+// row is one slip away from closing somebody's issue.
+//
+// Built as data rather than markup because the same list decides two things: whether the ⋯
+// button is drawn at all (a merged request has nothing here) and what the menu contains.
+function forgeMoreMenuItems() {
+  const d = forgeState.detail;
+  if (!d || !d.data || d.draftId) return [];
+  const x = d.data;
+  const isReq = d.kind === 'request';
+  const st = x.state === 'opened' ? 'open' : x.state;
+  const open = st === 'open' || st === 'draft';
+  const noun = isReq ? ((forgeState.info || {}).provider === 'gitlab' ? 'merge request' : 'pull request') : 'issue';
+
+  const items = [];
+  if (!x.merged) {
+    items.push(open
+      ? { label: `Close this ${noun}`, icon: '✕', action: () => forgeSetItemState(false) }
+      : { label: `Reopen this ${noun}`, icon: '↺', action: () => forgeSetItemState(true) });
+  }
+  // Deleting is issues-only, and permanent on both forges — so it is last, behind a
+  // separator, and never adjacent to anything that merely closes.
+  if (!isReq) {
+    if (items.length) items.push('sep');
+    items.push({ label: 'Delete this issue…', icon: '✗', danger: true, action: () => forgeDeleteIssue() });
+  }
+  return items;
+}
+
+// Anchored under the button rather than at the pointer: this is a menu belonging to a
+// control, not a right-click on whatever happened to be under the cursor. .context-menu is
+// position:fixed, so the viewport coordinates from the rect are the ones it wants.
+function forgeShowMoreMenu(btn) {
+  const items = forgeMoreMenuItems();
+  if (!items.length) return;
+  const r = btn.getBoundingClientRect();
+  showContextMenu(items, r.left, r.bottom + 4);
 }
 
 // Labels in the reader are the editable copy, so they carry the pencil. A draft board item
@@ -786,6 +830,276 @@ function forgeDetailLabelsHtml(x, draft) {
   const chips = forgeLabelsHtml(x.labels);
   return ` · ${chips || '<span class="text-muted">no labels</span>'}` +
     ` <button class="forge-label-edit" data-forge-act="labels" title="Change the labels on this item">✎</button>`;
+}
+
+// Everything the item carries that is not its text: who is on it, what it is planned
+// against, and the provider's own extras. One row and one pencil rather than a control per
+// property — the two forges disagree about which of these exist at all, so the row shows
+// what this one has and the dialog behind it offers exactly those fields.
+//
+// Drawn even when every value is empty, for the same reason the labels row is: "unassigned ✎"
+// is how the first assignee gets added, and a pencil that only appears once a value exists
+// cannot be found.
+function forgeDetailPropsHtml(x, isReq, draft) {
+  if (draft) return '';
+  const gitlab = (forgeState.info || {}).provider === 'gitlab';
+  const bits = [forgePropHtml('Assignees', forgePeopleHtml(x.assignees), 'unassigned')];
+  if (isReq) bits.push(forgePropHtml('Reviewers', forgePeopleHtml(x.reviewers), 'none requested'));
+  bits.push(forgePropHtml('Milestone', x.milestone ? escapeHtml(x.milestone) : '', 'none'));
+  if (gitlab && !isReq) {
+    bits.push(forgePropHtml('Due', x.dueDate ? escapeHtml(x.dueDate) : '', 'no date'));
+    // Only where the plan has weights at all: an empty field nobody can fill is noise.
+    if (x.weightSupported) {
+      bits.push(forgePropHtml('Weight', x.weight === null || x.weight === undefined ? '' : String(x.weight), '—'));
+    }
+  }
+
+  // The flags are the properties that are only worth a word when they are true.
+  const flags = [];
+  if (x.confidential) flags.push('<span class="forge-flag" title="Visible only to project members">confidential</span>');
+  if (x.locked) {
+    flags.push(`<span class="forge-flag" title="No new comments except from people with write access">🔒 locked${x.lockReason ? ' · ' + escapeHtml(x.lockReason) : ''}</span>`);
+  }
+  if (x.issueType && x.issueType !== 'issue') flags.push(`<span class="forge-flag">${escapeHtml(x.issueType.replace(/_/g, ' '))}</span>`);
+  // GitHub's two ways of being closed. "Completed" is the default and says nothing worth
+  // repeating; "not planned" is the one that changes what the closure meant.
+  if (x.stateReason === 'not_planned') flags.push('<span class="forge-flag" title="Closed as not planned">not planned</span>');
+
+  return `<div class="forge-detail-props">
+    ${bits.join('')}
+    ${flags.join('')}
+    <button class="forge-label-edit" data-forge-act="props" title="Change assignees, milestone and the rest">✎</button>
+  </div>`;
+}
+
+function forgePropHtml(key, valueHtml, empty) {
+  return `<span class="forge-prop"><span class="forge-prop-k">${escapeHtml(key)}</span>` +
+    `<span class="forge-prop-v">${valueHtml || `<span class="text-muted">${escapeHtml(empty)}</span>`}</span></span>`;
+}
+
+// People are drawn as a monogram and a login, never as a remote avatar: the renderer has no
+// business fetching images from the forge, which is the same rule that keeps every other
+// network call in main.
+function forgePeopleHtml(logins) {
+  const all = (logins || []).filter(Boolean);
+  if (!all.length) return '';
+  return all.map(l =>
+    `<span class="forge-person"><span class="forge-monogram">${escapeHtml(String(l).slice(0, 1).toUpperCase())}</span>${escapeHtml(l)}</span>`
+  ).join('');
+}
+
+// ---- the properties editor -------------------------------------------------------------
+
+// One dialog over forge:issueMeta's answer, which says which fields this provider has. The
+// payload sent back carries only the keys that actually changed, so a field the dialog never
+// showed is never written — that is what lets one handler serve an issue and a request, on
+// two providers, without the renderer knowing which is which.
+async function forgeEditProperties() {
+  const d = forgeState.detail;
+  if (!d || !d.data || d.draftId) return;
+  const x = d.data;
+  const isReq = d.kind === 'request';
+
+  const r = await withLoading('Reading the project', () => gs.forgeIssueMeta({ kind: d.kind }));
+  if (!r || !r.ok) { showToast((r && r.error) || 'Could not read the project.', 'error', 6000); return; }
+  const meta = r.data || {};
+  const f = meta.features || {};
+
+  const assignees = (x.assignees || []).slice();
+  const reviewers = (x.reviewers || []).slice();
+  const milestoneId = x.milestoneId === null || x.milestoneId === undefined ? '' : String(x.milestoneId);
+  const closed = x.state === 'closed';
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Properties of <strong>#${x.number}</strong> — ${escapeHtml(x.title)}</p>
+    <div class="modal-field">
+      <label>Assignees</label>
+      ${forgeUserPickerHtml('prop-assignee', forgeUserRows(meta.assignees, assignees), assignees, meta.assigneesError)}
+    </div>
+    ${f.reviewers ? `
+    <div class="modal-field">
+      <label>Reviewers</label>
+      ${forgeUserPickerHtml('prop-reviewer', forgeUserRows(meta.assignees, reviewers), reviewers, meta.assigneesError)}
+    </div>` : ''}
+    <div class="modal-field">
+      <label>Milestone</label>
+      ${forgeMilestoneSelectHtml('prop-milestone', meta.milestones, milestoneId, x.milestone, meta.milestonesError)}
+    </div>
+    ${f.dueDate ? `
+    <div class="modal-field">
+      <label>Due date</label>
+      <input class="modal-input" type="date" id="prop-due" value="${forgeAttr(x.dueDate || '')}" />
+    </div>` : ''}
+    ${f.weight && x.weightSupported ? `
+    <div class="modal-field">
+      <label>Weight (blank for none)</label>
+      <input class="modal-input" type="number" min="0" id="prop-weight" value="${forgeAttr(x.weight === null || x.weight === undefined ? '' : String(x.weight))}" />
+    </div>` : ''}
+    ${f.issueType ? `
+    <div class="modal-field">
+      <label>Type</label>
+      <select class="modal-input" id="prop-type">
+        ${['issue', 'incident', 'test_case', 'task'].map(t =>
+          `<option value="${t}"${(x.issueType || 'issue') === t ? ' selected' : ''}>${t.replace(/_/g, ' ')}</option>`).join('')}
+      </select>
+    </div>` : ''}
+    ${f.confidential ? `
+    <label class="modal-checkbox"><input type="checkbox" id="prop-confidential"${x.confidential ? ' checked' : ''} /> Confidential — visible only to project members</label>` : ''}
+    ${f.lock ? `
+    <label class="modal-checkbox"><input type="checkbox" id="prop-locked"${x.locked ? ' checked' : ''} /> Lock the discussion — only people with write access can comment</label>
+    ${f.lockReason ? `
+    <div class="modal-field">
+      <label>Lock reason (optional)</label>
+      <select class="modal-input" id="prop-lock-reason">
+        ${[['', '—'], ['off-topic', 'off-topic'], ['too heated', 'too heated'], ['resolved', 'resolved'], ['spam', 'spam']].map(([v, t]) =>
+          `<option value="${v}"${(x.lockReason || '') === v ? ' selected' : ''}>${t}</option>`).join('')}
+      </select>
+    </div>` : ''}` : ''}
+    ${f.stateReason && closed ? `
+    <div class="modal-field">
+      <label>Closed as</label>
+      <select class="modal-input" id="prop-state-reason">
+        <option value="completed"${x.stateReason !== 'not_planned' ? ' selected' : ''}>completed</option>
+        <option value="not_planned"${x.stateReason === 'not_planned' ? ' selected' : ''}>not planned</option>
+      </select>
+    </div>` : ''}
+    ${f.assigneesDropSilently ? `<p class="modal-text text-muted">${escapeHtml(
+      meta.provider === 'gitlab'
+        ? 'GitLab keeps more than one assignee only on Premium and above — on other plans the first is kept and the rest are dropped.'
+        : 'GitHub silently ignores an assignee without access to the repository, so what is shown afterwards is what actually stuck.')}</p>` : ''}`;
+
+  forgeWirePicker(body, 'prop-assignee-filter', '#prop-assignee-list .forge-user-row');
+  forgeWirePicker(body, 'prop-reviewer-filter', '#prop-reviewer-list .forge-user-row');
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn-medieval primary';
+  saveBtn.innerHTML = '<span class="btn-icon">⚙</span> Save';
+  saveBtn.onclick = async () => {
+    const payload = { kind: d.kind, number: d.number };
+    const val = id => { const el = body.querySelector('#' + id); return el ? el.value : null; };
+    const on = id => { const el = body.querySelector('#' + id); return el ? el.checked : null; };
+
+    // Only read a picker that actually drew. A project whose member list this token cannot
+    // see has no boxes to tick, and treating that as "nobody is ticked" would unassign
+    // everyone the moment anything else on this form was saved.
+    const drew = id => !!body.querySelector('#' + id + '-list');
+
+    if (drew('prop-assignee')) {
+      const want = forgePickedUsers(body, 'prop-assignee');
+      if (!forgeSameSet(want, assignees)) payload.assignees = want;
+    }
+    if (f.reviewers && drew('prop-reviewer')) {
+      const want = forgePickedUsers(body, 'prop-reviewer');
+      if (!forgeSameSet(want, reviewers)) payload.reviewers = want;
+    }
+
+    const ms = val('prop-milestone');
+    // "" is a real choice here — it means "take the milestone off" — so it is sent as null
+    // rather than skipped, which is the distinction the handler reads.
+    if (ms !== null && ms !== milestoneId) payload.milestone = ms === '' ? null : ms;
+
+    if (f.dueDate) { const v = val('prop-due'); if (v !== null && v !== (x.dueDate || '')) payload.dueDate = v; }
+    if (f.weight && x.weightSupported) {
+      const v = val('prop-weight');
+      const cur = x.weight === null || x.weight === undefined ? '' : String(x.weight);
+      if (v !== null && v !== cur) payload.weight = v === '' ? null : v;
+    }
+    if (f.issueType) { const v = val('prop-type'); if (v !== null && v !== (x.issueType || 'issue')) payload.issueType = v; }
+    if (f.confidential) { const v = on('prop-confidential'); if (v !== null && v !== !!x.confidential) payload.confidential = v; }
+    if (f.lock) {
+      const locked = on('prop-locked');
+      const reason = f.lockReason ? (val('prop-lock-reason') || '') : '';
+      // A reason change on an already-locked item still has to be written, and the only way
+      // to write one is to lock again — the lock endpoint takes no PATCH.
+      if (locked !== null && (locked !== !!x.locked || (locked && reason !== (x.lockReason || '')))) {
+        payload.locked = locked;
+        if (locked && reason) payload.lockReason = reason;
+      }
+    }
+    if (f.stateReason && closed) {
+      const v = val('prop-state-reason');
+      if (v !== null && v !== (x.stateReason || 'completed')) payload.stateReason = v;
+    }
+
+    modal.hide();
+    // Only kind and number left means nothing was touched, and a no-op write still costs a
+    // request against a rate-limited API.
+    if (Object.keys(payload).length <= 2) return;
+
+    const res = await withLoading('Saving', () => gs.forgeSetProperties(payload));
+    if (!handleResult(res, 'Saved')) return;
+    const now = forgeState.detail;
+    if (now && now.number === d.number) now.data = res.data;
+    renderForgeDetail();
+    await refreshForge();
+  };
+
+  modal.show({ title: '⚙ Properties', body, footer: [cancelBtn, saveBtn] });
+}
+
+// A person already on the item but no longer in the project's list still has to be tickable,
+// or saving the dialog would silently unassign them — the same rule as a label the project
+// has since deleted.
+function forgeUserRows(all, chosen) {
+  const known = new Set((all || []).map(u => u.login));
+  return (all || []).concat((chosen || [])
+    .filter(l => !known.has(l))
+    .map(l => ({ login: l, name: '', outside: true })));
+}
+
+function forgeUserPickerHtml(id, rows, chosen, error) {
+  const picked = new Set(chosen || []);
+  if (!rows.length) {
+    return `<p class="modal-text text-muted">${escapeHtml(error ||
+      'Nobody to choose from — this token cannot read the list of people with access to the project.')}</p>`;
+  }
+  return `
+    <input class="modal-input" id="${id}-filter" placeholder="Filter people…" autocomplete="off" />
+    <div class="forge-label-picker forge-picker-short" id="${id}-list">
+      ${rows.map(u => `
+        <label class="forge-user-row" data-pick-text="${forgeAttr((u.login + ' ' + (u.name || '')).toLowerCase())}">
+          <input type="checkbox" data-pick="${id}" value="${forgeAttr(u.login)}"${picked.has(u.login) ? ' checked' : ''} />
+          <span class="forge-monogram">${escapeHtml(u.login.slice(0, 1).toUpperCase())}</span>
+          <span class="forge-person-login">${escapeHtml(u.login)}</span>
+          ${u.name ? `<span class="forge-label-desc">${escapeHtml(u.name)}</span>` : ''}
+          ${u.outside ? '<span class="forge-label-desc">no longer has access</span>' : ''}
+        </label>`).join('')}
+    </div>
+    ${error ? `<p class="modal-text text-muted">${escapeHtml(error)}</p>
+      <p class="modal-text text-muted">Only the people already on this item are listed, so someone can be taken off but nobody new can be added.</p>` : ''}`;
+}
+
+function forgePickedUsers(body, id) {
+  return [...body.querySelectorAll(`input[data-pick="${id}"]:checked`)].map(i => i.value);
+}
+
+// A milestone the item is on but the project no longer lists (closed and filtered out, or
+// belonging to a group this token cannot see) is kept as an option, so opening the dialog
+// and saving something else does not quietly clear it.
+function forgeMilestoneSelectHtml(id, all, currentId, currentTitle, error) {
+  const rows = (all || []).slice();
+  if (currentId && !rows.some(m => String(m.id) === String(currentId))) {
+    rows.unshift({ id: currentId, title: currentTitle || `#${currentId}`, state: 'open', dueOn: '' });
+  }
+  if (!rows.length) {
+    return `<p class="modal-text text-muted">${escapeHtml(error ||
+      'This project has no milestones yet. They are created on the forge, not here.')}</p>`;
+  }
+  return `<select class="modal-input" id="${id}">
+    <option value=""${currentId ? '' : ' selected'}>— none —</option>
+    ${rows.map(m => `<option value="${forgeAttr(String(m.id))}"${String(m.id) === String(currentId) ? ' selected' : ''}>${
+      escapeHtml(m.title)}${m.state === 'closed' ? ' (closed)' : ''}${m.dueOn ? ' · due ' + escapeHtml(m.dueOn) : ''}</option>`).join('')}
+  </select>`;
+}
+
+function forgeSameSet(a, b) {
+  return a.length === b.length && a.every(v => b.includes(v));
 }
 
 // Tick what it should have. The set is replaced wholesale, which is what the dialog shows,
@@ -950,7 +1264,7 @@ function forgeLabelPickerHtml(rows, chosen) {
     <input class="modal-input" id="forge-label-filter" placeholder="Filter labels…" autocomplete="off" />
     <div class="forge-label-picker">
       ${rows.map(l => `
-        <label class="forge-label-row" data-label-name="${forgeAttr(l.name)}">
+        <label class="forge-label-row" data-pick-text="${forgeAttr(l.name.toLowerCase())}">
           <input type="checkbox" value="${forgeAttr(l.name)}"${chosen.has(l.name) ? ' checked' : ''} />
           ${forgeLabelChipHtml(l)}
           ${l.description ? `<span class="forge-label-desc">${escapeHtml(l.description)}</span>` : ''}
@@ -959,14 +1273,20 @@ function forgeLabelPickerHtml(rows, chosen) {
     <p class="modal-text text-muted">New labels are created on ${escapeHtml(host)}, not here.</p>`;
 }
 
-// Filtering hides rows rather than redrawing the list, so a tick survives typing in the box.
 function forgeWireLabelPicker(body) {
-  const filter = body.querySelector('#forge-label-filter');
+  forgeWirePicker(body, 'forge-label-filter', '.forge-label-row');
+}
+
+// Filtering hides rows rather than redrawing the list, so a tick survives typing in the box.
+// Shared by the label and people pickers: the matched text is put on the row up front
+// (data-pick-text) so this never has to know what kind of thing it is filtering.
+function forgeWirePicker(body, filterId, rowSelector) {
+  const filter = body.querySelector('#' + filterId);
   if (!filter) return;
   filter.addEventListener('input', () => {
     const q = filter.value.trim().toLowerCase();
-    for (const row of body.querySelectorAll('.forge-label-row')) {
-      row.style.display = !q || row.dataset.labelName.toLowerCase().includes(q) ? '' : 'none';
+    for (const row of body.querySelectorAll(rowSelector)) {
+      row.style.display = !q || (row.dataset.pickText || '').includes(q) ? '' : 'none';
     }
   });
 }
@@ -1214,11 +1534,14 @@ document.addEventListener('click', (e) => {
     case 'comment': forgePostComment(); break;
     case 'checkout': forgeCheckoutRequest(); break;
     case 'merge': forgeMergeRequest(); break;
-    case 'close': forgeSetItemState(false); break;
-    case 'reopen': forgeSetItemState(true); break;
+    // Close, reopen and delete are reached from the ⋯ menu, which calls them directly.
+    // The global "click closes any open menu" listener lives in 01-core and so runs before
+    // this one — it hides the menu, then this reopens it. That order is what makes a
+    // left-click trigger work here at all.
+    case 'more': forgeShowMoreMenu(act); break;
     case 'labels': forgeEditLabels(); break;
+    case 'props': forgeEditProperties(); break;
     case 'edit': forgeEditItem(); break;
-    case 'delete': forgeDeleteIssue(); break;
   }
 });
 
@@ -1520,10 +1843,14 @@ async function showCreateIssueDialog() {
   if (!info.hasToken) { goToTab('forge'); await refreshForge(); showToast('Connect a token first', 'error'); return; }
   forgeState.info = info;
 
-  // Labels are a convenience here, not a requirement: a project whose labels cannot be read
-  // still gets a dialog that opens an issue, just without the picker.
-  const lr = await withLoading('Reading labels', () => gs.forgeLabels({}));
+  // None of this is a requirement: a project whose labels or members cannot be read still
+  // gets a dialog that opens an issue, just with fewer pickers in it. Both are fetched
+  // together because they are two reads of the same project and the dialog waits for both.
+  const [lr, mr] = await withLoading('Reading the project',
+    () => Promise.all([gs.forgeLabels({}), gs.forgeIssueMeta({ kind: 'issue' })]));
   const rows = (lr && lr.ok && lr.data) || [];
+  const meta = (mr && mr.ok && mr.data) || {};
+  const f = meta.features || {};
   const chosen = new Set();
 
   const body = document.createElement('div');
@@ -1539,8 +1866,31 @@ async function showCreateIssueDialog() {
     <div class="modal-field">
       <label>Labels (optional)</label>
       ${forgeLabelPickerHtml(rows, chosen)}
-    </div>`;
+    </div>
+    <div class="modal-field">
+      <label>Assignees (optional)</label>
+      ${forgeUserPickerHtml('issue-assignee', forgeUserRows(meta.assignees, []), [], meta.assigneesError)}
+    </div>
+    <div class="modal-field">
+      <label>Milestone (optional)</label>
+      ${forgeMilestoneSelectHtml('issue-milestone', meta.milestones, '', '', meta.milestonesError)}
+    </div>
+    ${f.dueDate ? `
+    <div class="modal-field">
+      <label>Due date (optional)</label>
+      <input class="modal-input" type="date" id="issue-due" />
+    </div>` : ''}
+    ${f.issueType ? `
+    <div class="modal-field">
+      <label>Type</label>
+      <select class="modal-input" id="issue-type">
+        ${['issue', 'incident', 'test_case', 'task'].map(t => `<option value="${t}">${t.replace(/_/g, ' ')}</option>`).join('')}
+      </select>
+    </div>` : ''}
+    ${f.confidential ? `
+    <label class="modal-checkbox"><input type="checkbox" id="issue-confidential" /> Confidential — visible only to project members</label>` : ''}`;
   forgeWireLabelPicker(body);
+  forgeWirePicker(body, 'issue-assignee-filter', '#issue-assignee-list .forge-user-row');
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-medieval';
@@ -1555,9 +1905,21 @@ async function showCreateIssueDialog() {
     if (!title) { showToast('A title is required', 'error'); return; }
     const desc = body.querySelector('#issue-body').value;
     const labels = forgeChosenLabels(body);
+    const pick = id => { const el = body.querySelector('#' + id); return el ? el.value : ''; };
+    const opts = {
+      title, body: desc, labels,
+      assignees: forgePickedUsers(body, 'issue-assignee'),
+      milestone: pick('issue-milestone') || null
+    };
+    if (f.dueDate) opts.dueDate = pick('issue-due');
+    if (f.issueType) opts.issueType = pick('issue-type');
+    if (f.confidential) {
+      const c = body.querySelector('#issue-confidential');
+      opts.confidential = !!(c && c.checked);
+    }
     modal.hide();
 
-    const r = await withLoading('Opening the issue', () => gs.forgeCreateIssue({ title, body: desc, labels }));
+    const r = await withLoading('Opening the issue', () => gs.forgeCreateIssue(opts));
     if (!handleResult(r)) return;
     showToast(`Opened #${r.data.number}`, 'success');
     // Into the reader, the same as a new request: the issue has a home in the app now.

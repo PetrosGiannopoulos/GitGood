@@ -5471,6 +5471,10 @@ function normalizeGithubPr(p) {
     updatedAt: p.updated_at,
     comments: p.comments || 0,
     labels: forgeLabels(p.labels),
+    // Both list endpoints carry the assignees, so a row can show who is on a request
+    // without the extra round trip the detail view makes.
+    assignees: forgeLogins(p.assignees),
+    milestone: (p.milestone && p.milestone.title) || '',
     sha: (p.head && p.head.sha) || ''
   };
 }
@@ -5492,6 +5496,8 @@ function normalizeGitlabMr(m, pal) {
     updatedAt: m.updated_at,
     comments: m.user_notes_count || 0,
     labels: forgeLabels(m.labels, pal),
+    assignees: forgeLogins(glAssignees(m)),
+    milestone: (m.milestone && m.milestone.title) || '',
     sha: m.sha || ''
   };
 }
@@ -5530,9 +5536,33 @@ function forgeLabels(raw, palette) {
 // palette are separate functions over one cache. The label *picker* must know why it is
 // empty, so forgeLabelCatalog throws; the colours on a list must never turn a network
 // hiccup into a failed render, so glLabelPalette swallows and hands back grey.
-const forgeLabelCache = new Map();     // "host|project path" -> { at, labels } | { at, failed, message }
+const forgeLabelCache = new Map();     // "host|project path" -> { at, data } | { at, failed, message }
+const forgeMemberCache = new Map();    // same shape — who can be assigned
+const forgeMilestoneCache = new Map(); // same shape — what can be milestoned
 const FORGE_LABEL_TTL = 10 * 60 * 1000;
 const FORGE_LABEL_FAIL_TTL = 60 * 1000;
+
+// The three project catalogues (labels, members, milestones) are the same problem: a list
+// that changes about as often as the project is renamed, consulted far more often than it
+// changes, behind a rate-limited API. One cache shape serves all three — including the
+// short-lived memory of a *failure*, without which a palette consulted on every render
+// would re-attempt the same failing request each time.
+async function forgeCachedCatalog(cache, ctx, fetch) {
+  const key = `${ctx.host}|${ctx.projectPath}`;
+  const hit = cache.get(key);
+  if (hit && (Date.now() - hit.at) < (hit.failed ? FORGE_LABEL_FAIL_TTL : FORGE_LABEL_TTL)) {
+    if (hit.failed) throw new Error(hit.message);
+    return hit.data;
+  }
+  try {
+    const data = await fetch(ctx);
+    cache.set(key, { at: Date.now(), data });
+    return data;
+  } catch (e) {
+    cache.set(key, { at: Date.now(), failed: true, message: e.message });
+    throw e;
+  }
+}
 
 async function forgeFetchLabels(ctx) {
   // include_ancestor_groups defaults to true on GitLab and that default is load-bearing: in
@@ -5553,23 +5583,58 @@ async function forgeFetchLabels(ctx) {
 }
 
 async function forgeLabelCatalog(ctx) {
-  const key = `${ctx.host}|${ctx.projectPath}`;
-  const hit = forgeLabelCache.get(key);
-  if (hit && (Date.now() - hit.at) < (hit.failed ? FORGE_LABEL_FAIL_TTL : FORGE_LABEL_TTL)) {
-    if (hit.failed) throw new Error(hit.message);
-    return hit.labels;
-  }
-  try {
-    const labels = await forgeFetchLabels(ctx);
-    forgeLabelCache.set(key, { at: Date.now(), labels });
-    return labels;
-  } catch (e) {
-    // Remembered briefly, because the palette below is consulted on every list and board
-    // render: without this a project whose labels cannot be read would re-attempt the same
-    // failing request on each one.
-    forgeLabelCache.set(key, { at: Date.now(), failed: true, message: e.message });
-    throw e;
-  }
+  return forgeCachedCatalog(forgeLabelCache, ctx, forgeFetchLabels);
+}
+
+// Who this project will accept as an assignee. Not "everyone with an account": both forges
+// refuse an assignee without access, so the picker offers the people who actually have it.
+//
+// GitHub answers with the repository's assignable users directly. GitLab has no such
+// endpoint — /projects/:id/users is the members list, which is the same set for this
+// purpose and, unlike /members, already includes people who inherit access from a parent
+// group. In any organisation that inherited set is most of the team.
+async function forgeFetchMembers(ctx) {
+  const path = ctx.provider === 'github'
+    ? `/repos/${ghRepo(ctx)}/assignees?per_page=100`
+    : `/projects/${glProject(ctx)}/users?per_page=100`;
+  const res = await forgeRequest(ctx, 'GET', path);
+  return (forgeCheck(res, ctx, 'The list of people who can be assigned') || [])
+    .filter(u => u && (u.login || u.username))
+    .map(u => ({
+      // The id is what GitLab writes with (it takes assignee_ids, never names); GitHub
+      // writes logins and never needs it. Both are carried so one shape serves both.
+      id: u.id,
+      login: u.login || u.username,
+      name: u.name || '',
+      avatar: forgeAvatar(u)
+    }));
+}
+
+async function forgeMemberCatalog(ctx) {
+  return forgeCachedCatalog(forgeMemberCache, ctx, forgeFetchMembers);
+}
+
+// `id` is deliberately whatever that provider wants back when *setting* the milestone:
+// GitHub takes the per-repository number, GitLab the global id — never its iid. Keeping the
+// difference here means nothing downstream has to remember which is which.
+async function forgeFetchMilestones(ctx) {
+  const path = ctx.provider === 'github'
+    ? `/repos/${ghRepo(ctx)}/milestones?state=all&per_page=100`
+    // Ancestors again: in a group, the milestone everyone plans against belongs to the group.
+    : `/projects/${glProject(ctx)}/milestones?per_page=100&include_ancestors=true`;
+  const res = await forgeRequest(ctx, 'GET', path);
+  return (forgeCheck(res, ctx, 'Milestones') || []).filter(m => m && m.title).map(m => ({
+    id: ctx.provider === 'github' ? m.number : m.id,
+    title: m.title,
+    // GitLab calls an open milestone "active"; one word either way for the renderer.
+    state: (m.state === 'closed') ? 'closed' : 'open',
+    dueOn: (m.due_on || m.due_date || '').slice(0, 10),
+    description: m.description || ''
+  }));
+}
+
+async function forgeMilestoneCatalog(ctx) {
+  return forgeCachedCatalog(forgeMilestoneCache, ctx, forgeFetchMilestones);
 }
 
 // GitLab publishes label colours on that endpoint and nowhere else: every issue, merge
@@ -5583,17 +5648,31 @@ async function glLabelPalette(ctx) {
   return new Map(labels.map(l => [l.name, { color: l.color, ink: l.ink }]));
 }
 
-// A token arriving or leaving changes what the labels endpoint will answer — a private
-// project returns nothing at all without one — so the cached labels for that host stop
-// being the truth the moment either happens.
+// A token arriving or leaving changes what these endpoints will answer — a private project
+// returns nothing at all without one — so everything cached for that host stops being the
+// truth the moment either happens.
 function forgeForgetLabels(host) {
-  for (const key of forgeLabelCache.keys()) {
-    if (key.slice(0, key.indexOf('|')) === host) forgeLabelCache.delete(key);
+  for (const cache of [forgeLabelCache, forgeMemberCache, forgeMilestoneCache]) {
+    for (const key of cache.keys()) {
+      if (key.slice(0, key.indexOf('|')) === host) cache.delete(key);
+    }
   }
 }
 
 function forgeLogins(users) {
   return (users || []).map(u => (u && (u.login || u.username)) || '').filter(Boolean);
+}
+
+// The same people, with the parts a face needs. `assignees` stays a list of bare logins
+// because everything that only lists names still reads it; this rides alongside for the
+// places that draw an avatar.
+function forgeUsers(users) {
+  return (users || []).filter(u => u && (u.login || u.username)).map(u => ({
+    id: u.id,
+    login: u.login || u.username,
+    name: u.name || '',
+    avatar: forgeAvatar(u)
+  }));
 }
 
 function forgeAvatar(u) {
@@ -5616,7 +5695,16 @@ function normalizeGithubIssue(i) {
     comments: i.comments || 0,
     labels: forgeLabels(i.labels),
     assignees: forgeLogins(i.assignees),
-    milestone: (i.milestone && i.milestone.title) || ''
+    assigneeUsers: forgeUsers(i.assignees),
+    milestone: (i.milestone && i.milestone.title) || '',
+    // The *number*, which is what PATCHing a milestone takes — not the id GitHub also sends
+    // on the same object, which that endpoint rejects.
+    milestoneId: i.milestone && typeof i.milestone.number === 'number' ? i.milestone.number : null,
+    locked: !!i.locked,
+    lockReason: i.active_lock_reason || '',
+    // "completed" or "not_planned" — the difference between a fixed issue and an abandoned
+    // one, which GitHub draws with a different icon and nothing else records.
+    stateReason: i.state_reason || ''
   };
 }
 
@@ -5635,9 +5723,29 @@ function normalizeGitlabIssue(i, pal) {
     closedAt: i.closed_at || '',
     comments: i.user_notes_count || 0,
     labels: forgeLabels(i.labels, pal),
-    assignees: forgeLogins(i.assignees && i.assignees.length ? i.assignees : (i.assignee ? [i.assignee] : [])),
-    milestone: (i.milestone && i.milestone.title) || ''
+    // A project without the multiple-assignees feature answers with a single `assignee` and
+    // an empty `assignees`, so both are read and one list comes out.
+    assignees: forgeLogins(glAssignees(i)),
+    assigneeUsers: forgeUsers(glAssignees(i)),
+    milestone: (i.milestone && i.milestone.title) || '',
+    milestoneId: i.milestone && typeof i.milestone.id === 'number' ? i.milestone.id : null,
+    dueDate: i.due_date || '',
+    confidential: !!i.confidential,
+    // Weight is a Premium field, and "null" is what both an unlicensed instance and an
+    // unweighted issue look like. The *key* is the difference: GitLab omits it entirely
+    // unless the plan has it, so its presence is the only honest way to know whether
+    // offering the field would do anything.
+    weight: typeof i.weight === 'number' ? i.weight : null,
+    weightSupported: Object.prototype.hasOwnProperty.call(i, 'weight'),
+    locked: !!i.discussion_locked,
+    issueType: i.issue_type || '',
+    timeEstimate: (i.time_stats && i.time_stats.time_estimate) || 0,
+    timeSpent: (i.time_stats && i.time_stats.total_time_spent) || 0
   };
+}
+
+function glAssignees(i) {
+  return i.assignees && i.assignees.length ? i.assignees : (i.assignee ? [i.assignee] : []);
 }
 
 // The list rows carry only what a row shows. The detail view needs the description, the
@@ -5659,8 +5767,13 @@ function normalizeGithubPrDetail(p) {
     commitsCount: p.commits || 0,
     labels: forgeLabels(p.labels),
     assignees: forgeLogins(p.assignees),
+    assigneeUsers: forgeUsers(p.assignees),
     reviewers: forgeLogins(p.requested_reviewers),
+    reviewerUsers: forgeUsers(p.requested_reviewers),
     milestone: (p.milestone && p.milestone.title) || '',
+    milestoneId: p.milestone && typeof p.milestone.number === 'number' ? p.milestone.number : null,
+    locked: !!p.locked,
+    lockReason: p.active_lock_reason || '',
     closedAt: p.closed_at || '',
     mergedAt: p.merged_at || '',
     // A fork's branch is not on this remote, so the "check it out" button has to fetch the
@@ -5686,9 +5799,13 @@ function normalizeGitlabMrDetail(m, pal) {
     changedFiles: parseInt(String(m.changes_count || '0'), 10) || 0,
     commitsCount: 0,
     labels: forgeLabels(m.labels, pal),
-    assignees: forgeLogins(m.assignees && m.assignees.length ? m.assignees : (m.assignee ? [m.assignee] : [])),
+    assignees: forgeLogins(glAssignees(m)),
+    assigneeUsers: forgeUsers(glAssignees(m)),
     reviewers: forgeLogins(m.reviewers),
+    reviewerUsers: forgeUsers(m.reviewers),
     milestone: (m.milestone && m.milestone.title) || '',
+    milestoneId: m.milestone && typeof m.milestone.id === 'number' ? m.milestone.id : null,
+    locked: !!m.discussion_locked,
     closedAt: m.closed_at || '',
     mergedAt: m.merged_at || '',
     conflicts: !!m.has_conflicts,
@@ -5870,10 +5987,18 @@ ipcMain.handle('forge:createIssue', wrap(async (_, opts) => {
     .map(s => String(s == null ? '' : s).trim())
     .filter(Boolean))];
 
+  // The same properties the editor sets, available at the moment the issue is opened —
+  // assigning it afterwards is a second round trip and, more to the point, a second thing
+  // to remember. Absent keys are simply not sent, so the old two-field call still works.
+  const assignees = forgeNames(o.assignees);
+  const milestone = (o.milestone === null || o.milestone === undefined || o.milestone === '')
+    ? null : parseInt(o.milestone, 10);
+
   if (ctx.provider === 'github') {
-    const res = await forgeRequest(ctx, 'POST', `/repos/${ghRepo(ctx)}/issues`, {
-      title, body: o.body || '', labels
-    });
+    const payload = { title, body: o.body || '', labels };
+    if (assignees.length) payload.assignees = assignees;
+    if (milestone !== null) payload.milestone = milestone;
+    const res = await forgeRequest(ctx, 'POST', `/repos/${ghRepo(ctx)}/issues`, payload);
     // A repository with the issue tracker switched off answers 410 Gone, which on its own
     // reads like the repository is missing rather than the feature being off.
     if (res.status === 410) {
@@ -5882,13 +6007,21 @@ ipcMain.handle('forge:createIssue', wrap(async (_, opts) => {
     return normalizeGithubIssue(forgeCheck(res, ctx, 'Issue'));
   }
 
-  const res = await forgeRequest(ctx, 'POST', `/projects/${glProject(ctx)}/issues`, {
+  const payload = {
     title,
     description: o.body || '',
     // Same comma-joined form the label picker uses; a comma is not legal in a GitLab label
     // name, so this can never be ambiguous.
     labels: labels.join(',')
-  });
+  };
+  if (assignees.length) payload.assignee_ids = await glUserIds(ctx, assignees);
+  if (milestone !== null) payload.milestone_id = milestone;
+  if (o.dueDate) payload.due_date = String(o.dueDate);
+  if (o.confidential) payload.confidential = true;
+  if (o.weight !== null && o.weight !== undefined && o.weight !== '') payload.weight = parseInt(o.weight, 10);
+  if (o.issueType) payload.issue_type = String(o.issueType);
+
+  const res = await forgeRequest(ctx, 'POST', `/projects/${glProject(ctx)}/issues`, payload);
   return normalizeGitlabIssue(forgeCheck(res, ctx, 'Issue'), await glLabelPalette(ctx));
 }));
 
@@ -6301,6 +6434,217 @@ ipcMain.handle('forge:setLabels', wrap(async (_, opts) => {
   const j = forgeCheck(res, ctx, `Labels on #${n}`);
   return { labels: forgeLabels((j && j.labels) || [], await glLabelPalette(ctx)) };
 }));
+
+// ---- properties: assignees, milestone, and everything else the item carries ------------
+//
+// Labels have their own handler above because they have their own picker and their own
+// endpoint on GitHub. Everything *else* an issue carries is one dialog and, wherever the
+// provider allows it, one request — so it is one handler taking whichever fields were
+// actually changed. A key that is absent is not written; a key present and null clears.
+
+// Which fields exist at all. The renderer draws a form from this rather than branching on
+// the provider itself, which is the same bargain as the rest of the forge: one shape here,
+// one set of controls there.
+function forgeFeatures(ctx, kind) {
+  const isIssue = kind !== 'request';
+  if (ctx.provider === 'github') {
+    return {
+      assignees: true, milestone: true, lock: true, lockReason: true,
+      stateReason: isIssue,          // GitHub records *why* an issue closed; a PR just closes
+      reviewers: !isIssue,
+      dueDate: false, confidential: false, weight: false, issueType: false,
+      // GitHub takes up to ten, and silently drops anyone without access to the repository.
+      multipleAssignees: true, assigneesDropSilently: true
+    };
+  }
+  return {
+    assignees: true, milestone: true, lock: true, lockReason: false,
+    stateReason: false, reviewers: !isIssue,
+    dueDate: isIssue, confidential: isIssue, weight: isIssue, issueType: isIssue,
+    // Multiple assignees are Premium on GitLab. A plan without it keeps the first and
+    // discards the rest, quietly — the dialog says so rather than letting that surprise.
+    multipleAssignees: true, assigneesDropSilently: true
+  };
+}
+
+ipcMain.handle('forge:issueMeta', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'request' ? 'request' : 'issue';
+  const ctx = await forgeCtxFor(o);
+
+  // Neither list is required to open the dialog: a token that cannot read the member list
+  // should still get a working milestone picker, and the other way round. So each failure
+  // is reported into the section it belongs to rather than as one error over the whole form.
+  const [people, stones] = await Promise.all([
+    forgeMemberCatalog(ctx).then(data => ({ data }), e => ({ error: e.message })),
+    forgeMilestoneCatalog(ctx).then(data => ({ data }), e => ({ error: e.message }))
+  ]);
+
+  const byLogin = (a, b) => a.login.toLowerCase().localeCompare(b.login.toLowerCase());
+  // Open milestones first and soonest-due first within them: the one being planned against
+  // is almost always the next one to close, and a closed milestone is here to be recognised
+  // rather than chosen.
+  const byDue = (a, b) => (a.state === b.state)
+    ? (a.dueOn || '9999').localeCompare(b.dueOn || '9999') || a.title.localeCompare(b.title)
+    : (a.state === 'open' ? -1 : 1);
+
+  return {
+    provider: ctx.provider,
+    host: ctx.host,
+    assignees: (people.data || []).slice().sort(byLogin),
+    assigneesError: people.error || '',
+    milestones: (stones.data || []).slice().sort(byDue),
+    milestonesError: stones.error || '',
+    features: forgeFeatures(ctx, kind)
+  };
+}));
+
+// GitLab writes assignees and reviewers as numeric ids and will not take a username, so the
+// names the picker sends have to be resolved. The member catalogue answers for anyone the
+// project can actually assign; the /users lookup is the fallback for a name typed by hand.
+async function glUserIds(ctx, logins) {
+  if (!logins.length) return [];
+  let members = [];
+  try { members = await forgeMemberCatalog(ctx); }
+  catch (e) { /* fall through to the per-name lookup below */ }
+  const known = new Map(members.map(m => [m.login.toLowerCase(), m.id]));
+
+  const ids = [];
+  for (const login of logins) {
+    const hit = known.get(login.toLowerCase());
+    if (hit) { ids.push(hit); continue; }
+    const res = await forgeRequest(ctx, 'GET', `/users?username=${encodeURIComponent(login)}`);
+    const found = (forgeCheck(res, ctx, `The user "${login}"`) || [])[0];
+    if (!found || !found.id) throw new Error(`${ctx.host} has no user called "${login}".`);
+    ids.push(found.id);
+  }
+  return ids;
+}
+
+function forgeHas(o, key) { return Object.prototype.hasOwnProperty.call(o, key); }
+
+function forgeNames(v) {
+  return [...new Set((Array.isArray(v) ? v : [])
+    .map(s => String(s == null ? '' : s).trim())
+    .filter(Boolean))];
+}
+
+ipcMain.handle('forge:setProperties', wrap(async (_, opts) => {
+  const o = opts || {};
+  const kind = o.kind === 'issue' ? 'issue' : 'request';
+  const n = forgeNumber(o);
+  const ctx = await forgeCtxFor(o);
+  if (!readForgeToken(ctx.host)) throw new Error(`Changing this needs a ${ctx.host} token — add one in Settings → Forge.`);
+
+  if (ctx.provider === 'github') {
+    const patch = {};
+    if (forgeHas(o, 'assignees')) patch.assignees = forgeNames(o.assignees);
+    if (forgeHas(o, 'milestone')) {
+      patch.milestone = (o.milestone === null || o.milestone === '') ? null : parseInt(o.milestone, 10);
+    }
+    // Only meaningful on a closed issue: GitHub rejects "completed" on an open one, and
+    // reopening carries its own reason, so this is sent only when there is one to send.
+    if (forgeHas(o, 'stateReason') && o.stateReason) patch.state_reason = String(o.stateReason);
+
+    if (Object.keys(patch).length) {
+      // The *issues* endpoint even for a pull request. A PR is an issue on GitHub and this
+      // is where its assignees and milestone live; the pulls endpoint has no such fields
+      // and quietly ignores them, which reads as a save that did nothing.
+      const res = await forgeRequest(ctx, 'PATCH', `/repos/${ghRepo(ctx)}/issues/${n}`, patch);
+      forgeCheck(res, ctx, `#${n}`);
+    }
+
+    if (forgeHas(o, 'locked')) {
+      const path = `/repos/${ghRepo(ctx)}/issues/${n}/lock`;
+      if (o.locked) {
+        const reason = String(o.lockReason || '');
+        const res = await forgeRequest(ctx, 'PUT', path, reason ? { lock_reason: reason } : {});
+        forgeCheck(res, ctx, `The lock on #${n}`);
+      } else {
+        const res = await forgeRequest(ctx, 'DELETE', path);
+        // Unlocking something that was never locked answers 404. That is the state asked
+        // for, so it is not a failure worth reporting.
+        if (res.status !== 404) forgeCheck(res, ctx, `The lock on #${n}`);
+      }
+    }
+
+    if (forgeHas(o, 'reviewers') && kind === 'request') {
+      await ghSetReviewers(ctx, n, forgeNames(o.reviewers));
+    }
+
+    // Read it back rather than trusting the PATCH's echo: GitHub drops an assignee without
+    // access to the repository without saying so, and the reviewer calls above answer with
+    // their own partial views. What comes back here is what actually stuck.
+    const fresh = await forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/${forgeResource(ctx, kind)}/${n}`);
+    const j = forgeCheck(fresh, ctx, `#${n}`);
+    return kind === 'issue' ? normalizeGithubIssue(j) : normalizeGithubPrDetail(j);
+  }
+
+  // GitLab takes the lot on one PUT, including the lock and the reviewers.
+  const body = {};
+  if (forgeHas(o, 'assignees')) {
+    const ids = await glUserIds(ctx, forgeNames(o.assignees));
+    // [0] is GitLab's "nobody". An empty array is accepted on some versions and ignored on
+    // others, so the documented clear is the one sent.
+    body.assignee_ids = ids.length ? ids : [0];
+  }
+  if (forgeHas(o, 'reviewers') && kind === 'request') {
+    const ids = await glUserIds(ctx, forgeNames(o.reviewers));
+    body.reviewer_ids = ids.length ? ids : [0];
+  }
+  if (forgeHas(o, 'milestone')) {
+    // 0, not null: GitLab's documented way to unassign a milestone.
+    body.milestone_id = (o.milestone === null || o.milestone === '') ? 0 : parseInt(o.milestone, 10);
+  }
+  if (forgeHas(o, 'dueDate')) body.due_date = String(o.dueDate || '');
+  if (forgeHas(o, 'confidential')) body.confidential = !!o.confidential;
+  if (forgeHas(o, 'weight')) {
+    body.weight = (o.weight === null || o.weight === '') ? null : parseInt(o.weight, 10);
+  }
+  if (forgeHas(o, 'locked')) body.discussion_locked = !!o.locked;
+  if (forgeHas(o, 'issueType') && o.issueType && kind === 'issue') body.issue_type = String(o.issueType);
+
+  if (!Object.keys(body).length) {
+    // Nothing to write, but the caller still wants the current shape back.
+    const [res, pal] = await Promise.all([
+      forgeRequest(ctx, 'GET', `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}`),
+      glLabelPalette(ctx)
+    ]);
+    const j = forgeCheck(res, ctx, `#${n}`);
+    return kind === 'issue' ? normalizeGitlabIssue(j, pal) : normalizeGitlabMrDetail(j, pal);
+  }
+
+  const res = await forgeRequest(ctx, 'PUT', `/projects/${glProject(ctx)}/${forgeResource(ctx, kind)}/${n}`, body);
+  const j = forgeCheck(res, ctx, `#${n}`);
+  const pal = await glLabelPalette(ctx);
+  return kind === 'issue' ? normalizeGitlabIssue(j, pal) : normalizeGitlabMrDetail(j, pal);
+}));
+
+// GitHub has no "set the reviewers to this list": there is an add call and a remove call,
+// so the delta has to be worked out here. Reading the current set first is what makes the
+// picker's replace-the-set behaviour (the same as labels) possible at all.
+async function ghSetReviewers(ctx, n, want) {
+  const cur = await forgeRequest(ctx, 'GET', `/repos/${ghRepo(ctx)}/pulls/${n}`);
+  const pr = forgeCheck(cur, ctx, `Pull request #${n}`);
+  const have = forgeLogins(pr.requested_reviewers);
+  const lower = new Set(want.map(s => s.toLowerCase()));
+  const remove = have.filter(l => !lower.has(l.toLowerCase()));
+  const add = want.filter(l => !have.some(h => h.toLowerCase() === l.toLowerCase()));
+
+  if (remove.length) {
+    const res = await forgeRequest(ctx, 'DELETE', `/repos/${ghRepo(ctx)}/pulls/${n}/requested_reviewers`, { reviewers: remove });
+    forgeCheck(res, ctx, `The reviewers on #${n}`);
+  }
+  if (add.length) {
+    const res = await forgeRequest(ctx, 'POST', `/repos/${ghRepo(ctx)}/pulls/${n}/requested_reviewers`, { reviewers: add });
+    // The commonest 422 here is asking the author to review their own request, which
+    // GitHub reports as a validation failure with no field named.
+    if (res.status === 422) {
+      throw new Error(`${ctx.host} refused those reviewers. A request's own author cannot be asked to review it, and a reviewer must have read access to the repository.`);
+    }
+    forgeCheck(res, ctx, `The reviewers on #${n}`);
+  }
+}
 
 ipcMain.handle('forge:merge', wrap(async (_, opts) => {
   const o = opts || {};

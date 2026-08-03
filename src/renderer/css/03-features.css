@@ -2737,6 +2737,61 @@ body.resizing-panes * {
   white-space: nowrap;
 }
 
+/* Two of these can appear in one dialog (assignees and reviewers), so the people lists get
+   a shorter box than the labels one — otherwise the Save button leaves the screen. */
+.forge-picker-short { max-height: 170px; }
+.forge-user-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.forge-user-row:last-child { border-bottom: none; }
+.forge-user-row:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.forge-user-row input { cursor: pointer; flex-shrink: 0; }
+.forge-person-login { color: var(--bone-white); font-size: 12px; }
+
+/* A monogram rather than the forge's avatar: fetching an image would be the renderer's
+   first network call of its own, and every other request in this tab goes through main. */
+.forge-monogram {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--border-strong, var(--border));
+  color: var(--bone-white);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Assignees, milestone and the provider's extras, under the meta line in the reader and
+   inline in a list row. */
+.forge-detail-props {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.forge-prop { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.forge-prop-k {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+  color: var(--text-dim, var(--text-muted));
+}
+.forge-prop-v { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--bone-white); }
+.forge-person { display: inline-flex; align-items: center; gap: 4px; }
+.forge-item-meta .forge-person { color: var(--bone-white); }
+
 /* The tab is a list on the left and a reader on the right. Only the two panes scroll —
    the split itself never does, so the toolbar above stays put. */
 .forge-split {
