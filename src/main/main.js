@@ -7504,18 +7504,19 @@ function soulLooksBinary(buf) {
   return false;
 }
 
-ipcMain.handle('soul:survey', wrap(async (_, opts) => {
-  const deep = !!(opts && opts.deep);
-  const g = ensureGit();
-
-  // --git-path rather than joining ".git" ourselves: in a linked worktree .git is a *file*
-  // and the logs live in the main repository's directory, so the naive path is simply wrong.
+// --git-path rather than joining ".git" ourselves: in a linked worktree .git is a *file*
+// and the logs live in the main repository's directory, so the naive path is simply wrong.
+async function soulReadReflog(g) {
   let logPath = '';
   try { logPath = (await g.raw(['rev-parse', '--git-path', 'logs/HEAD'])).trim(); } catch (e) {}
   const abs = logPath ? path.resolve(currentRepoPath, logPath) : '';
+  try { return abs && fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : ''; } catch (e) { return ''; }
+}
 
-  let text = '';
-  try { text = abs && fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : ''; } catch (e) {}
+ipcMain.handle('soul:survey', wrap(async (_, opts) => {
+  const deep = !!(opts && opts.deep);
+  const g = ensureGit();
+  const text = await soulReadReflog(g);
   // No reflog at all is not the same as nothing to find: a cloned-then-expired repository
   // can still hold dangling objects, so the deep pass runs regardless.
   if (!text && !deep) return { spirits: [], shades: [], relics: [], expiry: await soulExpiry(g), empty: true, deep: false };
@@ -7619,6 +7620,118 @@ ipcMain.handle('soul:survey', wrap(async (_, opts) => {
 
   return { spirits, shades, relics, expiry: await soulExpiry(g), empty: false, deep };
 }));
+
+// ---- one file's soul -------------------------------------------------------------------
+//
+// The graveyard, narrowed to a single path. This is the third lens on a file, beside history
+// and blame, and the one that answers a question neither of those can: *what did this file
+// look like in the commits that are no longer in my history?*
+//
+// So it deliberately shows **only** versions living in unreachable commits. A version that
+// is still reachable is ordinary file history — `12-blame.js` already covers it, and
+// repeating it here would bury the two or three versions that are actually lost.
+//
+// Every candidate commit is resolved in one `cat-file --batch-check` pass using git's
+// `<rev>:<path>` syntax rather than an `ls-tree` per commit, which would be a process per
+// reflog entry. Its output is one line per input line, in order, so results are correlated
+// by position — the found lines do not echo what was asked for. (The cost: a path containing
+// a newline cannot be queried this way at all, since the input is line-delimited.)
+ipcMain.handle('soul:file', wrap(async (_, opts) => {
+  const o = opts || {};
+  const deep = !!o.deep;
+  const filePath = String(o.path || '').trim().replace(/\\/g, '/');
+  if (!filePath) throw new Error('Which file?');
+  const g = ensureGit();
+
+  const entries = parseReflogFile(await soulReadReflog(g));
+  const pool = [];
+  for (const e of entries) {
+    if (!SOUL_NULL.test(e.old)) pool.push(e.old);
+    if (!SOUL_NULL.test(e.now)) pool.push(e.now);
+  }
+
+  const [alive, lost] = await Promise.all([soulBatchCheck(pool), soulUnreachable(pool)]);
+
+  // What happened to each lost commit, newest account winning — the same reasoning as the
+  // survey's shades: the reflog subject is the difference between a hash and a story.
+  const story = new Map();
+  for (const e of entries) {
+    for (const h of [e.old, e.now]) {
+      if (!lost.has(h) || alive.get(h) !== 'commit') continue;
+      const prev = story.get(h);
+      if (!prev || e.at >= prev.at) story.set(h, { at: e.at, message: e.message });
+    }
+  }
+
+  let forgotten = [];
+  if (deep) {
+    const found = await soulFsck();
+    forgotten = found.commits.filter(h => !story.has(h));
+  }
+
+  const commits = [...story.keys()].concat(forgotten);
+  if (!commits.length) return { path: filePath, versions: [], deep, scanned: 0 };
+
+  // Positional correlation: one output line per input line, in order.
+  const probe = await soulBatchPaths(commits.map(h => `${h}:${filePath}`));
+  const info = await soulCommitInfo(commits);
+
+  const seen = new Set();
+  const versions = [];
+  commits.forEach((h, i) => {
+    const hit = probe[i];
+    if (!hit || hit.type !== 'blob') return;           // the file did not exist in that commit
+    // One row per distinct *content*. A path untouched across five dropped commits is one
+    // version, not five identical ones — and the newest commit holding it is the one worth
+    // naming, which is why the list is walked newest-first.
+    if (seen.has(hit.sha)) return;
+    seen.add(hit.sha);
+    const c = info.get(h) || {};
+    const t = story.get(h);
+    versions.push({
+      blob: hit.sha,
+      short: hit.sha.slice(0, 7),
+      size: hit.size,
+      commit: h,
+      commitShort: h.slice(0, 7),
+      subject: c.subject || '',
+      author: c.author || '',
+      at: (t && t.at) || c.at || 0,
+      lastAction: t ? t.message : '',
+      forgotten: !t
+    });
+  });
+
+  versions.sort((a, b) => b.at - a.at);
+  return { path: filePath, versions, deep, scanned: commits.length };
+}));
+
+// `<rev>:<path>` lookups in one pass. Returns an array parallel to the input — a slot is
+// null where git answered "missing", which for this caller means the file simply did not
+// exist in that commit.
+function soulBatchPaths(specs) {
+  if (!specs.length) return Promise.resolve([]);
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const proc = spawn('git', ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], { cwd: currentRepoPath });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString('utf8'); });
+    proc.stderr.on('data', () => {});
+    proc.on('error', () => resolve(specs.map(() => null)));
+    proc.on('close', () => {
+      const lines = out.split('\n').filter(s => s.trim().length);
+      resolve(specs.map((_, i) => {
+        const p = (lines[i] || '').trim().split(/\s+/);
+        // A missing object answers "<what was asked> missing" — two fields, and the second
+        // is never a type, so the shape check rejects it without special-casing the word.
+        if (p.length < 3 || !/^[0-9a-f]{40,64}$/.test(p[0])) return null;
+        return { sha: p[0], type: p[1], size: parseInt(p[2], 10) || 0 };
+      }));
+    });
+    for (const s of specs) proc.stdin.write(s + '\n');
+    proc.stdin.end();
+  });
+}
 
 // A relic has no name and no date — it is content and nothing else, because a blob staged
 // and never committed has no tree above it to name it. So the preview *is* the identity:

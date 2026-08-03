@@ -79,6 +79,7 @@ const api = {
   soulSurvey: (opts) => ipcRenderer.invoke('soul:survey', opts),
   soulResurrect: (opts) => ipcRenderer.invoke('soul:resurrect', opts),
   soulAnchor: (opts) => ipcRenderer.invoke('soul:anchor', opts),
+  soulFile: (opts) => ipcRenderer.invoke('soul:file', opts),
   soulRelic: (opts) => ipcRenderer.invoke('soul:relic', opts),
   soulSaveRelic: (opts) => ipcRenderer.invoke('soul:saveRelic', opts),
 

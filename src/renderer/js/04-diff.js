@@ -1360,6 +1360,9 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y) {
     'sep',
     { label: 'File history…', icon: '⌛', action: () => openFileHistory(focus) },
     { label: 'Blame at this commit…', icon: '⚔', action: () => openBlame(focus, { rev: hash }) },
+    // The third lens on the same file: history shows where it has been, blame who put it
+    // there, and this what it looked like in the commits that are no longer in history.
+    { label: 'Peek at its soul…', icon: '☠', action: () => openSoulOfFile(focus) },
     'sep',
     { label: 'Copy path' + (many ? 's' : ''), icon: '⎘', action: () => {
         navigator.clipboard.writeText(targetPaths.join('\n'));

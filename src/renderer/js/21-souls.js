@@ -302,7 +302,12 @@ function soulBytes(n) {
 // The preview is the whole point: it is how somebody recognises which of their files this
 // was. Binary content is reported as binary rather than rendered as mojibake, which would
 // make a recoverable file look like garbage.
-async function soulViewRelic(sha) {
+//
+// `ctx` carries the two things that differ between a nameless relic and a known file's lost
+// version: where Back goes, and what the save dialog should suggest. A version reached from
+// a file's soul already knows its own path, so saving it offers to put it back where it was.
+async function soulViewRelic(sha, ctx) {
+  const c = ctx || {};
   const r = await withLoading('Reading', () => gs.soulRelic({ sha }));
   if (!r || !r.ok) { showToast((r && r.error) || 'Could not read it.', 'error', 6000); return; }
   const d = r.data;
@@ -310,35 +315,152 @@ async function soulViewRelic(sha) {
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="modal-text">
+      ${c.name ? `<span class="text-mono">${escapeHtml(c.name)}</span> · ` : ''}
       <span class="text-mono">${escapeHtml(sha.slice(0, 7))}</span> · ${escapeHtml(soulBytes(d.size))}
       ${d.binary ? ' · <strong>binary</strong>' : ''}${d.truncated ? ' · showing the first 64 KB' : ''}
     </p>
     ${d.binary
       ? `<p class="modal-text text-muted">This is binary content, so there is nothing readable to show —
          but the bytes are intact. Save it under the name it should have had and it is exactly the
-         file you staged.</p>`
+         file git kept.</p>`
       : `<pre class="soul-preview">${escapeHtml(d.text)}</pre>`}`;
 
   const closeBtn = document.createElement('button');
   closeBtn.className = 'btn-medieval';
   closeBtn.textContent = 'Back';
-  closeBtn.onclick = () => reopenSoulWorld();
+  closeBtn.onclick = () => (c.back ? c.back() : reopenSoulWorld());
 
   const saveBtn = document.createElement('button');
   saveBtn.className = 'btn-medieval primary';
   saveBtn.innerHTML = '<span class="btn-icon">⤓</span> Save As…';
-  saveBtn.onclick = () => soulSaveRelic(sha);
+  saveBtn.onclick = () => soulSaveRelic(sha, c);
 
-  modal.show({ title: '⚱ Relic', body, footer: [closeBtn, saveBtn] });
+  modal.show({ title: c.name ? '⚱ Lost Version' : '⚱ Relic', body, footer: [closeBtn, saveBtn] });
 }
 
-async function soulSaveRelic(sha) {
-  const r = await withLoading('Saving', () => gs.soulSaveRelic({ sha }));
+async function soulSaveRelic(sha, ctx) {
+  const c = ctx || {};
+  const r = await withLoading('Saving', () => gs.soulSaveRelic({ sha, name: c.name || '' }));
   if (!r || !r.ok) { showToast((r && r.error) || 'Could not save it.', 'error', 6000); return; }
-  if (r.data.canceled) { reopenSoulWorld(); return; }
+  if (r.data.canceled) { (c.back ? c.back() : reopenSoulWorld()); return; }
   showToast(`Recovered ${soulBytes(r.data.bytes)} to ${r.data.path}`, 'success', 6000);
   // The file lands in the working tree far more often than not, so the status is now stale.
   await refreshAll();
+}
+
+// ============================================
+// THE SOUL OF ONE FILE
+// ============================================
+// The third lens on a file, beside history and blame, reached from the context menu of a
+// file in a commit. It answers what neither of the others can: what this file looked like in
+// the commits that are no longer in your history.
+//
+// Only lost versions appear. A version still reachable from a branch is ordinary file
+// history — showing it here would bury the two or three that are actually gone.
+
+const soulFileView = { path: '', versions: [], deep: false, scanned: 0, loading: false };
+
+async function openSoulOfFile(filePath, deep) {
+  if (!state.repo) { showToast('Open a repository first', 'error'); return; }
+  if (!filePath) return;
+  soulFileView.path = filePath;
+  soulFileView.loading = true;
+  if (deep) soulFileView.deep = true;
+  renderSoulFileModal();
+
+  const run = () => gs.soulFile({ path: filePath, deep: !!deep });
+  const r = deep ? await withLoading('Communing with the dead', run) : await run();
+
+  soulFileView.loading = false;
+  if (!r || !r.ok) { renderSoulFileBody(r && r.error); return; }
+  soulFileView.versions = r.data.versions || [];
+  soulFileView.deep = soulFileView.deep || !!r.data.deep;
+  soulFileView.scanned = r.data.scanned || 0;
+  renderSoulFileBody();
+}
+
+function renderSoulFileModal() {
+  const base = soulFileView.path.split('/').pop();
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">Versions of <span class="text-mono">${escapeHtml(soulFileView.path)}</span>
+      living in commits nothing can reach any more. Versions still in your history are not shown —
+      those are ordinary <strong>File history</strong>.</p>
+    <div class="soul-body" id="soul-file-body">
+      <div class="empty-state"><span class="loading"></span></div>
+    </div>`;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn-medieval';
+  closeBtn.textContent = 'Close';
+  closeBtn.onclick = () => modal.hide();
+
+  const deeperBtn = document.createElement('button');
+  deeperBtn.className = 'btn-medieval primary';
+  deeperBtn.id = 'soul-file-deeper';
+  deeperBtn.innerHTML = '<span class="btn-icon">☾</span> Commune Deeper';
+  deeperBtn.title = 'Also search the whole object database for commits the reflog has forgotten. ' +
+    'Slow on a large repository.';
+  deeperBtn.onclick = () => openSoulOfFile(soulFileView.path, true);
+
+  modal.show({ title: `☠ Soul of ${base}`, body, footer: [closeBtn, deeperBtn] });
+}
+
+function renderSoulFileBody(error) {
+  const host = document.getElementById('soul-file-body');
+  const deeper = document.getElementById('soul-file-deeper');
+  if (deeper) {
+    deeper.disabled = !!soulFileView.loading;
+    if (soulFileView.deep) deeper.innerHTML = '<span class="btn-icon">☾</span> Commune Again';
+  }
+  if (!host) return;
+
+  if (error) { host.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(error)}</p></div>`; return; }
+  if (soulFileView.loading) { host.innerHTML = '<div class="empty-state"><span class="loading"></span></div>'; return; }
+
+  if (!soulFileView.versions.length) {
+    host.innerHTML = `<div class="empty-state">
+      <div class="empty-icon">☠</div>
+      <p>No lost versions of this file.</p>
+      <p class="text-muted">${soulFileView.scanned
+        ? `Searched ${soulFileView.scanned} unreachable commit${soulFileView.scanned === 1 ? '' : 's'} — none of them held this path.`
+        : 'Nothing in this repository is unreachable, so there is nowhere for a lost version to be.'}</p>
+      ${soulFileView.deep ? '' : '<p class="text-muted"><strong>Commune Deeper</strong> also searches commits the reflog has forgotten.</p>'}
+    </div>`;
+    return;
+  }
+
+  const name = soulFileView.path;
+  host.innerHTML = `<div class="soul-list">${soulFileView.versions.map(v => `
+    <div class="soul-row">
+      <div class="soul-row-main">
+        <span class="soul-icon">⚱</span>
+        <span class="soul-name">${escapeHtml(soulBytes(v.size))}</span>
+        <span class="commit-hash" data-soul-hash="${escapeHtml(v.blob)}" title="Copy the blob hash">${escapeHtml(v.short)}</span>
+        ${v.forgotten ? '<span class="soul-tag-deep" title="Found in the object database — the reflog has no record of this commit">beyond the reflog</span>' : ''}
+      </div>
+      <div class="soul-row-meta">
+        from <span class="text-mono">${escapeHtml(v.commitShort)}</span>
+        ${v.subject ? ' “' + escapeHtml(v.subject) + '”' : ''}
+        ${v.author ? ' · ' + escapeHtml(v.author) : ''}
+        ${v.forgotten
+          ? ''
+          : ' · lost ' + escapeHtml(soulWhen(v.at)) + ' · <span class="soul-reason">' + escapeHtml(v.lastAction || '') + '</span>'}
+      </div>
+      <div class="soul-row-acts">
+        <button class="mini-btn" data-soul-act="fileview" data-soul-sha="${escapeHtml(v.blob)}">👁 View</button>
+        <button class="mini-btn" data-soul-act="filesave" data-soul-sha="${escapeHtml(v.blob)}"
+          title="Save it back — the dialog opens at ${escapeHtml(name)}, so restoring it in place is one confirmation">⤓ Save As…</button>
+        <button class="mini-btn" data-soul-act="resurrect" data-soul-sha="${escapeHtml(v.commit)}"
+          title="Branch at the commit this version came from, recovering it with everything else that commit held">⑂ Branch at ${escapeHtml(v.commitShort)}</button>
+      </div>
+    </div>`).join('')}</div>`;
+}
+
+// Both of these hand the file's own path down, so Back returns to this list rather than the
+// main panel and the save dialog opens where the file used to live.
+function soulFileCtx() {
+  return { name: soulFileView.path, back: () => openSoulOfFile(soulFileView.path) };
 }
 
 function soulWhen(ms) {
@@ -416,6 +538,8 @@ document.addEventListener('click', (e) => {
     case 'anchor': soulAnchor(sha); break;
     case 'view': soulViewRelic(sha); break;
     case 'save': soulSaveRelic(sha); break;
+    case 'fileview': soulViewRelic(sha, soulFileCtx()); break;
+    case 'filesave': soulSaveRelic(sha, soulFileCtx()); break;
   }
 });
 
