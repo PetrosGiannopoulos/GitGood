@@ -1318,8 +1318,32 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
   // which would otherwise overwrite store.scroll before we restore it.
   let initialIdx = 0;
   const savedScroll = (saved && typeof saved.scroll === 'number') ? saved.scroll : 0;
+
+  // Seed the per-commit file filter from the commit list's own query (`opts.fileFilter`), so
+  // the files the commit was matched on surface immediately. This runs on the first look at
+  // a commit and again whenever that query changes — clicking back to a commit under a new
+  // query must not keep showing the previous query's matches. A filter the user typed is
+  // never overwritten: only a value we put there ourselves is replaced, which is what
+  // `seededFrom` records.
+  const seed = opts.fileFilter || '';
+  const ownSeedIntact = !saved || (saved.filter || '') === (saved.seededFrom || '');
+  if (fileSearch && seed !== (store.seededFrom || '') && ownSeedIntact) {
+    fileSearch.value = seed;
+    // If the query matched nothing literally — e.g. a regex with metacharacters the
+    // substring filter can't reproduce — fall back to showing every file rather than an
+    // empty list. An emptied seed (the outer filter was cleared) just clears the box.
+    if (seed && !applyFileFilter()) { fileSearch.value = ''; }
+    applyFileFilter();
+    // Record what was actually left in the box, not what was asked for: after the
+    // no-matches fallback those differ, and storing the asked-for value would make the box
+    // look hand-edited and freeze out every later seed.
+    store.seededFrom = fileSearch.value;
+  } else if (saved && fileSearch && saved.filter) {
+    fileSearch.value = saved.filter;
+    applyFileFilter();
+  }
+
   if (saved) {
-    if (fileSearch && saved.filter) { fileSearch.value = saved.filter; applyFileFilter(); }
     if (saved.checked && saved.checked.length) {
       const checkedSet = new Set(saved.checked);
       panelEl.querySelectorAll('.cfile-check').forEach(cb => {
@@ -1328,14 +1352,6 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
       });
     }
     if (typeof saved.active === 'number' && files[saved.active]) initialIdx = saved.active;
-  } else if (fileSearch && opts.fileFilter) {
-    // First time opening this commit while a diff-content filter is active: seed the
-    // per-commit file filter with the same query so the files that changed it surface
-    // immediately (and persist() will remember it from here on). If the query matched
-    // nothing literally — e.g. it was a regex with metacharacters that the substring
-    // filter can't reproduce — fall back to showing every file rather than an empty list.
-    fileSearch.value = opts.fileFilter;
-    if (!applyFileFilter()) { fileSearch.value = ''; applyFileFilter(); }
   }
 
   // Highlight and render the active file (restored, or the first one by default).

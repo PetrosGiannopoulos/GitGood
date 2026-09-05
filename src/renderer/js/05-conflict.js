@@ -170,6 +170,26 @@ function _renderConflictsSection() {
 
 // Helpers used by the editor (declared at module scope so they don't get rebuilt on each
 // file load).
+// Display caps. A conflicted file that passed the main process's size guard can still be
+// megabytes of text, and every line here becomes a DOM node — the renderer runs out of
+// memory long before the file does. These bound what is *drawn*; the parsed hunks are
+// untouched, so Take Ours / Take Theirs / Save always operate on the whole file.
+const CR_MAX_SIDE_LINES = 400;     // per conflict side, and per resolution preview
+const CR_COMMON_COLLAPSE = 40;     // unchanged runs longer than this fold
+const CR_COMMON_EDGE = 8;          // lines kept visible at each end of a folded run
+const CR_MAX_RENDERED_HUNKS = 400; // conflict hunks given a DOM node
+
+// Render a list of lines as row divs, truncating past `cap` with a count of what was elided.
+function _crLineRows(lines, cls, cap) {
+  const max = cap || CR_MAX_SIDE_LINES;
+  const shown = lines.slice(0, max);
+  let html = shown.map(l => `<div class="${cls}">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
+  if (lines.length > max) {
+    html += `<div class="${cls} cr-line-elided">⋯ ${lines.length - max} more line${lines.length - max === 1 ? '' : 's'} not shown (still included when you pick this side)</div>`;
+  }
+  return html;
+}
+
 function _conflictResolutionLines(hunk, type) {
   if (type === 'ours') return hunk.ours || [];
   if (type === 'theirs') return hunk.theirs || [];
@@ -195,8 +215,12 @@ function _refreshResolverFileList(container, currentPath, onPick) {
     let kindClass = 'both';
     if (f.deletedInOurs && !f.deletedInTheirs) { kindLabel = 'del by us · mod by them'; kindClass = 'del-ours'; }
     else if (f.deletedInTheirs && !f.deletedInOurs) { kindLabel = 'mod by us · del by them'; kindClass = 'del-theirs'; }
-    else if (!f.base && f.ours && f.theirs) { kindLabel = 'both added'; kindClass = 'both-added'; }
+    // The non-text kinds come before "both added": which editor the file opens in is the
+    // more useful thing to know here, and all three of them open the side-picker.
+    else if (f.isLfs) { kindLabel = 'LFS pointer'; kindClass = 'binary'; }
+    else if (f.isLarge) { kindLabel = `too large · ${fmtBytes(f.size || 0)}`; kindClass = 'binary'; }
     else if (f.isBinary) { kindLabel = 'binary'; kindClass = 'binary'; }
+    else if (!f.base && f.ours && f.theirs) { kindLabel = 'both added'; kindClass = 'both-added'; }
     const li = document.createElement('li');
     li.className = 'cr-file-item' + (f.path === currentPath ? ' active' : '');
     li.innerHTML = `
@@ -266,11 +290,18 @@ async function openConflictResolver(initialPath) {
     const conflictEntry = ((state.conflicts && state.conflicts.files) || []).find(f => f.path === filePath);
     const isBinary = !!(conflictEntry && conflictEntry.isBinary);
     const isModDel = !!(conflictEntry && (conflictEntry.deletedInOurs || conflictEntry.deletedInTheirs));
+    // An LFS pointer is text, but resolving it line by line produces an oid that names no
+    // object — a merge of two pointers is a choice between two files, never a blend of them.
+    const isLfs = !!(conflictEntry && conflictEntry.isLfs);
+    // Bigger than the main process will read as text (a merge of LFS-tracked binaries leaves
+    // them in the working tree at full size). Side-pick only.
+    const isLarge = !!(conflictEntry && conflictEntry.isLarge);
 
     editorPaneEl.innerHTML = `<div class="cr-editor-loading">Loading ${escapeHtml(filePath)}…</div>`;
 
-    // Non-text conflicts (binary, modify/delete) → action panel instead of hunk editor.
-    if (isBinary || isModDel) {
+    // Non-text conflicts (binary, LFS pointer, oversized, modify/delete) → action panel
+    // instead of hunk editor.
+    if (isBinary || isModDel || isLfs || isLarge) {
       editorPaneEl.innerHTML = '';
       const panel = document.createElement('div');
       panel.className = 'cr-nontext-panel';
@@ -279,6 +310,10 @@ async function openConflictResolver(initialPath) {
         blurb = `<strong>${escapeHtml(filePath)}</strong> was deleted on your side but modified on the incoming side. Keep the incoming version, or confirm the deletion.`;
       } else if (conflictEntry.deletedInTheirs && !conflictEntry.deletedInOurs) {
         blurb = `<strong>${escapeHtml(filePath)}</strong> was modified on your side but deleted on the incoming side. Keep your modified version, or delete it as the incoming side did.`;
+      } else if (isLfs) {
+        blurb = `<strong>${escapeHtml(filePath)}</strong> is tracked by <strong>Git LFS</strong> and both sides point at a different stored file. Pick one side — merging the pointer line-by-line would produce an object id that names nothing.`;
+      } else if (isLarge) {
+        blurb = `<strong>${escapeHtml(filePath)}</strong> is ${escapeHtml(fmtBytes(conflictEntry.size || 0))} — too large to open in the hunk editor. Pick one side, or edit it in another program and mark it resolved.`;
       } else if (isBinary) {
         blurb = `<strong>${escapeHtml(filePath)}</strong> is a binary file with conflicting versions. Pick one side — it can't be merged line-by-line.`;
       }
@@ -315,7 +350,8 @@ async function openConflictResolver(initialPath) {
           const r = await withLoading('Deleting', () => gs.conflictDeleteFile(filePath));
           if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
         });
-      } else if (isBinary) {
+      } else {
+        // Binary, LFS pointer or oversized — all three resolve the same way: take one side.
         mkBtn('⚔ Use Ours', 'primary', async () => {
           const r = await withLoading('Using ours', () => gs.conflictUseOurs(filePath));
           if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
@@ -324,6 +360,14 @@ async function openConflictResolver(initialPath) {
           const r = await withLoading('Using theirs', () => gs.conflictUseTheirs(filePath));
           if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
         });
+        if (isLarge) {
+          // The file is too big for us to edit, but it is still text — the user may have
+          // fixed it in their own editor and only needs it staged.
+          mkBtn('✓ Mark resolved as-is', '', async () => {
+            const r = await withLoading('Marking resolved', () => gs.conflictMarkResolved(filePath));
+            if (!r.ok) showToast('Failed: ' + r.error, 'error', 6000);
+          });
+        }
       }
       return;
     }
@@ -331,7 +375,30 @@ async function openConflictResolver(initialPath) {
     // Text conflict — parse and render the hunk editor.
     const parsedR = await gs.parseConflictFile(filePath);
     if (!parsedR.ok) {
-      editorPaneEl.innerHTML = `<div class="cr-editor-error">Could not parse ${escapeHtml(filePath)}: ${escapeHtml(parsedR.error)}</div>`;
+      // A dead end here is the worst outcome: the file is conflicted, so the operation
+      // cannot continue until it is resolved somehow. Taking a side never needs the parse.
+      editorPaneEl.innerHTML = `
+        <div class="cr-nontext-panel">
+          <div class="cr-nontext-header">${escapeHtml(filePath)}</div>
+          <p class="cr-nontext-text cr-editor-error">Could not open in the hunk editor: ${escapeHtml(parsedR.error)}</p>
+          <p class="cr-nontext-text">You can still resolve it by taking one side outright.</p>
+          <div class="cr-nontext-actions"></div>
+        </div>`;
+      const errActions = editorPaneEl.querySelector('.cr-nontext-actions');
+      const mkErrBtn = (label, busy, cls, fn) => {
+        const b = document.createElement('button');
+        b.className = 'btn-medieval ' + (cls || '');
+        b.textContent = label;
+        b.onclick = async () => {
+          const r = await withLoading(busy, fn);
+          if (!r.ok) { showToast('Failed: ' + r.error, 'error', 6000); return; }
+          await _afterFileResolved(filePath);
+        };
+        errActions.appendChild(b);
+      };
+      mkErrBtn('⚔ Use Ours', 'Using ours', 'primary', () => gs.conflictUseOurs(filePath));
+      mkErrBtn('⚔ Use Theirs', 'Using theirs', '', () => gs.conflictUseTheirs(filePath));
+      mkErrBtn('✓ Mark resolved as-is', 'Marking resolved', '', () => gs.conflictMarkResolved(filePath));
       return;
     }
     const { hunks, eol } = parsedR.data;
@@ -359,14 +426,34 @@ async function openConflictResolver(initialPath) {
 
     const conflictHunkIndices = [];
 
+    const commonLineHtml = (l) => `<div class="cr-hunk-common-line"><span class="cr-ln"></span><span>${escapeHtml(l) || '&nbsp;'}</span></div>`;
+
     hunks.forEach((h, idx) => {
       if (h.type === 'common') {
         const div = document.createElement('div');
         div.className = 'cr-hunk-common';
-        div.innerHTML = h.lines.map(l => `<div class="cr-hunk-common-line"><span class="cr-ln"></span><span>${escapeHtml(l) || '&nbsp;'}</span></div>`).join('');
+        if (h.lines.length > CR_COMMON_COLLAPSE) {
+          // Most of a conflicted file is untouched context. Drawing all of it is what turns
+          // a large file into a renderer crash, and nobody scrolls it either — so keep the
+          // few lines that frame the neighbouring conflict and fold the rest behind a click.
+          const head = h.lines.slice(0, CR_COMMON_EDGE);
+          const tail = h.lines.slice(-CR_COMMON_EDGE);
+          const hiddenCount = h.lines.length - head.length - tail.length;
+          div.innerHTML = head.map(commonLineHtml).join('')
+            + `<button class="cr-common-expand" type="button">⋯ ${hiddenCount} unchanged lines</button>`
+            + tail.map(commonLineHtml).join('');
+          const expandBtn = div.querySelector('.cr-common-expand');
+          expandBtn.onclick = () => { div.innerHTML = h.lines.map(commonLineHtml).join(''); };
+        } else {
+          div.innerHTML = h.lines.map(commonLineHtml).join('');
+        }
         bodyEl.appendChild(div);
       } else {
         conflictHunkIndices.push(idx);
+        // Past the cap the hunk still counts towards progress and is still written on save;
+        // it just gets no DOM node. All Ours / All Theirs reach it (they check for the node),
+        // which is what the notice below the toolbar tells the user.
+        if (conflictHunkIndices.length > CR_MAX_RENDERED_HUNKS) return;
         const div = document.createElement('div');
         div.className = 'cr-hunk-conflict';
         div.dataset.hunkIdx = idx;
@@ -382,11 +469,11 @@ async function openConflictResolver(initialPath) {
           <div class="cr-sides">
             <div class="cr-side ours">
               <div class="cr-side-header">⚔ Ours · ${escapeHtml(h.oursLabel || 'HEAD')}</div>
-              ${(h.ours || []).map(l => `<div class="cr-side-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('')}
+              ${_crLineRows(h.ours || [], 'cr-side-line')}
             </div>
             <div class="cr-side theirs">
               <div class="cr-side-header">⚔ Theirs · ${escapeHtml(h.theirsLabel || 'incoming')}</div>
-              ${(h.theirs || []).map(l => `<div class="cr-side-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('')}
+              ${_crLineRows(h.theirs || [], 'cr-side-line')}
             </div>
           </div>
           <div class="cr-resolution" data-resolution style="display:none">
@@ -424,7 +511,7 @@ async function openConflictResolver(initialPath) {
               resArea.style.display = 'block';
               const contentDiv = resArea.querySelector('.cr-resolution-content');
               const lines = _conflictResolutionLines(h, pick);
-              contentDiv.innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
+              contentDiv.innerHTML = _crLineRows(lines, 'cr-resolution-line');
             }
             renderProgress();
           };
@@ -432,6 +519,14 @@ async function openConflictResolver(initialPath) {
         bodyEl.appendChild(div);
       }
     });
+
+    // Say so rather than silently drawing a partial file.
+    if (conflictHunkIndices.length > CR_MAX_RENDERED_HUNKS) {
+      const notice = document.createElement('div');
+      notice.className = 'cr-hunk-cap-notice';
+      notice.textContent = `${conflictHunkIndices.length} conflicts in this file — only the first ${CR_MAX_RENDERED_HUNKS} are drawn. “All Ours” and “All Theirs” still apply to every one of them.`;
+      bodyEl.insertBefore(notice, bodyEl.firstChild);
+    }
 
     function renderProgress() {
       const total = conflictHunkIndices.length;
@@ -455,7 +550,7 @@ async function openConflictResolver(initialPath) {
             if (resArea) {
               resArea.style.display = 'block';
               const lines = type === 'ours' ? (hunks[i].ours || []) : (hunks[i].theirs || []);
-              resArea.querySelector('.cr-resolution-content').innerHTML = lines.map(l => `<div class="cr-resolution-line">${escapeHtml(l) || '&nbsp;'}</div>`).join('');
+              resArea.querySelector('.cr-resolution-content').innerHTML = _crLineRows(lines, 'cr-resolution-line');
             }
           }
         }

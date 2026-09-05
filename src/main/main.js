@@ -1721,8 +1721,26 @@ ipcMain.handle('term:kill', () => {
 // CONFLICT RESOLUTION
 // ============================================
 
+// A conflicted file bigger than this is never read into memory as text, never scanned for
+// markers, and never handed to the hunk editor. The number is not about how much text is
+// comfortable to read — it is about survival: a merge that touches hundreds of LFS-backed
+// binaries leaves each of them in the working tree at full size, and reading them all in one
+// pass is how the main process ran out of memory and took the window with it.
+const CONFLICT_TEXT_MAX_BYTES = 5 * 1024 * 1024;
+
+// git-lfs writes this as the first line of every pointer file.
+const LFS_POINTER_PREFIX = 'version https://git-lfs.github.com/spec/v1';
+
+function fmtBytes(n) {
+  if (!(n > 0)) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  const v = n / Math.pow(1024, i);
+  return `${i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
+}
+
 // Detect any in-progress operation (merge, rebase, cherry-pick, revert) and list conflicts.
-// Returns { operation, conflicts: [{ path, indexStatus, workingDir, ours, theirs, base, deletedInOurs, deletedInTheirs, isBinary }] }
+// Returns { operation, conflicts: [{ path, indexStatus, workingDir, ours, theirs, base, deletedInOurs, deletedInTheirs, isBinary, isLfs, isLarge, size }] }
 ipcMain.handle('repo:conflictState', wrap(async () => {
   const g = ensureGit();
 
@@ -1764,22 +1782,40 @@ ipcMain.handle('repo:conflictState', wrap(async () => {
     entry.deletedInOurs = !entry.ours;        // missing stage 2 = deleted in HEAD
     entry.deletedInTheirs = !entry.theirs;    // missing stage 3 = deleted in incoming
 
-    // Check if file currently has conflict markers
+    // Check if file currently has conflict markers.
+    // Only the first 8 KB is ever read up front — that is all the binary heuristic and the
+    // LFS-pointer test need, and it is what keeps a working tree full of conflicted binaries
+    // from being pulled into memory just to draw a file list.
     const fullPath = path.join(currentRepoPath, p);
     let hasMarkers = false;
     let isBinary = false;
+    let isLfs = false;
+    let isLarge = false;
+    let size = 0;
     let resolved = false;
     if (fs.existsSync(fullPath)) {
       try {
-        const buf = fs.readFileSync(fullPath);
-        // Heuristic: any NUL byte = binary
-        for (let i = 0; i < Math.min(buf.length, 8192); i++) {
-          if (buf[i] === 0) { isBinary = true; break; }
+        size = fs.statSync(fullPath).size;
+        const head = Buffer.alloc(Math.min(size, 8192));
+        if (head.length) {
+          const fd = fs.openSync(fullPath, 'r');
+          try { fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
+        }
+        // Heuristic: any NUL byte = binary (git's own rule)
+        for (let i = 0; i < head.length; i++) {
+          if (head[i] === 0) { isBinary = true; break; }
         }
         if (!isBinary) {
-          const text = buf.toString('utf8');
-          hasMarkers = /^<{7} |^={7}$|^>{7} /m.test(text);
-          resolved = !hasMarkers;
+          isLfs = head.toString('utf8', 0, Math.min(head.length, 256)).startsWith(LFS_POINTER_PREFIX);
+          isLarge = size > CONFLICT_TEXT_MAX_BYTES;
+          // Scanning for markers means reading the whole thing, so it only happens for files
+          // small enough that the hunk editor could open them anyway. A large file is left
+          // with hasMarkers/looksResolved false: the renderer offers a side-pick instead.
+          if (!isLarge) {
+            const text = fs.readFileSync(fullPath, 'utf8');
+            hasMarkers = /^<{7} |^={7}$|^>{7} /m.test(text);
+            resolved = !hasMarkers;
+          }
         }
       } catch (e) {}
     } else {
@@ -1788,6 +1824,9 @@ ipcMain.handle('repo:conflictState', wrap(async () => {
     }
     entry.hasMarkers = hasMarkers;
     entry.isBinary = isBinary;
+    entry.isLfs = isLfs;
+    entry.isLarge = isLarge;
+    entry.size = size;
     // "Resolved" means it's no longer in the unmerged index (so it wouldn't be here),
     // but we also flag files that look done (no markers, content exists, both sides have stages)
     entry.looksResolved = resolved;
@@ -2028,6 +2067,13 @@ ipcMain.handle('repo:addToGitignore', wrap(async (_, paths) => {
 ipcMain.handle('repo:parseConflictFile', wrap(async (_, filePath) => {
   const fullPath = path.join(currentRepoPath, filePath);
   if (!fs.existsSync(fullPath)) throw new Error('File not found: ' + filePath);
+  // Refuse before reading rather than after: this is the call the resolver makes on the file
+  // you clicked, and a conflicted LFS binary sitting in the working tree at full size would
+  // otherwise be loaded, decoded as UTF-8 and shipped over IPC as one string.
+  const size = fs.statSync(fullPath).size;
+  if (size > CONFLICT_TEXT_MAX_BYTES) {
+    throw new Error(`${filePath} is ${fmtBytes(size)} — too large to open in the hunk editor.`);
+  }
   const text = fs.readFileSync(fullPath, 'utf8');
   return parseConflictMarkers(text);
 }));

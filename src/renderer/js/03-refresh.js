@@ -733,9 +733,12 @@ function renderHistoryDetail(commit, details) {
       hash: commit.hash,
       diffTruncated: details.diffTruncated,
       diffBytes: details.diffBytes,
-      // While a diff-content filter is active, seed the per-commit file filter with the
-      // same query so the files that actually changed it surface immediately.
-      fileFilter: (state.historyFilterMode === 'content' && (state.historyFilter || '').trim()) || ''
+      // Seed the per-commit file filter with the same query whenever the filter is about
+      // file contents or file names — in both modes the commit is on screen *because* of
+      // particular files, so those are the ones to surface in its file list. Message mode
+      // is deliberately excluded: its query says nothing about which file to look at.
+      fileFilter: ((state.historyFilterMode === 'content' || state.historyFilterMode === 'files' || state.historyFilterMode === 'all')
+        && (state.historyFilter || '').trim()) || ''
     });
   });
 }

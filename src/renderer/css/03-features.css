@@ -834,6 +834,44 @@
   user-select: none;
 }
 
+/* Folded run of unchanged context, and the elision markers on capped line lists.
+   Both exist so a huge conflicted file draws a bounded number of DOM nodes. */
+.cr-common-expand {
+  display: block;
+  width: 100%;
+  margin: 3px 0;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  color: var(--muted-text);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: center;
+  cursor: pointer;
+}
+.cr-common-expand:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.cr-line-elided {
+  color: var(--muted-text);
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.cr-hunk-cap-notice {
+  margin: 6px 14px;
+  padding: 6px 10px;
+  border: 1px dashed var(--crusader-red);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--crusader-red) 8%, transparent);
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: normal;
+}
+
 .cr-hunk-conflict {
   background: color-mix(in srgb, var(--accent) 5%, transparent);
   border-top: 2px solid var(--crusader-red);

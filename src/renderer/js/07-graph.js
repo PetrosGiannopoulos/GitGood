@@ -425,6 +425,27 @@ function highlightSearchTerms(text, re) {
   return escaped.replace(re, '<mark class="graph-match">$1</mark>');
 }
 
+// Bring the selected commit back into view. Used when a filter is cleared: the narrowed
+// graph the user was reading is gone, and the commit they had selected is now somewhere
+// down the full history. Adjusts scrollTop directly rather than calling
+// Element.scrollIntoView, because the rows are virtualized — the target row usually has no
+// DOM node until the scroll itself repaints the window. Returns false when the commit isn't
+// in the current layout (filtered out, or collapsed away), so callers can tell nothing moved.
+function scrollGraphToSelectedCommit() {
+  const hash = state.selectedGraphHash;
+  if (!hash) return false;
+  const container = $('#graph-container');
+  const positions = state.graph && state.graph.positions;
+  if (!container || !positions) return false;
+  const pos = positions.get(hash);
+  if (!pos) return false;
+  // Centre it rather than nudging it to the nearest edge: after a filter clears, the
+  // history around the commit is exactly what the user came back for.
+  const target = pos.row * GRAPH_ROW_H - Math.max(0, (container.clientHeight - GRAPH_ROW_H) / 2);
+  container.scrollTop = Math.max(0, target);
+  return true;
+}
+
 function renderGraph() {
   const container = $('#graph-container');
   if (!container) return;
@@ -1200,9 +1221,12 @@ async function renderGraphDetail(commit) {
       hash: requestedHash,
       diffTruncated: details.diffTruncated,
       diffBytes: details.diffBytes,
-      // While a diff-content filter is active, seed the per-commit file filter with the
-      // same query so the files that actually changed it surface immediately.
-      fileFilter: (state.graphFilterMode === 'content' && (state.graphFilter || '').trim()) || ''
+      // Seed the per-commit file filter with the same query whenever the filter is about
+      // file contents or file names — in both modes the commit is on screen *because* of
+      // particular files, so those are the ones to surface in its file list. Message mode
+      // is deliberately excluded: its query says nothing about which file to look at.
+      fileFilter: ((state.graphFilterMode === 'content' || state.graphFilterMode === 'files' || state.graphFilterMode === 'all')
+        && (state.graphFilter || '').trim()) || ''
     });
   });
 }
@@ -2398,6 +2422,7 @@ function wireGraphTab() {
     graphSearch.value = state.graphFilter || '';
     if (graphMode) graphMode.value = state.graphFilterMode || 'message';
     const applyGraph = async () => {
+      const hadFilter = !!(state.graphFilter || '').trim();
       state.graphFilter = graphSearch.value;
       // If filtering by files, make sure the commit→files map is loaded first; if filtering
       // by diff content, make sure the pickaxe match set for this query is loaded first.
@@ -2411,10 +2436,17 @@ function wireGraphTab() {
         cancelContentSearch();
       }
       relayoutGraph();
+      // Only on the way *out* of a filter: while one is active the selected commit is
+      // already among the few rows on screen, so scrolling would just fight the user.
+      if (hadFilter && !state.graphFilter.trim()) scrollGraphToSelectedCommit();
     };
     graphSearch.oninput = () => { clearTimeout(t); t = setTimeout(applyGraph, 180); };
     graphSearch.onkeydown = (e) => {
-      if (e.key === 'Escape') { graphSearch.value = ''; state.graphFilter = ''; cancelContentSearch(); relayoutGraph(); }
+      if (e.key === 'Escape') {
+        const hadFilter = !!(state.graphFilter || '').trim();
+        graphSearch.value = ''; state.graphFilter = ''; cancelContentSearch(); relayoutGraph();
+        if (hadFilter) scrollGraphToSelectedCommit();
+      }
     };
     if (graphMode) graphMode.onchange = () => {
       state.graphFilterMode = graphMode.value;
