@@ -449,9 +449,11 @@ ipcMain.handle('repo:status', wrap(async () => {
           const [a, b] = out.split(/\s+/).map(n => parseInt(n, 10) || 0);
           ahead = a; behind = b;
         } else {
-          // No corresponding remote ref — every local commit will be pushed.
+          // No corresponding remote ref. A push sends only what the remote lacks, so count
+          // commits no remote-tracking ref already holds — not HEAD's whole history, which
+          // would charge a branch cut from devel with every commit devel already published.
           try {
-            const c = (await g.raw(['rev-list', '--count', 'HEAD'])).trim();
+            const c = (await g.raw(['rev-list', '--count', 'HEAD', '--not', '--remotes'])).trim();
             ahead = parseInt(c, 10) || 0;
           } catch (e) { /* empty branch */ }
           upstreamMissing = true;
@@ -671,7 +673,9 @@ ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
     '--all',
     '--topo-order',
     '--decorate=full',
-    `--pretty=format:%H${SEP}%P${SEP}%D${SEP}%an${SEP}%ae${SEP}%aI${SEP}%s%x1e`,
+    // %b (the description) goes last: it is multi-line, which is safe only because records
+    // end in \x1e rather than a newline.
+    `--pretty=format:%H${SEP}%P${SEP}%D${SEP}%an${SEP}%ae${SEP}%aI${SEP}%s${SEP}%b%x1e`,
     `-n`, String(limit)
   ]);
 
@@ -681,7 +685,7 @@ ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
 
   const lines = raw.split(/\x1e\r?\n?/).map(s => s.trim()).filter(Boolean);
   const commits = lines.map(line => {
-    const [hash, parents, refs, an, ae, date, subject] = line.split(SEP);
+    const [hash, parents, refs, an, ae, date, subject, ...bodyParts] = line.split(SEP);
     return {
       hash,
       parents: (parents || '').split(' ').filter(Boolean),
@@ -689,7 +693,8 @@ ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
       author_name: an || '',
       author_email: ae || '',
       date: date || '',
-      message: subject || ''
+      message: subject || '',
+      body: bodyParts.join(SEP).trim()
     };
   });
 
@@ -1326,7 +1331,15 @@ ipcMain.handle('repo:stashList', wrap(async () => {
     // Extract index from ref like "stash@{0}"
     const m = (ref || '').match(/stash@\{(\d+)\}/);
     const index = m ? parseInt(m[1], 10) : 0;
-    return { index, ref, message: message || '', hash: hash || '', date: date || '' };
+    // git writes the subject as "WIP on <branch>: <sha> <subject>" (plain `git stash`) or
+    // "On <branch>: <message>" (with -m). A ref name cannot contain ':', so the first colon
+    // ends the branch. A stash made on a detached HEAD records "(no branch)".
+    const bm = (message || '').match(/^(?:WIP on|On) ([^:]+): ?([\s\S]*)$/);
+    return {
+      index, ref, message: message || '', hash: hash || '', date: date || '',
+      branch: bm ? bm[1] : null,
+      text: bm ? bm[2] : (message || '')
+    };
   });
   return { all, total: all.length };
 }));

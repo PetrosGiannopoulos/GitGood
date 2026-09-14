@@ -1164,10 +1164,12 @@ async function renderGraphDetail(commit) {
     <div class="detail-section">
       <div class="detail-header">⚜ Deed</div>
       <div class="detail-text">${escapeHtml(commit.message)}</div>
+      ${commit.body ? `<div class="detail-text" style="margin-top:8px;color:var(--text-dim);font-size:13px">${escapeHtml(commit.body)}</div>` : ''}
     </div>
     <div class="detail-section">
       <div class="detail-header">⚔ Author</div>
-      <div class="detail-meta">${escapeHtml(commit.author_name || '')} <span>&lt;${escapeHtml(commit.author_email || '')}&gt;</span></div>
+      <div class="detail-meta">${escapeHtml(commit.author_name || '')}</div>
+      ${commit.author_email ? `<div class="detail-meta"><span>${escapeHtml(displayAuthorEmail(commit.author_email))}</span></div>` : ''}
       <div class="detail-meta"><span>${commit.date ? new Date(commit.date).toLocaleString() : ''}</span></div>
     </div>
     <div class="detail-section">

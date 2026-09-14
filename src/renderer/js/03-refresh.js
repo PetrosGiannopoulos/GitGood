@@ -101,6 +101,9 @@ async function refreshAll() {
     // warnings, so it rides along with every full refresh.
     typeof refreshWorktrees === 'function' ? tap(refreshWorktrees(), 'Counting the outposts…') : Promise.resolve()
   ]);
+  // The stash list is filtered by the current branch, and refreshStashes may have drawn it
+  // before refreshStatus learned which branch that now is — draw it again with both known.
+  renderStashes();
   // NOTE: Disk Management is intentionally NOT recalculated here. Disk scans can be
   // expensive on large repos, so they only run when the user explicitly asks for them
   // (expanding the section the first time, or clicking Refresh). We mark any existing
@@ -469,36 +472,201 @@ function renderBranches() {
   }
 }
 
+// The branch a stash was made on, as parsed from its subject by repo:stashList.
+function stashBranchOf(stash) {
+  return stash.branch || '(unknown)';
+}
+
+// The branch name stashes made right now would record — "(no branch)" is git's own wording
+// for a detached HEAD, so those stashes match it too.
+function currentStashBranch() {
+  const st = state.status;
+  if (!st) return null;
+  return st.detached ? '(no branch)' : (st.current || null);
+}
+
+// What to call a stash in a list. GitHub Desktop names the stashes it makes
+// "!!GitHub_Desktop<branch>" — a marker for its own lookup, not something to read — and the
+// branch is already shown beside it, so say where it came from instead.
+function stashDisplayText(stash) {
+  const text = stash.text || stash.message || stash.hash || 'stash';
+  if (/^!!GitHub_Desktop<.*>$/.test(text)) return 'GitHub Desktop stash';
+  return text;
+}
+
+function stashIndexOf(stash, fallback) {
+  return (typeof stash.index === 'number') ? stash.index : fallback;
+}
+
+function stashContextMenu(e, i) {
+  e.preventDefault();
+  e.stopPropagation();
+  showContextMenu([
+    { label: 'Browse files…', icon: '⚜', action: () => showStashBrowser(i) },
+    'sep',
+    { label: 'Apply (keep stash)', icon: '⌥', action: () => stashApply(i) },
+    { label: 'Pop (apply & remove)', icon: '⌃', action: () => stashPop(i) },
+    'sep',
+    { label: 'Drop', icon: '✗', danger: true, action: () => stashDrop(i) }
+  ], e.pageX, e.pageY);
+}
+
+// The sidebar lists only the current branch's stashes; the rest are one click away in
+// showStashBranchPicker. state.stashes always holds every stash — indices are global.
 function renderStashes() {
   const list = $('#stash-list');
+  if (!list) return;
   list.innerHTML = '';
-  $('#stash-count').textContent = state.stashes.length;
-  if (!state.stashes.length) {
-    list.innerHTML = '<li class="sidebar-empty">No stashes</li>';
-    return;
+  const all = state.stashes || [];
+  const current = currentStashBranch();
+  const mine = all.filter(s => stashBranchOf(s) === current);
+  const others = all.length - mine.length;
+  const countEl = $('#stash-count');
+  countEl.textContent = mine.length;
+  countEl.title = `${mine.length} on this branch · ${all.length} in total`;
+  if (!mine.length) {
+    list.innerHTML = `<li class="sidebar-empty">${all.length ? 'No stashes on this branch' : 'No stashes'}</li>`;
   }
-  state.stashes.forEach((stash, arrayIdx) => {
-    // Use the stash's true index from the backend; fall back to array position
-    const i = (typeof stash.index === 'number') ? stash.index : arrayIdx;
+  mine.forEach((stash) => {
+    const i = stashIndexOf(stash, all.indexOf(stash));
     const li = document.createElement('li');
     li.className = 'sidebar-item stash-item';
-    li.textContent = `[${i}] ${stash.message || stash.hash || 'stash'}`;
-    li.title = 'Click to browse files in this stash';
+    li.textContent = `[${i}] ${stashDisplayText(stash)}`;
+    li.title = `${stash.message}\nClick to browse files in this stash`;
     li.onclick = () => showStashBrowser(i);
-    li.oncontextmenu = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      showContextMenu([
-        { label: 'Browse files…', icon: '⚜', action: () => showStashBrowser(i) },
-        'sep',
-        { label: 'Apply (keep stash)', icon: '⌥', action: () => stashApply(i) },
-        { label: 'Pop (apply & remove)', icon: '⌃', action: () => stashPop(i) },
-        'sep',
-        { label: 'Drop', icon: '✗', danger: true, action: () => stashDrop(i) }
-      ], e.pageX, e.pageY);
-    };
+    li.oncontextmenu = (e) => stashContextMenu(e, i);
     list.appendChild(li);
   });
+  if (others > 0) {
+    const li = document.createElement('li');
+    li.className = 'sidebar-item stash-item';
+    li.style.color = 'var(--text-dim)';
+    li.textContent = `☰ ${others} on other branch${others === 1 ? '' : 'es'}…`;
+    li.title = 'Browse stashes on every branch';
+    li.onclick = () => showStashBranchPicker();
+    list.appendChild(li);
+  }
+}
+
+// Popup: pick a branch (or narrow with the filter) to see the stashes made on it.
+function showStashBranchPicker() {
+  const all = state.stashes || [];
+  const current = currentStashBranch();
+  const localBranches = new Set((state.branches && state.branches.local && state.branches.local.all) || []);
+
+  const counts = new Map();
+  for (const s of all) counts.set(stashBranchOf(s), (counts.get(stashBranchOf(s)) || 0) + 1);
+  // Current branch first, then alphabetical.
+  const names = [...counts.keys()].sort((a, b) =>
+    (b === current) - (a === current) || a.localeCompare(b));
+  let selected = counts.has(current) ? current : null;   // null = every branch
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <input class="modal-input" id="sp-filter" placeholder="Filter branches and stash messages…" style="margin-bottom:10px" />
+    <div style="display:grid;grid-template-columns:minmax(120px,220px) minmax(0,1fr);gap:10px">
+      <div>
+        <span class="branches-label" style="margin:0 0 6px;display:block">⑂ Branches</span>
+        <ul class="file-list" id="sp-branches" style="max-height:360px;overflow-y:auto;border:1px solid var(--border)"></ul>
+      </div>
+      <div>
+        <span class="branches-label" style="margin:0 0 6px;display:block" id="sp-stash-label">⚿ Stashes</span>
+        <ul class="file-list" id="sp-stashes" style="max-height:360px;overflow-y:auto;border:1px solid var(--border)"></ul>
+      </div>
+    </div>
+  `;
+  const filterInput = body.querySelector('#sp-filter');
+  const branchUl = body.querySelector('#sp-branches');
+  const stashUl = body.querySelector('#sp-stashes');
+  const stashLabel = body.querySelector('#sp-stash-label');
+
+  const row = (text, extraText) => {
+    const li = document.createElement('li');
+    li.className = 'file-item';
+    // .file-item is a 4-column grid (checkbox, status, path, actions); these rows have
+    // only the last two.
+    li.style.gridTemplateColumns = 'minmax(0,1fr) auto';
+    const path = document.createElement('div');
+    path.className = 'file-path';
+    // .file-path is direction:rtl so long file paths elide at the start; for this text that
+    // would reorder punctuation ("[0] !!x<y>" draws as "<x<y!! [0]").
+    path.style.direction = 'ltr';
+    path.textContent = text;
+    li.appendChild(path);
+    if (extraText) {
+      const extra = document.createElement('div');
+      extra.className = 'file-actions';
+      extra.style.cssText = 'font-size:11px;color:var(--text-dim);font-family:var(--font-mono);white-space:nowrap';
+      extra.textContent = extraText;
+      li.appendChild(extra);
+    }
+    return li;
+  };
+  const empty = (text) => {
+    const li = document.createElement('li');
+    li.className = 'sidebar-empty';
+    li.textContent = text;
+    return li;
+  };
+
+  function render() {
+    // Every space-separated term must appear — the same idiom as the branch and path filters.
+    const terms = filterInput.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const hit = (str) => terms.every(t => str.toLowerCase().includes(t));
+    const stashHit = (s) => hit(`${stashBranchOf(s)} ${s.message}`);
+    const matching = all.filter(stashHit);
+
+    branchUl.innerHTML = '';
+    const addBranch = (name, label, n, tag) => {
+      const li = row(label, tag ? `${tag} · ${n}` : String(n));
+      if (name === selected) li.classList.add('selected');
+      li.onclick = () => { selected = name; render(); };
+      branchUl.appendChild(li);
+    };
+    addBranch(null, 'All branches', matching.length);
+    names
+      .filter(n => hit(n) || matching.some(s => stashBranchOf(s) === n))
+      .forEach(n => {
+        const n2 = matching.filter(s => stashBranchOf(s) === n).length;
+        const tag = n === current ? 'current'
+          : (!localBranches.has(n) && !n.startsWith('(')) ? 'deleted' : '';
+        // A branch that matched by name shows all its stashes' count even if none match.
+        addBranch(n, n, hit(n) && !n2 ? counts.get(n) : n2, tag);
+      });
+
+    const onBranch = (s) => selected === null || stashBranchOf(s) === selected;
+    // Picking a branch by name shows all its stashes; the filter narrows only when it
+    // isn't simply the branch name that matched.
+    const shown = all.filter(s => onBranch(s) && (stashHit(s) || (selected !== null && hit(selected))));
+    stashLabel.textContent = `⚿ Stashes${selected === null ? '' : ` on ${selected}`} (${shown.length})`;
+    stashUl.innerHTML = '';
+    if (!all.length) stashUl.appendChild(empty('No stashes in this repository'));
+    else if (!shown.length) stashUl.appendChild(empty('No matching stashes'));
+    shown.forEach(s => {
+      const i = stashIndexOf(s, all.indexOf(s));
+      const when = s.date ? new Date(s.date).toLocaleDateString() : '';
+      const li = row(`[${i}] ${stashDisplayText(s)}`,
+        selected === null ? `${stashBranchOf(s)}${when ? ' · ' + when : ''}` : when);
+      li.title = `${s.message}\nClick to browse files · right-click for actions`;
+      li.onclick = () => showStashBrowser(i);
+      li.oncontextmenu = (e) => stashContextMenu(e, i);
+      stashUl.appendChild(li);
+    });
+  }
+
+  filterInput.oninput = render;
+  render();
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn-medieval';
+  closeBtn.textContent = 'Close';
+  closeBtn.onclick = () => modal.hide();
+  modal.show({ title: 'Stashes by Branch', body, footer: [closeBtn] });
+}
+
+{
+  const btn = $('#stash-browse-btn');
+  if (btn) btn.onclick = (e) => { e.stopPropagation(); showStashBranchPicker(); };
 }
 
 function renderRemotes() {
@@ -672,6 +840,12 @@ async function selectCommit(commit, evt) {
   }
 }
 
+// GitHub's private-email address is "<id>+<login>@users.noreply.github.com"; the numeric
+// id means nothing to a reader, so show "<login>@users.noreply.github.com" instead.
+function displayAuthorEmail(email) {
+  return (email || '').replace(/^\d+\+(?=[^@]+@users\.noreply\.github\.com$)/i, '');
+}
+
 function renderHistoryDetail(commit, details) {
   // Remember the diff data (keyed by hash) so the unified/split toggle can re-render
   // without refetching.
@@ -695,7 +869,8 @@ function renderHistoryDetail(commit, details) {
     </div>
     <div class="detail-section">
       <div class="detail-header">⚔ Author</div>
-      <div class="detail-meta">${escapeHtml(commit.author_name || 'unknown')} <span>&lt;${escapeHtml(commit.author_email || '')}&gt;</span></div>
+      <div class="detail-meta">${escapeHtml(commit.author_name || 'unknown')}</div>
+      ${commit.author_email ? `<div class="detail-meta"><span>${escapeHtml(displayAuthorEmail(commit.author_email))}</span></div>` : ''}
       <div class="detail-meta"><span>${new Date(commit.date).toLocaleString()}</span></div>
     </div>
     <div class="detail-section">
