@@ -738,6 +738,67 @@ function wsArgs(opts) {
   return (opts && opts.ignoreWhitespace) ? ['-w'] : [];
 }
 
+// ---- Passing a large list of paths to git -------------------------------------------
+// Windows caps a process command line at 32767 characters, and Node reports the overflow
+// as a spawn error (ENAMETOOLONG) *before* git runs — so the operation fails with nothing
+// done, and the message names no file. A Unity-shaped repo hits the cap at around 150
+// files, because one asset path is easily 200 characters, which makes "select all →
+// discard" a realistic way to reach it. Every handler that hands git a user-sized list of
+// paths therefore goes through one of the two helpers below.
+//
+// The budget is the room the paths themselves may take, kept well under the real cap to
+// leave space for git's own executable path, the subcommand, its flags, and the quoting
+// Windows adds around each argument.
+const PATHSPEC_BUDGET = 24000;
+
+function chunkPaths(paths, budget = PATHSPEC_BUDGET) {
+  const chunks = [];
+  let current = [];
+  let size = 0;
+  for (const p of paths) {
+    const cost = String(p).length + 3; // separator + the quotes Windows may add
+    if (current.length && size + cost > budget) {
+      chunks.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(p);
+    size += cost;
+  }
+  if (current.length) chunks.push(current);
+  // A single path longer than the entire budget still gets its own chunk: git handles a
+  // path far longer than this, and refusing it here would fail a file that would work.
+  return chunks;
+}
+
+function pathspecFits(paths) {
+  return chunkPaths(paths).length <= 1;
+}
+
+// Run an operation once per chunk. Only for commands where several passes are equivalent
+// to one: stage, unstage, checkout -- <paths>, add -N. NOT for commit or stash push,
+// where N invocations would mean N commits or N stash entries — those use
+// withPathspecFile instead.
+async function forEachPathChunk(paths, fn) {
+  for (const chunk of chunkPaths(paths)) await fn(chunk);
+}
+
+// Hand git the paths in a file instead of on the command line, so an operation that must
+// stay a *single* invocation has no length limit at all. NUL-separated, so nothing needs
+// escaping and even a path containing a newline survives. Callers reach for this only
+// once the list would actually overflow (see pathspecFits), which keeps the ordinary case
+// on plain argv — `--pathspec-from-file` needs git 2.25+ (2.26 for stash), and there is no
+// reason to require that of a user committing five files.
+async function withPathspecFile(paths, fn) {
+  const file = path.join(os.tmpdir(), `gitgood-pathspec-${process.pid}-${Date.now()}.nul`);
+  fs.writeFileSync(file, paths.map(String).join('\0') + '\0');
+  try {
+    return await fn([`--pathspec-from-file=${file}`, '--pathspec-file-nul']);
+  } finally {
+    try { fs.unlinkSync(file); } catch (e) { /* already gone */ }
+  }
+}
+
 ipcMain.handle('repo:diff', wrap(async (_, filePath, opts) => {
   const g = ensureGit();
   const ws = wsArgs(opts);
@@ -761,7 +822,7 @@ ipcMain.handle('repo:diffStaged', wrap(async (_, filePath, opts) => {
 ipcMain.handle('repo:stage', wrap(async (_, files) => {
   const g = ensureGit();
   const fileList = Array.isArray(files) ? files : [files];
-  await g.add(fileList);
+  await forEachPathChunk(fileList, chunk => g.add(chunk));
   return true;
 }));
 
@@ -774,7 +835,7 @@ ipcMain.handle('repo:stageAll', wrap(async () => {
 ipcMain.handle('repo:unstage', wrap(async (_, files) => {
   const g = ensureGit();
   const fileList = Array.isArray(files) ? files : [files];
-  await g.reset(['HEAD', '--', ...fileList]);
+  await forEachPathChunk(fileList, chunk => g.reset(['HEAD', '--', ...chunk]));
   return true;
 }));
 
@@ -830,7 +891,7 @@ ipcMain.handle('repo:discard', wrap(async (_, files) => {
   const trackedSubs = tracked.filter(f => subSet.has(f));
   const trackedPlain = tracked.filter(f => !subSet.has(f));
   if (trackedPlain.length) {
-    await g.checkout(['--', ...trackedPlain]);
+    await forEachPathChunk(trackedPlain, chunk => g.checkout(['--', ...chunk]));
   }
   for (const sp of trackedSubs) {
     await g.checkout(['--', sp]);
@@ -866,7 +927,7 @@ ipcMain.handle('repo:restoreFromCommit', wrap(async (_, { hash, files }) => {
   const g = ensureGit();
   const fileList = (Array.isArray(files) ? files : [files]).filter(Boolean);
   if (!hash || !fileList.length) throw new Error('Nothing to restore');
-  await g.checkout([hash, '--', ...fileList]);
+  await forEachPathChunk(fileList, chunk => g.checkout([hash, '--', ...chunk]));
   return { restored: fileList.length };
 }));
 
@@ -899,10 +960,15 @@ ipcMain.handle('repo:commitPaths', wrap(async (_, { message, paths }) => {
   const g = ensureGit();
   if (!message || !message.trim()) throw new Error('Commit message required');
   if (!Array.isArray(paths) || !paths.length) throw new Error('No files selected to commit');
-  await g.add(paths);
-  // Restrict the commit to exactly these paths.
-  const result = await g.commit(message, paths);
-  return result;
+  await forEachPathChunk(paths, chunk => g.add(chunk));
+  // Restrict the commit to exactly these paths. This has to stay one invocation — chunking
+  // it would produce one commit per chunk — so an oversized list goes in a pathspec file
+  // rather than on the command line. The caller only checks `ok`, so the two paths
+  // returning different shapes (simple-git's commit summary vs raw output) is harmless.
+  if (pathspecFits(paths)) {
+    return await g.commit(message, paths);
+  }
+  return await withPathspecFile(paths, flags => g.raw(['commit', '-m', message, ...flags]));
 }));
 
 ipcMain.handle('repo:push', wrap(async (_, opts) => {
@@ -1307,6 +1373,12 @@ ipcMain.handle('repo:stash', wrap(async (_, opts) => {
   if (includeUntracked) args.push('-u');
   if (keepIndex) args.push('--keep-index');
   if (message) args.push('-m', message);
+  // One stash push must stay one invocation, or a chunked list would become several stash
+  // entries — so an oversized selection is passed in a pathspec file instead.
+  if (paths && paths.length && !pathspecFits(paths)) {
+    await withPathspecFile(paths, flags => g.stash([...args, ...flags]));
+    return true;
+  }
   if (paths && paths.length) {
     args.push('--');
     args.push(...paths);
@@ -1407,14 +1479,14 @@ ipcMain.handle('repo:stashApplyFiles', wrap(async (_, { index, paths, drop }) =>
   const untrackedPaths = paths.filter(p => untrackedSet.has(p));
 
   if (trackedPaths.length) {
-    await g.raw(['checkout', stashRef, '--', ...trackedPaths]);
+    await forEachPathChunk(trackedPaths, chunk => g.raw(['checkout', stashRef, '--', ...chunk]));
     // Unstage
-    try { await g.raw(['reset', 'HEAD', '--', ...trackedPaths]); } catch (e) { /* nothing to reset */ }
+    try { await forEachPathChunk(trackedPaths, chunk => g.raw(['reset', 'HEAD', '--', ...chunk])); } catch (e) { /* nothing to reset */ }
   }
   if (untrackedPaths.length) {
-    await g.raw(['checkout', `${stashRef}^3`, '--', ...untrackedPaths]);
+    await forEachPathChunk(untrackedPaths, chunk => g.raw(['checkout', `${stashRef}^3`, '--', ...chunk]));
     // Untracked files end up staged — unstage them by removing from index (keeps file)
-    try { await g.raw(['reset', 'HEAD', '--', ...untrackedPaths]); } catch (e) { /* okay */ }
+    try { await forEachPathChunk(untrackedPaths, chunk => g.raw(['reset', 'HEAD', '--', ...chunk])); } catch (e) { /* okay */ }
   }
 
   if (drop) {
@@ -3572,7 +3644,7 @@ ipcMain.handle('repo:intentToAdd', wrap(async (_, files) => {
   const g = ensureGit();
   const list = Array.isArray(files) ? files : [files];
   if (!list.length) return { added: 0 };
-  await g.raw(['add', '-N', '--', ...list]);
+  await forEachPathChunk(list, chunk => g.raw(['add', '-N', '--', ...chunk]));
   return { added: list.length };
 }));
 
