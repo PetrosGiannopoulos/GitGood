@@ -4,6 +4,13 @@ const fs = require('fs');
 const os = require('os');
 const simpleGit = require('simple-git');
 
+// Pure helpers live in ./lib so they can be unit-tested without Electron (`npm test`).
+// Everything here keeps its original name, so call sites read exactly as they did.
+const { pathspecFits, forEachPathChunk, withPathspecFile } = require('./lib/pathspec');
+const { parsePushPorcelain } = require('./lib/push-porcelain');
+const { parseWorktreeList } = require('./lib/worktree-list');
+const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
+
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
 
@@ -239,6 +246,22 @@ function wrap(fn) {
         // cause is a passphrase prompt with nowhere to appear — see signingErrorHelp.
         const help = typeof signingErrorHelp === 'function' ? signingErrorHelp(msg) : '';
         msg = 'The commit could not be signed.\n\n' + (help ? help + '\n\n' : '') + 'Original error: ' + msg;
+      } else if (/spawn[^\n]*ENOENT/i.test(msg)) {
+        // Node could not start the process at all. Matched on the message rather than
+        // err.code because simple-git rethrows as a GitError whose `code` is undefined —
+        // the errno survives only in the text. "spawn" is what separates this from git
+        // itself reporting a missing file, which never uses that word.
+        msg = 'Git could not be started — it is either not installed or not on your PATH.\n'
+            + '• Check with `git --version` in a terminal.\n'
+            + '• Install it from https://git-scm.com/downloads, then restart GitGood.\n\nOriginal error: ' + msg;
+      } else if (/spawn[^\n]*ENAMETOOLONG/i.test(msg)) {
+        // The command line passed the OS limit (32767 characters on Windows) before git
+        // ran, so nothing happened. Handlers that take a path list route it through
+        // forEachPathChunk/withPathspecFile to prevent this; reaching here means either a
+        // handler that does not, or one single path of extraordinary length.
+        msg = 'That operation needed a longer command line than the system allows, so Git '
+            + 'was never run and nothing was changed. Selecting fewer files at once will '
+            + 'work around it.\n\nOriginal error: ' + msg;
       }
       return { ok: false, error: msg };
     }
@@ -738,66 +761,8 @@ function wsArgs(opts) {
   return (opts && opts.ignoreWhitespace) ? ['-w'] : [];
 }
 
-// ---- Passing a large list of paths to git -------------------------------------------
-// Windows caps a process command line at 32767 characters, and Node reports the overflow
-// as a spawn error (ENAMETOOLONG) *before* git runs — so the operation fails with nothing
-// done, and the message names no file. A Unity-shaped repo hits the cap at around 150
-// files, because one asset path is easily 200 characters, which makes "select all →
-// discard" a realistic way to reach it. Every handler that hands git a user-sized list of
-// paths therefore goes through one of the two helpers below.
-//
-// The budget is the room the paths themselves may take, kept well under the real cap to
-// leave space for git's own executable path, the subcommand, its flags, and the quoting
-// Windows adds around each argument.
-const PATHSPEC_BUDGET = 24000;
-
-function chunkPaths(paths, budget = PATHSPEC_BUDGET) {
-  const chunks = [];
-  let current = [];
-  let size = 0;
-  for (const p of paths) {
-    const cost = String(p).length + 3; // separator + the quotes Windows may add
-    if (current.length && size + cost > budget) {
-      chunks.push(current);
-      current = [];
-      size = 0;
-    }
-    current.push(p);
-    size += cost;
-  }
-  if (current.length) chunks.push(current);
-  // A single path longer than the entire budget still gets its own chunk: git handles a
-  // path far longer than this, and refusing it here would fail a file that would work.
-  return chunks;
-}
-
-function pathspecFits(paths) {
-  return chunkPaths(paths).length <= 1;
-}
-
-// Run an operation once per chunk. Only for commands where several passes are equivalent
-// to one: stage, unstage, checkout -- <paths>, add -N. NOT for commit or stash push,
-// where N invocations would mean N commits or N stash entries — those use
-// withPathspecFile instead.
-async function forEachPathChunk(paths, fn) {
-  for (const chunk of chunkPaths(paths)) await fn(chunk);
-}
-
-// Hand git the paths in a file instead of on the command line, so an operation that must
-// stay a *single* invocation has no length limit at all. NUL-separated, so nothing needs
-// escaping and even a path containing a newline survives. Callers reach for this only
-// once the list would actually overflow (see pathspecFits), which keeps the ordinary case
-// on plain argv — `--pathspec-from-file` needs git 2.25+ (2.26 for stash), and there is no
-// reason to require that of a user committing five files.
-async function withPathspecFile(paths, fn) {
-  const file = path.join(os.tmpdir(), `gitgood-pathspec-${process.pid}-${Date.now()}.nul`);
-  fs.writeFileSync(file, paths.map(String).join('\0') + '\0');
-  try {
-    return await fn([`--pathspec-from-file=${file}`, '--pathspec-file-nul']);
-  } finally {
-    try { fs.unlinkSync(file); } catch (e) { /* already gone */ }
-  }
-}
+// Large path lists go through forEachPathChunk / withPathspecFile — see ./lib/pathspec.js
+// for why (the Windows command-line cap) and which commands may use which.
 
 ipcMain.handle('repo:diff', wrap(async (_, filePath, opts) => {
   const g = ensureGit();
@@ -4680,28 +4645,7 @@ async function defaultRemoteName(explicit) {
   return (remotes.find(r => r.name === 'origin') || remotes[0]).name;
 }
 
-// One line per ref: "<flag>\t<from>:<to>\t<summary>". The flag is the interesting part:
-//   ' ' fast-forward   '+' forced   '-' deleted   '*' new   '=' up to date   '!' rejected
-const PUSH_FLAG_MEANING = {
-  ' ': 'pushed', '+': 'force-pushed', '-': 'deleted', '*': 'new', '=': 'up-to-date', '!': 'rejected'
-};
-
-function parsePushPorcelain(stdout) {
-  const refs = [];
-  for (const line of String(stdout || '').split('\n')) {
-    if (!line || /^To /.test(line) || /^Done$/.test(line)) continue;
-    const flag = line[0];
-    if (!(flag in PUSH_FLAG_MEANING)) continue;
-    const parts = line.slice(1).split('\t');
-    refs.push({
-      flag,
-      result: PUSH_FLAG_MEANING[flag],
-      refspec: (parts[0] || '').trim(),
-      summary: (parts[1] || '').trim()
-    });
-  }
-  return refs;
-}
+// parsePushPorcelain (and the flag table it reads) lives in ./lib/push-porcelain.js.
 
 // List local tags, newest first. objecttype tells annotated ("tag") from lightweight
 // ("commit"); for an annotated tag `objectname` is the tag object, so the commit it points
@@ -5179,37 +5123,7 @@ ipcMain.handle('signing:addAllowedSigner', wrap(async (_, opts) => {
 //   prunable <reason>             (only when the tree is gone from disk)
 // The porcelain form is used rather than the human one because paths with spaces make the
 // default output ambiguous.
-function parseWorktreeList(text) {
-  const out = [];
-  let cur = null;
-  for (const rawLine of String(text || '').split('\n')) {
-    const line = rawLine.replace(/\r$/, '');
-    if (!line.trim()) { if (cur) { out.push(cur); cur = null; } continue; }
-    const sp = line.indexOf(' ');
-    const key = sp === -1 ? line : line.slice(0, sp);
-    const value = sp === -1 ? '' : line.slice(sp + 1);
-    if (key === 'worktree') {
-      if (cur) out.push(cur);
-      cur = { path: value, head: '', branch: '', detached: false, bare: false, locked: false, lockReason: '', prunable: false, prunableReason: '' };
-    } else if (!cur) {
-      continue;
-    } else if (key === 'HEAD') {
-      cur.head = value;
-    } else if (key === 'branch') {
-      cur.branch = value.replace(/^refs\/heads\//, '');
-    } else if (key === 'detached') {
-      cur.detached = true;
-    } else if (key === 'bare') {
-      cur.bare = true;
-    } else if (key === 'locked') {
-      cur.locked = true; cur.lockReason = value;
-    } else if (key === 'prunable') {
-      cur.prunable = true; cur.prunableReason = value;
-    }
-  }
-  if (cur) out.push(cur);
-  return out;
-}
+// parseWorktreeList lives in ./lib/worktree-list.js.
 
 ipcMain.handle('worktree:list', wrap(async () => {
   const g = ensureGit();
@@ -6038,35 +5952,7 @@ ipcMain.handle('forge:clearToken', wrap(async (_, opts) => {
 // fifty of two hundred rows look like the whole list — the same failure the label chips
 // already guard against with their "+N".
 
-const FORGE_PAGE_SIZE = 50;
-
-function forgeLinkPage(link, rel) {
-  const seg = String(link || '').split(',').find(s => s.includes(`rel="${rel}"`));
-  const m = seg && seg.match(/[?&]page=(\d+)/);
-  return m ? parseInt(m[1], 10) : 0;
-}
-
-// Neither forge puts this in the body. GitHub sends a Link header with rel="next"/"last"
-// and no count at all; GitLab sends X-Total and X-Total-Pages *and* a Link header. GitHub's
-// search endpoint is the one exception — total_count is in the body, and it is the only
-// place a GitHub total is ever available, which is why the caller may pass one in.
-function forgePageInfo(res, count, page, bodyTotal) {
-  const h = res.headers || {};
-  const link = String(h.link || '');
-  const glTotal = parseInt(h['x-total'], 10);
-  const glPages = parseInt(h['x-total-pages'], 10);
-
-  const total = typeof bodyTotal === 'number' ? bodyTotal : (isNaN(glTotal) ? null : glTotal);
-  const totalPages = !isNaN(glPages) ? glPages : (forgeLinkPage(link, 'last') || null);
-
-  let hasMore;
-  if (forgeLinkPage(link, 'next')) hasMore = true;
-  else if (link) hasMore = false;                       // a Link header that has no next is the end
-  else if (total !== null) hasMore = total > page * FORGE_PAGE_SIZE;
-  else hasMore = count >= FORGE_PAGE_SIZE;             // nothing to go on but a full page
-
-  return { page, perPage: FORGE_PAGE_SIZE, total, totalPages, hasMore };
-}
+// FORGE_PAGE_SIZE / forgeLinkPage / forgePageInfo live in ./lib/forge-paging.js.
 
 // Everything the filter controls can ask for. All of it optional — an empty filter is the
 // unfiltered list, which still takes the plain list endpoints it always did.

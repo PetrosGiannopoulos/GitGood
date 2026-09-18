@@ -1644,3 +1644,11 @@ function renderImageDiff(node, data) {
   if (slider) slider.oninput = applySlider;
   applyMode('side');
 }
+
+// The diff parser and the partial-staging patch synthesizer are pure, and the `reverse`
+// rule they implement is the most error-prone invariant in the app — so they are unit
+// tested (test/partial-patch.test.js). In the browser `module` is undefined, which makes
+// this a no-op: the functions stay plain globals like every other renderer script.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { parseUnifiedDiff, buildPartialPatch, hunkLineKeys };
+}

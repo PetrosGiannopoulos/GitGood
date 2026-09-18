@@ -852,6 +852,16 @@ function classifyByCode(code) {
   return map[code] || 'modified';
 }
 
+// A Unity reimport can leave five figures of changed files in the working tree, and every
+// row below is an <li> holding three buttons with their own listeners. Drawing all of them
+// stalls the window — and this list is redrawn on every automatic refresh (14-watch.js) and
+// again on every click, so the cost is paid constantly rather than once.
+//
+// Like the CR_* caps above, this bounds only what is *drawn*: `files` is passed around
+// whole, so the filter, Ctrl+A select-all, and every Stage/Discard/Stash action still see
+// and act on the entire list.
+const FILE_LIST_MAX_ROWS = 500;
+
 function renderFileList(container, files, staged) {
   container.innerHTML = '';
   if (!files.length) {
@@ -861,7 +871,8 @@ function renderFileList(container, files, staged) {
     container.innerHTML = `<li class="file-empty">${msg}</li>`;
     return;
   }
-  files.forEach(f => {
+  const shown = files.length > FILE_LIST_MAX_ROWS ? files.slice(0, FILE_LIST_MAX_ROWS) : files;
+  shown.forEach(f => {
     const key = (staged ? 'staged:' : 'unstaged:') + f.path;
     const isMulti = state.multiSelected.has(key);
     const isSelected = state.selectedFile === f.path && state.selectedFileStaged === staged;
@@ -1037,6 +1048,16 @@ function renderFileList(container, files, staged) {
 
     container.appendChild(li);
   });
+
+  // Say plainly that the list is truncated and that the actions are not — a silently short
+  // list would read as "those files are gone", which is the worst thing this panel could imply.
+  if (shown.length < files.length) {
+    const more = document.createElement('li');
+    more.className = 'file-empty';
+    more.textContent = `…and ${files.length - shown.length} more not shown. `
+      + `Filtering narrows the list; staging, discarding and Ctrl+A still apply to all ${files.length}.`;
+    container.appendChild(more);
+  }
 }
 
 function toggleMultiSelect(key) {
