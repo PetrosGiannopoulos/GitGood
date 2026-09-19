@@ -1487,25 +1487,89 @@ function showCreateTagDialog(hash) {
   modal.show({ title: 'Create Tag', body, footer: [cancelBtn, createBtn] });
 }
 
-function showRenameBranchDialog(oldName) {
+// Rename a local branch. `branch -m` keeps the upstream config and moves the branch's
+// reflog with it, so a rename is not a delete-and-recreate — but the upstream it keeps
+// still names the OLD remote branch. Git then refuses a plain push ("the upstream branch
+// of your current branch does not match the name of your current branch"), which is why a
+// published branch gets the option to carry the rename to the remote as well.
+async function showRenameBranchDialog(oldName) {
+  // for-each-ref, not `rev-parse --abbrev-ref <name>@{u}`: that exits non-zero for a branch
+  // with no upstream, and simple-git resolves rather than rejects when git writes nothing
+  // to stderr. This prints an empty line instead, which is unambiguous.
+  let upstream = '';
+  try {
+    const u = await gs.rawCommand(['for-each-ref', '--format=%(upstream:short)', 'refs/heads/' + oldName]);
+    if (u && u.ok) upstream = String(u.data || '').trim();
+  } catch (e) { /* offer the local-only rename */ }
+  const slash = upstream.indexOf('/');
+  const upRemote = slash > 0 ? upstream.slice(0, slash) : '';
+  const upBranch = slash > 0 ? upstream.slice(slash + 1) : '';
+  const published = !!(upRemote && upBranch);
+
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="modal-text">Rename branch <code class="text-mono text-red">${escapeHtml(oldName)}</code></p>
     <div class="modal-field"><label>New Name</label><input class="modal-input" id="rename-branch-name" value="${escapeHtml(oldName)}" /></div>
+    ${published ? `
+    <p class="modal-text">This branch is published as <code class="text-mono">${escapeHtml(upstream)}</code>. A remote branch cannot be renamed in place — the rename is published by pushing the new name and deleting the old one.</p>
+    <label class="modal-checkbox"><input type="checkbox" id="rename-push-new" checked />
+      Push the new name to ${escapeHtml(upRemote)} and track it</label>
+    <label class="modal-checkbox"><input type="checkbox" id="rename-del-old" checked />
+      Then delete <code class="text-mono">${escapeHtml(upstream)}</code> — it affects everyone, and an open pull request from that branch is closed with it</label>
+    ` : ''}
   `;
+
+  const delBox = body.querySelector('#rename-del-old');
+  const pushBox = body.querySelector('#rename-push-new');
+  // Deleting the old remote branch without pushing the new one would throw the work away,
+  // so the second option only exists while the first is ticked.
+  if (pushBox && delBox) {
+    pushBox.onchange = () => {
+      delBox.disabled = !pushBox.checked;
+      if (!pushBox.checked) delBox.checked = false;
+    };
+  }
+
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
   cancelBtn.onclick = () => modal.hide();
   const okBtn = document.createElement('button');
   okBtn.className = 'btn-medieval primary'; okBtn.textContent = 'Rename';
-  okBtn.onclick = async () => {
+  const submit = async () => {
     const newName = $('#rename-branch-name').value.trim();
     if (!newName) { showToast('Name required', 'error'); return; }
     if (newName === oldName) { modal.hide(); return; }
+    const pushNew = !!(pushBox && pushBox.checked);
+    const delOld = !!(delBox && delBox.checked && pushNew);
     modal.hide();
+
     const r = await gs.rawCommand(['branch', '-m', oldName, newName]);
-    if (handleResult(r, `Renamed to ${newName}`)) await refreshAll();
+    if (!handleResult(r, `Renamed to ${newName}`)) return;
+    await refreshAll();
+    if (!published || !pushNew) {
+      if (published) showToast(`${newName} still tracks ${upstream} — push will need a new upstream`, 'info', 6000);
+      return;
+    }
+
+    // Push the new name with -u, which also repoints the upstream away from the old ref.
+    const pr = await withLoading(`Pushing ${newName}`,
+      () => gs.push({ setUpstream: true, remote: upRemote, branch: newName }));
+    if (!handleResult(pr, `Pushed ${upRemote}/${newName} and set it as the upstream`)) {
+      // The old remote branch is still the only published copy — leave it alone.
+      showToast(`${newName} was renamed locally; ${upstream} is unchanged`, 'error', 7000);
+      return;
+    }
+    if (delOld) {
+      const dr = await withLoading(`Deleting ${upstream}`, () => gs.deleteRemoteBranch(upstream));
+      handleResult(dr, `Deleted ${upstream} on the remote`);
+    }
+    await refreshAll();
   };
+  okBtn.onclick = submit;
+  const input = body.querySelector('#rename-branch-name');
+  input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+  // The field is pre-filled with the old name; select it so typing replaces it.
+  setTimeout(() => input.select(), 60);
   modal.show({ title: 'Rename Branch', body, footer: [cancelBtn, okBtn] });
 }
 

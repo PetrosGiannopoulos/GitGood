@@ -1612,6 +1612,32 @@ ipcMain.handle('repo:openInExplorer', (_, p) => {
   return { ok: true };
 });
 
+// Reveal one working-tree file in the OS file manager. `shell.openPath` on a file would
+// *launch* it in whatever application owns the extension — showItemInFolder opens the
+// containing folder with the file selected, which is what "show me where this is" means.
+// A path that is gone (a deleted file still listed in Changes) has nothing to select, so
+// fall back to opening the nearest ancestor directory that still exists.
+ipcMain.handle('repo:revealPath', wrap(async (_, relPath) => {
+  if (!currentRepoPath) throw new Error('No repository open');
+  if (!relPath) throw new Error('Path required');
+  const root = path.resolve(currentRepoPath);
+  const full = path.resolve(root, relPath);
+  // The renderer only ever sends git's own repo-relative paths; refuse anything that
+  // resolved outside the repository rather than opening an arbitrary folder.
+  if (full !== root && !full.startsWith(root + path.sep)) throw new Error('Path is outside the repository');
+  if (fs.existsSync(full)) {
+    shell.showItemInFolder(full);
+    return { revealed: true, path: full };
+  }
+  let dir = path.dirname(full);
+  while (dir.length > root.length && !fs.existsSync(dir)) dir = path.dirname(dir);
+  if (!fs.existsSync(dir)) throw new Error('That path no longer exists on disk');
+  // openPath resolves to an error *string* (empty when it worked), it does not reject.
+  const err = await shell.openPath(dir);
+  if (err) throw new Error(err);
+  return { revealed: false, path: dir };
+}));
+
 ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
   const g = ensureGit();
   // Accept either a hash string (legacy) or an options object { hash, maxBytes, includeDiff }

@@ -1036,6 +1036,17 @@ function renderFileList(container, files, staged) {
       items.push({ label: 'Copy path' + (selectedPaths.length > 1 ? 's' : ''), icon: '⎘', action: () => {
         copyText(selectedPaths.join('\n'), `Copied ${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'}`);
       }});
+      // Revealing is a single-file action: one folder window per file would be a mess, and
+      // the selection can span directories. Untracked files are included — they are on disk.
+      if (selectedPaths.length === 1) {
+        items.push({ label: 'Show in File Explorer', icon: '⛬', action: async () => {
+          const r = await gs.revealPath(f.path);
+          if (!r.ok) { showToast(r.error || 'Could not open the folder', 'error', 5000); return; }
+          // A deleted file has nothing to select, so main opened its folder instead — say so,
+          // or the window that appears looks like it picked the wrong place.
+          if (r.data && !r.data.revealed) showToast('File is no longer on disk — opened its folder', 'info', 4000);
+        }});
+      }
       if (selectedKeys.length > 1) {
         items.push('sep');
         items.push({ label: 'Clear selection', icon: '✕', action: () => {

@@ -809,6 +809,28 @@ async function doPush(withTags) {
     return;
   }
 
+  // 3b) Upstream name mismatch. `git branch -m` keeps the upstream config, so a branch
+  // renamed after it was published still tracks the old remote branch and git refuses to
+  // guess (push.default=simple). Offer to publish under the current name instead. The old
+  // remote branch is left alone — deleting it is the rename dialog's explicit option.
+  if (!r.ok && /upstream branch of your current branch does not match/i.test(r.error || '')) {
+    const confirmed = await modal.confirm({
+      title: 'Upstream Name Differs',
+      message: `"${branch}" tracks a remote branch of a different name, which happens after a branch is renamed.
+
+Push it to "${remoteName}/${branch}" and track that from now on? The old remote branch stays where it is — delete it from the Branches list if you no longer want it.`,
+      confirmText: 'Push & Set Upstream'
+    });
+    if (!confirmed) return;
+    r = await withLoading('Pushing',
+      () => gs.push({ setUpstream: true, remote: remoteName, branch, followTags: !!withTags }));
+    if (handleResult(r, `Pushed and set upstream to ${remoteName}/${branch}`)) {
+      await refreshAll();
+      if (withTags) refreshRemoteTags();
+    }
+    return;
+  }
+
   // 4) Remote missing/unreachable.
   if (!r.ok && /does not appear to be a git repository|Could not read from remote|repository not found|unable to access/i.test(r.error || '')) {
     const fix = await modal.confirm({

@@ -432,6 +432,7 @@ function renderBranches() {
           );
         }
         items.push(
+          { label: 'Rename branch…', icon: '✎', action: () => showRenameBranchDialog(b) },
           'sep',
           { label: 'Delete branch', icon: '✗', danger: true, action: () => deleteBranch(b, false) },
           { label: 'Force delete', icon: '⚔', danger: true, action: () => deleteBranch(b, true) }
