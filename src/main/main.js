@@ -1189,7 +1189,42 @@ async function commitPathEntries(g, hash) {
   return entries;
 }
 
-// The commit's own changes limited to `paths`, as a patch.
+// Run a git command that writes a patch and pipe its stdout straight into a file,
+// appending when asked. Nothing is ever held as a string — see writeCommitPathsPatch.
+// Resolves with the number of bytes written.
+function gitPatchToFile(args, outPath, append) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const proc = spawn('git', args, {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' })
+    });
+    const out = fs.createWriteStream(outPath, { flags: append ? 'a' : 'w' });
+    let err = '';
+    let bytes = 0;
+    let code = null;
+    let fault = null;
+    let streamClosed = false;
+    // Both halves have to finish: the exit code says whether git was happy, the stream
+    // says whether every byte reached the disk.
+    const settle = () => {
+      if (!streamClosed || (code === null && !fault)) return;
+      if (fault) return reject(fault);
+      if (code !== 0) return reject(new Error(err.trim() || `git ${args[0]} exited ${code}`));
+      resolve(bytes);
+    };
+    proc.stdout.on('data', d => { bytes += d.length; });
+    proc.stdout.pipe(out);
+    proc.stderr.on('data', d => { if (err.length < 8192) err += String(d); });
+    proc.on('error', e => { fault = fault || e; out.end(); });
+    out.on('error', e => { fault = fault || e; });
+    out.on('close', () => { streamClosed = true; settle(); });
+    proc.on('close', c => { code = c; settle(); });
+  });
+}
+
+// The commit's own changes limited to `paths`, written to `outPath` as a patch. Returns
+// the byte count — 0 means the selection changed nothing.
 //  --binary      an asset is not a text patch
 //  --full-index  names the blobs, which is what makes the --3way fallback able to merge
 //  --no-renames  a rename entry carries two paths and only one of them may be ticked; as a
@@ -1200,15 +1235,38 @@ async function commitPathEntries(g, hash) {
 // `git diff` has no --pathspec-from-file (verified), so a list too long for one command
 // line is split and the patches concatenated: the chunks describe disjoint files, so the
 // result is one valid patch that still applies in a single invocation.
-async function commitPathsPatch(g, hash, paths) {
+//
+// **The patch is streamed to the file, never assembled as a JS string.** --binary encodes
+// a binary file as base85, about 1.4x its size, so a commit carrying a few hundred
+// megabytes of assets — an ordinary Unity commit in a repo whose binaries are not all in
+// LFS — produces a patch past Node's maximum string length (0x1fffffe8, ~512 MB).
+// Collecting it the way simple-git does throws "Cannot create a string longer than
+// 0x1fffffe8 characters" at the Buffer-to-string step, before `git apply` is ever
+// reached: the pick fails having done nothing, and the message names neither git nor a
+// file. `git apply` reads a file anyway, so the string was only ever a way to lose.
+async function writeCommitPathsPatch(g, hash, paths, outPath) {
   const parents = await commitParentCount(g, hash);
   const flags = ['--binary', '--full-index', '--no-renames', '--no-textconv'];
-  const run = (chunk) => parents === 0
-    ? g.raw(['diff-tree', '--no-commit-id', '-p', '--root', ...flags, hash, '--', ...chunk])
-    : g.raw(['diff', ...flags, `${hash}^1`, hash, '--', ...chunk]);
-  let patch = '';
-  await forEachPathChunk(paths, async (chunk) => { patch += await run(chunk); });
-  return patch;
+  const argsFor = (chunk) => parents === 0
+    ? ['diff-tree', '--no-commit-id', '-p', '--root', ...flags, hash, '--', ...chunk]
+    : ['diff', ...flags, `${hash}^1`, hash, '--', ...chunk];
+  let bytes = 0;
+  let first = true;
+  await forEachPathChunk(paths, async (chunk) => {
+    bytes += await gitPatchToFile(argsFor(chunk), outPath, !first);
+    first = false;
+  });
+  // git apply wants the patch to end in a newline. Tested on the file's last byte rather
+  // than on the text, for the same reason the patch never became one.
+  if (bytes > 0) {
+    const fd = fs.openSync(outPath, 'r+');
+    try {
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, bytes - 1);
+      if (last[0] !== 0x0a) { fs.writeSync(fd, Buffer.from('\n'), 0, 1, bytes); bytes += 1; }
+    } finally { fs.closeSync(fd); }
+  }
+  return bytes;
 }
 
 // What a commit changed, for the exclude dialog when it is opened from the graph (where
@@ -1271,14 +1329,12 @@ ipcMain.handle('repo:cherryPickPaths', wrap(async (_, opts) => {
       + dirty.slice(0, 5).join('\n') + (dirty.length > 5 ? `\n…and ${dirty.length - 5} more` : ''));
   }
 
-  const patch = await commitPathsPatch(g, hash, list);
-  if (!patch.trim()) throw new Error('None of the selected files actually changed in that commit.');
-
   const tmp = path.join(os.tmpdir(), `gitgood-pick-${Date.now()}-${Math.random().toString(36).slice(2)}.diff`);
-  fs.writeFileSync(tmp, patch.endsWith('\n') ? patch : patch + '\n');
   let failure = null;
   let threeWay = false;
   try {
+    const bytes = await writeCommitPathsPatch(g, hash, list, tmp);
+    if (!bytes) throw new Error('None of the selected files actually changed in that commit.');
     try {
       await g.raw(['apply', '--cached', '--whitespace=nowarn', tmp]);
     } catch (e) {
