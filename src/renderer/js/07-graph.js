@@ -1249,6 +1249,9 @@ function showCommitContextMenu(hash, x, y) {
     { label: 'Create tag here…', icon: '✠', action: () => showCreateTagDialog(hash) },
     'sep',
     { label: 'Cherry-pick onto current', icon: '⚒', action: () => doCherryPick(hash) },
+    // Same replay, minus the files you untick — for a pushed commit that carries one
+    // change too many.
+    { label: 'Cherry-pick files…', icon: '⚒', action: () => openPartialCherryPick(hash) },
     { label: 'Revert this commit', icon: '↶', action: () => doRevert(hash) },
     'sep',
     { label: 'Reset current branch to here…', icon: '↺', action: () => showResetDialog(hash) }
@@ -1732,6 +1735,132 @@ async function runCherryPickOnto(sourceHash, destBranch) {
   if (r.ok) showToast(`Cherry-picked ${sourceHash.slice(0, 7)} onto ${destBranch}`, 'success');
   else showToast('Cherry-pick: ' + r.error, 'error', 7000);
   await refreshAll();
+}
+
+// ============================================
+// PARTIAL CHERRY-PICK — take a commit, leave a file behind
+// ============================================
+// The case this exists for: a colleague's commit carries the work you want *and* a file
+// that should never have been pushed. The commit is already on the remote, so it cannot be
+// edited — the only way to take one without the other is a new commit on your branch
+// holding just the files you keep. Ticked means included; the dialog is the exclude list.
+// The whole operation is refused rather than half-done (see repo:cherryPickPaths), so a
+// selection that conflicts leaves the repository untouched.
+
+// git's name-status letters, mapped onto the status classes the file lists already style.
+const PICK_STATUS_CLASS = { A: 'added', M: 'modified', D: 'deleted', T: 'modified', R: 'renamed', C: 'renamed' };
+
+async function openPartialCherryPick(hash, preselected) {
+  if (!hash) return;
+  // Always ask main for the file list rather than reading the preview's: a large commit's
+  // diff is truncated before it is rendered, and a file that was cut off the bottom must
+  // still be excludable — it is exactly the file nobody looked at.
+  const r = await withLoading('Reading commit', () => gs.commitPathList(hash));
+  if (!r.ok) { showToast(r.error || 'Could not read that commit', 'error', 6000); return; }
+  const data = r.data || {};
+  const files = data.files || [];
+  if (!files.length) { showToast('That commit changes no files.', 'error'); return; }
+  showPartialCherryPickDialog(hash, data, files, preselected);
+}
+
+function showPartialCherryPickDialog(hash, meta, files, preselected) {
+  // A selection carried in from the commit preview means "these ones"; no selection means
+  // the whole commit, which the user then narrows by unticking.
+  const pre = (preselected && preselected.length) ? new Set(preselected) : null;
+  const current = (state.branches.local && state.branches.local.current) || 'HEAD';
+  const short = meta.short || hash.slice(0, 7);
+
+  const body = document.createElement('div');
+  body.className = 'cpick';
+  body.innerHTML = `
+    <p class="modal-text">A new commit on <code class="text-mono text-red">${escapeHtml(current)}</code>
+      from <code class="text-mono text-red">${escapeHtml(short)}</code>
+      ${meta.subject ? escapeHtml(meta.subject) : ''}${meta.author ? ` <span class="text-muted">— ${escapeHtml(meta.author)}</span>` : ''}</p>
+    <p class="modal-text text-muted" style="font-size:12px">Ticked files come across. Untick anything that should not —
+      commit ${escapeHtml(short)} itself is never changed, so this is safe on work that is already pushed.</p>
+    <input type="search" class="modal-input cpick-filter" placeholder="Filter files…" />
+    <div class="cpick-list">${files.map((f, i) =>
+      `<label class="cpick-row" data-cpick="${i}">` +
+        `<input type="checkbox" class="cpick-check" data-cpick-check="${i}"${(!pre || pre.has(f.path)) ? ' checked' : ''} />` +
+        `<span class="cfile-status ${PICK_STATUS_CLASS[(f.status || 'M')[0]] || 'modified'}">${escapeHtml((f.status || 'M')[0])}</span>` +
+        `<span class="cpick-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>` +
+      `</label>`).join('')}</div>
+    <div class="cpick-bar">
+      <button type="button" class="cpick-mini cpick-all">All</button>
+      <button type="button" class="cpick-mini cpick-none">None</button>
+      <span class="cpick-count" aria-live="polite"></span>
+    </div>
+    <div class="modal-field"><label>Commit message</label><textarea class="modal-input cpick-msg" rows="4"></textarea></div>
+    <label class="modal-checkbox"><input type="checkbox" class="cpick-commit" checked />
+      Commit now — untick to leave the changes staged and commit them yourself</label>
+  `;
+
+  // Set by property, not markup: a message full of quotes and newlines has no business
+  // going through HTML.
+  const msgBox = body.querySelector('.cpick-msg');
+  msgBox.value = (meta.body || meta.subject || '').replace(/\s+$/, '');
+
+  const checks = () => Array.from(body.querySelectorAll('.cpick-check'));
+  const checkedPaths = () => checks().filter(c => c.checked)
+    .map(c => files[parseInt(c.dataset.cpickCheck, 10)]).filter(Boolean).map(f => f.path);
+
+  const countEl = body.querySelector('.cpick-count');
+  const okBtn = document.createElement('button');
+  const sync = () => {
+    const n = checkedPaths().length;
+    const out = files.length - n;
+    countEl.textContent = `${n} of ${files.length} included` + (out ? ` · ${out} left behind` : '');
+    body.querySelectorAll('.cpick-row').forEach(row => {
+      const cb = row.querySelector('.cpick-check');
+      row.classList.toggle('excluded', !(cb && cb.checked));
+    });
+    okBtn.disabled = n === 0;
+    okBtn.textContent = n === 1 ? 'Pick 1 File' : `Pick ${n} Files`;
+  };
+
+  body.addEventListener('change', (e) => { if (e.target.closest('.cpick-check')) sync(); });
+  body.querySelector('.cpick-all').onclick = () => { checks().forEach(c => { if (!c.closest('.cpick-row').hidden) c.checked = true; }); sync(); };
+  body.querySelector('.cpick-none').onclick = () => { checks().forEach(c => { if (!c.closest('.cpick-row').hidden) c.checked = false; }); sync(); };
+
+  // The filter hides rows; All/None deliberately act on what is visible, so narrowing to
+  // "Library/" and pressing None is how a hundred unwanted files get excluded at once.
+  const filter = body.querySelector('.cpick-filter');
+  filter.oninput = () => {
+    const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    body.querySelectorAll('.cpick-row').forEach(row => {
+      const f = files[parseInt(row.dataset.cpick, 10)] || {};
+      const p = (f.path || '').toLowerCase();
+      row.hidden = terms.length > 0 && !terms.every(t => p.includes(t));
+    });
+  };
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+
+  okBtn.className = 'btn-medieval primary';
+  okBtn.onclick = async () => {
+    const paths = checkedPaths();
+    if (!paths.length) return;
+    const message = msgBox.value;
+    const doCommit = !!body.querySelector('.cpick-commit').checked;
+    modal.hide();
+    // The commit box's tick is the truth about signing, the same as an ordinary commit.
+    const sign = (doCommit && typeof commitSignChoice === 'function') ? commitSignChoice() : undefined;
+    const r = await withLoading(doCommit ? 'Cherry-picking files' : 'Staging files',
+      () => gs.cherryPickPaths({ hash, paths, message, commit: doCommit, sign }));
+    await refreshAll();
+    if (!r.ok) { showToast(r.error || 'Cherry-pick failed', 'error', 12000); return; }
+    const d = r.data || {};
+    const left = d.excluded ? `, ${d.excluded} left behind` : '';
+    showToast(d.committed
+      ? `Picked ${d.files} file${d.files === 1 ? '' : 's'}${left} into ${String(d.hash || '').slice(0, 7)}`
+      : `Staged ${d.files} file${d.files === 1 ? '' : 's'}${left} — review, then commit`,
+      'success', 6000);
+  };
+
+  sync();
+  modal.show({ title: 'Cherry-pick Files', body, footer: [cancelBtn, okBtn] });
 }
 
 // ============================================

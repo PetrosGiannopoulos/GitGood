@@ -7,6 +7,7 @@ const simpleGit = require('simple-git');
 // Pure helpers live in ./lib so they can be unit-tested without Electron (`npm test`).
 // Everything here keeps its original name, so call sites read exactly as they did.
 const { pathspecFits, forEachPathChunk, withPathspecFile } = require('./lib/pathspec');
+const { partialPickMessage, applyFailureHelp } = require('./lib/partial-pick');
 const { parsePushPorcelain } = require('./lib/push-porcelain');
 const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
@@ -1146,6 +1147,211 @@ ipcMain.handle('repo:cherryPick', wrap(async (_, hash) => {
   if (!hash) throw new Error('Commit hash required');
   await g.raw(['cherry-pick', hash]);
   return true;
+}));
+
+// ============================================
+// PARTIAL CHERRY-PICK — replay only *some* of a commit's files as a new commit
+// ============================================
+// The commit being copied has normally already been pushed (a colleague's), so the file
+// that should not come along cannot be dropped out of it. This builds a NEW commit on the
+// current branch carrying only the chosen paths; the source commit, its branch and the
+// files left out are never touched.
+//
+// Everything goes through the INDEX (`git apply --cached`), never a working-tree apply:
+//  - `git apply --index` compares the file on disk byte-for-byte with the index entry, so
+//    on Windows a perfectly clean checkout with core.autocrlf=true is already "does not
+//    match index" (verified) and every pick would fail before it started;
+//  - the working tree is written afterwards from the index by `checkout-index -f`, which
+//    runs the same conversion a checkout does — CRLF comes back, and an LFS pointer is
+//    smudged to its real content rather than left on disk as pointer text;
+//  - and it makes the operation atomic. Nothing on disk has been written when an apply
+//    fails, so the undo is `reset HEAD -- <paths>` and the repository is exactly as it was.
+
+async function commitParentCount(g, hash) {
+  const line = (await g.raw(['rev-list', '--parents', '-n', '1', hash])).trim();
+  return Math.max(0, line.split(/\s+/).filter(Boolean).length - 1);
+}
+
+// The paths a commit touched, with git's status letter. Compared against the FIRST parent,
+// which is what `cherry-pick -m 1` replays for a merge commit; a root commit has no parent
+// to diff against and needs --root instead. -z because git quotes an unusual path in its
+// default output, and --no-renames so one record names exactly one path.
+async function commitPathEntries(g, hash) {
+  const parents = await commitParentCount(g, hash);
+  const args = parents === 0
+    ? ['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', '--no-renames', '--root', hash]
+    : ['diff', '--name-status', '-z', '--no-renames', `${hash}^1`, hash];
+  const fields = (await g.raw(args)).split('\0').filter(Boolean);
+  const entries = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    entries.push({ status: fields[i].trim(), path: fields[i + 1] });
+  }
+  return entries;
+}
+
+// The commit's own changes limited to `paths`, as a patch.
+//  --binary      an asset is not a text patch
+//  --full-index  names the blobs, which is what makes the --3way fallback able to merge
+//  --no-renames  a rename entry carries two paths and only one of them may be ticked; as a
+//                delete plus an add the selection means exactly what it says
+//  --no-textconv git-lfs installs a textconv diff driver, and a converted diff describes
+//                the pointed-at file rather than the pointer git stores — it would never
+//                apply
+// `git diff` has no --pathspec-from-file (verified), so a list too long for one command
+// line is split and the patches concatenated: the chunks describe disjoint files, so the
+// result is one valid patch that still applies in a single invocation.
+async function commitPathsPatch(g, hash, paths) {
+  const parents = await commitParentCount(g, hash);
+  const flags = ['--binary', '--full-index', '--no-renames', '--no-textconv'];
+  const run = (chunk) => parents === 0
+    ? g.raw(['diff-tree', '--no-commit-id', '-p', '--root', ...flags, hash, '--', ...chunk])
+    : g.raw(['diff', ...flags, `${hash}^1`, hash, '--', ...chunk]);
+  let patch = '';
+  await forEachPathChunk(paths, async (chunk) => { patch += await run(chunk); });
+  return patch;
+}
+
+// What a commit changed, for the exclude dialog when it is opened from the graph (where
+// the commit's diff has not been loaded). Name-status only — no patch text.
+ipcMain.handle('repo:commitPathList', wrap(async (_, hash) => {
+  const g = ensureGit();
+  if (!hash) throw new Error('Commit hash required');
+  const files = await commitPathEntries(g, hash);
+  const meta = (await g.raw(['log', '-1', '--format=%h%x1f%s%x1f%an%x1f%B', hash])).trim().split('\x1f');
+  return { files, short: meta[0] || '', subject: meta[1] || '', author: meta[2] || '', body: meta[3] || '' };
+}));
+
+ipcMain.handle('repo:cherryPickPaths', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const o = opts || {};
+  const hash = o.hash;
+  const list = Array.from(new Set((o.paths || []).filter(Boolean)));
+  const commit = o.commit !== false;
+  if (!hash) throw new Error('Commit hash required');
+  if (!list.length) throw new Error('Nothing selected — every file in the commit was excluded.');
+
+  // Never start on top of an unfinished operation: that index belongs to the sequencer.
+  // --absolute-git-dir rather than joining '.git', which is a file in a linked worktree.
+  const gitDir = (await g.raw(['rev-parse', '--absolute-git-dir'])).trim();
+  const busy = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']
+    .find(f => fs.existsSync(path.join(gitDir, f)));
+  if (busy) throw new Error('A merge, rebase, cherry-pick or revert is already in progress. Finish or abort it first.');
+
+  // An unborn branch has no HEAD to apply against, and none to roll back to.
+  let head = '';
+  try { head = (await g.raw(['rev-parse', 'HEAD'])).trim(); } catch (e) { head = ''; }
+  if (!/^[0-9a-f]{7,}$/.test(head)) throw new Error('This branch has no commits yet — make one first.');
+
+  const full = (await g.raw(['rev-parse', hash])).trim();
+  const all = (await commitPathEntries(g, hash)).map(e => e.path);
+  const known = new Set(all);
+  const strays = list.filter(p => !known.has(p));
+  if (strays.length) {
+    throw new Error(`Not part of commit ${full.slice(0, 7)}: ${strays.slice(0, 3).join(', ')}`
+      + (strays.length > 3 ? ` (+${strays.length - 3} more)` : ''));
+  }
+
+  // Anything already staged would be swept into the commit about to be written.
+  if (commit) {
+    const staged = (await g.raw(['diff', '--cached', '--name-only'])).trim();
+    if (staged) {
+      throw new Error('You have staged changes — commit, unstage or stash them first, or they would land in this commit too.');
+    }
+  }
+
+  // The chosen paths must be clean: the working tree is rewritten from the index at the
+  // end, which would overwrite local edits, and the undo restores them from HEAD.
+  const dirty = [];
+  await forEachPathChunk(list, async (chunk) => {
+    const out = await g.raw(['status', '--porcelain', '--', ...chunk]);
+    out.split('\n').filter(Boolean).forEach(l => dirty.push(l.slice(3)));
+  });
+  if (dirty.length) {
+    throw new Error(`${dirty.length} of the selected file(s) have uncommitted changes — commit, discard or stash them first:\n`
+      + dirty.slice(0, 5).join('\n') + (dirty.length > 5 ? `\n…and ${dirty.length - 5} more` : ''));
+  }
+
+  const patch = await commitPathsPatch(g, hash, list);
+  if (!patch.trim()) throw new Error('None of the selected files actually changed in that commit.');
+
+  const tmp = path.join(os.tmpdir(), `gitgood-pick-${Date.now()}-${Math.random().toString(36).slice(2)}.diff`);
+  fs.writeFileSync(tmp, patch.endsWith('\n') ? patch : patch + '\n');
+  let failure = null;
+  let threeWay = false;
+  try {
+    try {
+      await g.raw(['apply', '--cached', '--whitespace=nowarn', tmp]);
+    } catch (e) {
+      // Context that does not line up is the ordinary case when the commit was written on
+      // a different base. --3way merges through the blobs --full-index named, which is the
+      // same merge a real cherry-pick would do.
+      threeWay = true;
+      try { await g.raw(['apply', '--cached', '--3way', '--whitespace=nowarn', tmp]); }
+      catch (e2) { failure = e2.message || String(e2); }
+    }
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (e) { /* best effort */ }
+  }
+
+  // --3way reports a conflict by leaving stages in the index *and* exiting non-zero, so the
+  // index is the authority on whether this worked — not the exit code on its own.
+  const conflicted = Array.from(new Set(
+    (await g.raw(['ls-files', '--unmerged'])).split('\n').filter(Boolean)
+      .map(l => { const t = l.indexOf('\t'); return t < 0 ? null : l.slice(t + 1); })
+      .filter(Boolean)
+  ));
+
+  if (failure || conflicted.length) {
+    // Undo. Nothing on disk was written, so restoring the index entries of the paths we
+    // touched puts the repository back exactly as it was.
+    await forEachPathChunk(list, chunk => g.raw(['reset', '-q', 'HEAD', '--', ...chunk]));
+    if (conflicted.length) {
+      throw new Error(
+        `Those changes conflict with your branch in ${conflicted.length} file(s), so nothing was changed:\n`
+        + conflicted.slice(0, 5).join('\n') + (conflicted.length > 5 ? `\n…and ${conflicted.length - 5} more` : '')
+        + '\n\nCherry-pick the whole commit instead, resolve the conflict, then discard the file you did not want.'
+      );
+    }
+    throw new Error(applyFailureHelp(failure) || ('Could not apply the selected changes.\n\n' + failure));
+  }
+
+  // What the apply actually changed — a subset of the selection, since a file may already
+  // carry that change on this branch.
+  const changed = (await g.raw(['diff', '--cached', '--name-only', '-z', 'HEAD'])).split('\0').filter(Boolean);
+  if (!changed.length) {
+    throw new Error('Your branch already has those files exactly as that commit left them — nothing to pick.');
+  }
+
+  // Write the files from the index. checkout-index applies the same conversion a checkout
+  // does (CRLF, and the LFS smudge that turns a pointer back into its content) — which is
+  // exactly what a working-tree apply would have got wrong. A path the commit deleted has
+  // no index entry left, so it is removed from disk instead: `apply --cached` only took it
+  // out of the index.
+  const present = new Set();
+  await forEachPathChunk(changed, async (chunk) => {
+    (await g.raw(['ls-files', '-z', '--', ...chunk])).split('\0').filter(Boolean).forEach(p => present.add(p));
+  });
+  const toWrite = changed.filter(p => present.has(p));
+  const toDelete = changed.filter(p => !present.has(p));
+  if (toWrite.length) await forEachPathChunk(toWrite, chunk => g.raw(['checkout-index', '-f', '--', ...chunk]));
+  for (const p of toDelete) {
+    try { fs.unlinkSync(path.join(currentRepoPath, p)); } catch (e) { /* already gone */ }
+  }
+
+  const excluded = all.length - list.length;
+  if (!commit) return { staged: true, files: changed.length, excluded, threeWay };
+
+  // Keep the author, as a cherry-pick does — the colleague wrote these changes. --date is
+  // the author date; the committer is whoever is picking.
+  const meta = (await g.raw(['log', '-1', '--format=%an%x1f%ae%x1f%aI%x1f%B', full])).split('\x1f');
+  const message = partialPickMessage(
+    (o.message && o.message.trim()) ? o.message : meta[3],
+    { hash: full, included: list.length, total: all.length }
+  );
+  const signArgs = o.sign === true ? ['-S'] : (o.sign === false ? ['--no-gpg-sign'] : []);
+  await g.raw(['commit', '--author', `${meta[0]} <${meta[1]}>`, '--date', meta[2], ...signArgs, '-m', message]);
+  const newHash = (await g.raw(['rev-parse', 'HEAD'])).trim();
+  return { committed: true, hash: newHash, files: changed.length, excluded, threeWay };
 }));
 
 ipcMain.handle('repo:revert', wrap(async (_, hash) => {

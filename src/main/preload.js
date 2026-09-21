@@ -138,6 +138,10 @@ const api = {
   mergePreview: (b) => ipcRenderer.invoke('repo:mergePreview', b),
   mergeAbort: () => ipcRenderer.invoke('repo:mergeAbort'),
   cherryPick: (h) => ipcRenderer.invoke('repo:cherryPick', h),
+  // Replay only some of a commit's files as a new commit — see the partial cherry-pick
+  // section of main.js. commitPathList is the file list that dialog is built from.
+  commitPathList: (h) => ipcRenderer.invoke('repo:commitPathList', h),
+  cherryPickPaths: (opts) => ipcRenderer.invoke('repo:cherryPickPaths', opts),
   revert: (h) => ipcRenderer.invoke('repo:revert', h),
   reset: (opts) => ipcRenderer.invoke('repo:reset', opts),
   moveBranch: (opts) => ipcRenderer.invoke('repo:moveBranch', opts),

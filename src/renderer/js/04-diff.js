@@ -1177,6 +1177,9 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
         `<label class="cfile-selall"><input type="checkbox" class="cfile-selall-check"> Select all</label>` +
         `<span class="cfile-selcount" aria-live="polite"></span>` +
         `<button class="cfile-restore-btn" type="button" disabled>↩ Restore selected</button>` +
+        // Cherry-pick is offered whether or not anything is ticked: with a selection it
+        // seeds the dialog, without one the dialog opens on the whole commit.
+        (opts.hash ? `<button class="cfile-pick-btn" type="button" title="Replay only some of this commit's files as a new commit on the current branch">⚒ Cherry-pick…</button>` : '') +
       `</div>` +
       `<div class="cfile-searchbar">` +
         `<input type="search" class="cfile-search" placeholder="Filter by path or content…" title="Filter files in this commit by path or diff content" />` +
@@ -1282,6 +1285,11 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
     if (paths.length) restoreFilesFromCommit(panelEl._cfileHash, paths);
   });
 
+  const pickBtn = panelEl.querySelector('.cfile-pick-btn');
+  if (pickBtn) pickBtn.addEventListener('click', () => {
+    openPartialCherryPick(panelEl._cfileHash, checkedPaths());
+  });
+
   // File filter — show only items whose path matches the query (all terms must match).
   const fileSearch = panelEl.querySelector('.cfile-search');
   let applyFileFilter = () => {};
@@ -1373,6 +1381,8 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y) {
   const focus = rightClickedPath || targetPaths[0];
   const items = [
     { label, icon: '↩', action: () => restoreFilesFromCommit(hash, targetPaths) },
+    { label: many ? `Cherry-pick these ${targetPaths.length} files onto current…` : 'Cherry-pick this file onto current…',
+      icon: '⚒', action: () => openPartialCherryPick(hash, targetPaths) },
     'sep',
     { label: 'File history…', icon: '⌛', action: () => openFileHistory(focus) },
     { label: 'Blame at this commit…', icon: '⚔', action: () => openBlame(focus, { rev: hash }) },

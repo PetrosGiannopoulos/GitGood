@@ -1045,6 +1045,55 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
 .cfile-restore-btn:disabled { opacity: 0.4; cursor: default; }
 .cfile-check { cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
 
+/* Partial cherry-pick dialog — the file list you untick to leave a file behind. */
+.cpick-filter { margin-bottom: 8px; }
+.cpick-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.cpick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.cpick-row:last-child { border-bottom: none; }
+.cpick-row:hover { background: var(--bg-raised); }
+.cpick-row[hidden] { display: none; }
+.cpick-check { cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
+.cpick-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Left behind: still listed, so what is being dropped stays visible. */
+.cpick-row.excluded .cpick-path { opacity: 0.45; text-decoration: line-through; }
+.cpick-row.excluded .cfile-status { opacity: 0.45; }
+.cpick-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.cpick-count { color: var(--accent-bright); }
+.cpick-mini {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 2px 10px;
+  background: var(--bg-raised);
+  color: var(--parchment-dim);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cpick-mini:hover { background: var(--accent); color: var(--bone-white); border-color: var(--accent-bright); }
+
 .cfile-list {
   flex-shrink: 0;
   max-height: 160px;
