@@ -1807,6 +1807,11 @@
   backdrop-filter: blur(2px);
 }
 .diff-popout-overlay.hidden { display: none; }
+/* The popout's file list has a context menu, and Copy/Show in Explorer report through
+   toasts — both normally sit far below the popout, so lift them while it is open. Items
+   that open a modal close the popout first instead (see showCommitFileContextMenu). */
+body.diff-popout-open .context-menu { z-index: 9700; }
+body.diff-popout-open .toast-container { z-index: 9710; }
 
 .diff-popout-window {
   width: 92vw;

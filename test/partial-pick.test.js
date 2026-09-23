@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { partialPickMessage, applyFailureHelp } = require('../src/main/lib/partial-pick');
+const { partialPickMessage, applyFailureHelp, rewritePlan } = require('../src/main/lib/partial-pick');
 
 const HASH = '0123456789abcdef0123456789abcdef01234567';
 
@@ -62,4 +62,46 @@ test('applyFailureHelp: a moved working tree is a different answer', () => {
 
 test('applyFailureHelp: an unrecognised failure is not dressed up as one of those two', () => {
   assert.strictEqual(applyFailureHelp('error: something else entirely'), null);
+});
+
+// Replacing the commit in history instead. The push half is the dangerous one: forcing a
+// branch that is behind its upstream deletes whatever the remote had that we never pulled.
+const OK_FACTS = {
+  branch: 'main', busy: false, onBranch: true, parents: 1, mergesAfter: 0, dirty: 0,
+  upstream: 'origin/main', onUpstream: true, behind: 0
+};
+
+test('rewritePlan: a pushed commit on the current branch can be replaced and force-pushed', () => {
+  const p = rewritePlan(OK_FACTS);
+  assert.strictEqual(p.canRewrite, true);
+  assert.strictEqual(p.canPush, true);
+});
+
+test('rewritePlan: never offers a force-push that would drop commits not yet pulled', () => {
+  const p = rewritePlan({ ...OK_FACTS, behind: 2 });
+  assert.strictEqual(p.canRewrite, true);
+  assert.strictEqual(p.canPush, false);
+  assert.match(p.pushReason, /2 commit\(s\) you have not pulled/);
+});
+
+test('rewritePlan: a commit the remote never saw needs no push', () => {
+  const p = rewritePlan({ ...OK_FACTS, onUpstream: false });
+  assert.strictEqual(p.canRewrite, true);
+  assert.strictEqual(p.canPush, false);
+});
+
+test('rewritePlan: refuses what a linear replay cannot do honestly', () => {
+  for (const [facts, re] of [
+    [{ branch: '' }, /detached/],
+    [{ onBranch: false }, /not part of main/],
+    [{ parents: 2 }, /merge commit/],
+    [{ mergesAfter: 1 }, /flatten/],
+    [{ dirty: 3 }, /uncommitted/],
+    [{ busy: true }, /in progress/]
+  ]) {
+    const p = rewritePlan({ ...OK_FACTS, ...facts });
+    assert.strictEqual(p.canRewrite, false);
+    assert.strictEqual(p.canPush, false, 'no push without a rewrite');
+    assert.match(p.reason, re);
+  }
 });

@@ -1093,6 +1093,31 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   cursor: pointer;
 }
 .cpick-mini:hover { background: var(--accent); color: var(--bone-white); border-color: var(--accent-bright); }
+/* New commit vs. replace in history. */
+.cpick-modes { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.cpick-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cpick-mode:has(input:checked) { border-color: var(--accent-bright); background: var(--bg-raised); }
+.cpick-mode input { margin-top: 2px; accent-color: var(--accent); flex-shrink: 0; }
+.cpick-mode.disabled { opacity: 0.6; cursor: default; }
+.cpick-why { display: block; margin-top: 3px; font-size: 11px; color: var(--parchment-dim); font-style: italic; }
+p.cpick-why { margin: -2px 0 6px 24px; }
+.cpick-warn {
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border-left: 3px solid var(--blood);
+  background: var(--bg-raised);
+}
+.modal-checkbox.disabled { opacity: 0.6; }
 
 .cfile-list {
   flex-shrink: 0;

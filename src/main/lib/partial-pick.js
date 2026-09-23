@@ -56,4 +56,40 @@ function applyFailureHelp(errorText) {
   return null;
 }
 
-module.exports = { partialPickMessage, applyFailureHelp };
+// The other half of the dialog: instead of a new commit, *replace* the commit in the
+// current branch's history with one that never carried the excluded files, replay what
+// came after it, and (optionally) force the remote to match. Whether that is allowed is a
+// pure decision over facts main has already gathered, so it lives here.
+//
+// facts:
+//   branch        current branch name, or '' when HEAD is detached
+//   busy          a merge/rebase/cherry-pick/revert is in progress
+//   onBranch      the commit is an ancestor of (or is) HEAD
+//   parents       the commit's parent count
+//   mergesAfter   merge commits between the commit and HEAD
+//   dirty         tracked files with uncommitted changes
+//   upstream      the branch's upstream ('origin/main'), or ''
+//   onUpstream    the commit is reachable from the upstream — i.e. it was pushed
+//   behind        commits the upstream has that HEAD does not
+//
+// A force-push is only offered when it would remove exactly the rewritten history: if the
+// remote has commits this branch has not pulled, forcing would silently delete them too.
+function rewritePlan(facts) {
+  const f = facts || {};
+  let reason = null;
+  if (f.busy) reason = 'A merge, rebase, cherry-pick or revert is already in progress. Finish or abort it first.';
+  else if (!f.branch) reason = 'You are not on a branch (detached HEAD). Check out the branch that holds this commit first.';
+  else if (!f.onBranch) reason = `This commit is not part of ${f.branch}. Check out a branch that contains it to rewrite it.`;
+  else if ((f.parents || 0) > 1) reason = 'This is a merge commit. Only an ordinary commit can be replaced here.';
+  else if ((f.mergesAfter || 0) > 0) reason = `${f.mergesAfter} merge commit(s) come after it on ${f.branch}, and replaying them would flatten the merges. Use an interactive rebase instead.`;
+  else if ((f.dirty || 0) > 0) reason = 'You have uncommitted changes. Commit, discard or stash them first — rewriting replays the branch through the working tree.';
+
+  let pushReason = null;
+  if (!f.upstream) pushReason = `${f.branch || 'This branch'} has no upstream, so there is no remote copy to replace.`;
+  else if (!f.onUpstream) pushReason = `The commit is not on ${f.upstream} yet, so the remote never saw it — no force-push is needed.`;
+  else if ((f.behind || 0) > 0) pushReason = `${f.upstream} has ${f.behind} commit(s) you have not pulled. Forcing would delete them — pull first.`;
+
+  return { canRewrite: !reason, reason, canPush: !reason && !pushReason, pushReason };
+}
+
+module.exports = { partialPickMessage, applyFailureHelp, rewritePlan };

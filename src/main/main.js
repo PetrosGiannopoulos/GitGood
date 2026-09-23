@@ -7,7 +7,7 @@ const simpleGit = require('simple-git');
 // Pure helpers live in ./lib so they can be unit-tested without Electron (`npm test`).
 // Everything here keeps its original name, so call sites read exactly as they did.
 const { pathspecFits, forEachPathChunk, withPathspecFile } = require('./lib/pathspec');
-const { partialPickMessage, applyFailureHelp } = require('./lib/partial-pick');
+const { partialPickMessage, applyFailureHelp, rewritePlan } = require('./lib/partial-pick');
 const { parsePushPorcelain } = require('./lib/push-porcelain');
 const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
@@ -180,6 +180,37 @@ app.on('activate', () => {
 // simple-git blocks GIT_SSH_COMMAND by default for safety. Since our SSH key path comes
 // from the user's own file picker (not an untrusted source), we opt-in to allow it.
 const SG_OPTS = { unsafe: { allowUnsafeSshCommand: true } };
+
+// Environment variables simple-git refuses to be handed through `.env()` — an editor,
+// pager, askpass or ssh command taken from the environment is arbitrary code execution —
+// failing with 'Use of "EDITOR" is not permitted without enabling allowUnsafeEditor'.
+// Any that merely happen to be set on the user's machine (Git Bash sets several, and
+// EDITOR is common) would abort every command given a copied process.env. The list
+// mirrors @simple-git/argv-parser, which matches names case-insensitively, and grew in
+// 3.3x: plain EDITOR, PAGER, PREFIX and GIT_EXEC_PATH are all on it. The inherited
+// process.env (no `.env()` call) is not checked, so ordinary commands never hit this.
+const SIMPLE_GIT_GUARDED_ENV = new Set([
+  'editor', 'git_editor', 'git_sequence_editor',
+  'pager', 'git_pager',
+  'git_askpass', 'ssh_askpass',
+  'git_ssh', 'git_ssh_command', 'git_proxy_command',
+  'git_external_diff', 'git_template_dir', 'git_exec_path', 'prefix',
+  'git_config', 'git_config_global', 'git_config_system', 'git_config_count'
+]);
+
+// A copy of `env` without the guarded variables (and the GIT_CONFIG_KEY_n/VALUE_n pairs
+// GIT_CONFIG_COUNT would have pointed at). `keep` exempts names the instance has been
+// explicitly allowed, such as GIT_SSH_COMMAND under SG_OPTS.
+function withoutGuardedEnv(env, keep) {
+  const kept = new Set((keep || []).map(k => k.toLowerCase()));
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    const lk = k.toLowerCase().trim();
+    if (!kept.has(lk) && (SIMPLE_GIT_GUARDED_ENV.has(lk) || /^git_config_(key|value)_\d+$/.test(lk))) continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 function makeGit(dir) {
   return simpleGit({ baseDir: dir, ...SG_OPTS });
@@ -367,7 +398,9 @@ ipcMain.handle('repo:clone', wrap(async (_, { url, destination, sshKeyPath }) =>
 
   // Build environment for the git child process.
   // For SSH URLs we want to make sure git can find the user's SSH key.
-  const cloneEnv = { ...process.env };
+  // GIT_SSH/GIT_SSH_COMMAND are kept: SG_OPTS allows them and a user's own ssh setup
+  // must still work. The rest simple-git would refuse outright.
+  const cloneEnv = withoutGuardedEnv(process.env, ['GIT_SSH_COMMAND', 'GIT_SSH']);
 
   if (sshKeyPath && fs.existsSync(sshKeyPath)) {
     // Use a specific SSH key for this clone. -o IdentitiesOnly=yes forces ssh
@@ -1408,6 +1441,290 @@ ipcMain.handle('repo:cherryPickPaths', wrap(async (_, opts) => {
   await g.raw(['commit', '--author', `${meta[0]} <${meta[1]}>`, '--date', meta[2], ...signArgs, '-m', message]);
   const newHash = (await g.raw(['rev-parse', 'HEAD'])).trim();
   return { committed: true, hash: newHash, files: changed.length, excluded, threeWay };
+}));
+
+// --------------------------------------------
+// …or REPLACE the commit in history
+// --------------------------------------------
+// The dialog's second mode. Instead of a new commit on top, the commit itself is swapped
+// for one identical except that the unticked files keep their parent's version, every
+// commit after it is rewritten on top the same way, and — when asked — the remote branch is
+// forced to match, so on the remote the original never happened.
+//
+//  - Every tree is built in a THROWAWAY INDEX (GIT_INDEX_FILE): read the commit's tree,
+//    `reset <target's parent> -- <excluded>` (which also drops a path the target added),
+//    then write-tree. No patch, no working tree, so none of the CRLF/LFS/size traps the pick
+//    side has to work around apply here — the blobs are reused as they are.
+//  - Every rewritten commit keeps author, committer and both dates (filter-branch style).
+//    The graph orders by committer date, so a fresh one moved the branch's lane — see the
+//    note where the metadata is read.
+//  - A backup branch holds the old tip first (the same `gitgood-backup/` scheme as squash),
+//    because this is the one operation in the dialog that makes commits unreachable.
+//  - The push is `--force-with-lease=<ref>:<sha we just checked>`, never a bare force, and
+//    is only offered when the branch is not behind its upstream (see rewritePlan): forcing a
+//    branch that is behind would delete a colleague's newer commits along with this one.
+//  - A later commit that itself touched an excluded file cannot be rewritten mechanically.
+//    Then the commits after the target go through `rebase --onto` instead, which pauses on
+//    that conflict for the resolver, and the push is not attempted.
+
+// A git command with extra environment, stdout collected as text. Spawned directly (rather
+// than through simple-git) because this needs GIT_INDEX_FILE and the GIT_AUTHOR_* vars, and
+// a timeout: commit-tree -S can wait forever on a pinentry a GUI process cannot show.
+// gitRun resolves with both streams and the exit code whatever happened — the push below
+// needs its porcelain stdout precisely when it fails, which is when simple-git drops it.
+function gitRun(args, extraEnv, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const proc = spawn('git', args, {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' }, extraEnv || {})
+    });
+    let out = '';
+    let err = '';
+    let timedOut = false;
+    const timer = timeoutMs ? setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs) : null;
+    proc.stdout.on('data', d => { out += String(d); });
+    proc.stderr.on('data', d => { if (err.length < 8192) err += String(d); });
+    proc.on('error', e => { if (timer) clearTimeout(timer); reject(e); });
+    proc.on('close', code => {
+      if (timer) clearTimeout(timer);
+      resolve({ code, out, err, timedOut });
+    });
+  });
+}
+
+async function gitWithEnv(args, extraEnv, timeoutMs) {
+  const r = await gitRun(args, extraEnv, timeoutMs);
+  if (r.timedOut) throw new Error(`git ${args[0]} timed out — if it was signing, the key may be waiting for a passphrase prompt that cannot appear.`);
+  if (r.code !== 0) throw new Error(r.err.trim() || `git ${args[0]} exited ${r.code}`);
+  return r.out;
+}
+
+// Everything rewritePlan needs, plus what the handler acts on. merge-base answers on stdout
+// (and prints nothing when there is no common ancestor), so it is safe through simple-git
+// where `merge-base --is-ancestor` is not.
+async function rewriteFacts(g, hash) {
+  const gitDir = (await g.raw(['rev-parse', '--absolute-git-dir'])).trim();
+  const busy = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']
+    .some(f => fs.existsSync(path.join(gitDir, f)));
+  const full = (await g.raw(['rev-parse', `${hash}^{commit}`])).trim();
+  let branch = '';
+  try { branch = (await g.raw(['symbolic-ref', '-q', '--short', 'HEAD'])).trim(); } catch (e) { branch = ''; }
+  const isAncestor = async (a, b) => {
+    try { return (await g.raw(['merge-base', a, b])).trim() === a; } catch (e) { return false; }
+  };
+  const count = async (range, extra) =>
+    parseInt((await g.raw(['rev-list', '--count', ...(extra || []), range])).trim(), 10) || 0;
+
+  const onBranch = branch ? await isAncestor(full, 'HEAD') : false;
+  const parents = await commitParentCount(g, full);
+  const mergesAfter = onBranch ? await count(`${full}..HEAD`, ['--merges']) : 0;
+  const descendants = onBranch ? await count(`${full}..HEAD`) : 0;
+  const dirty = (await g.raw(['status', '--porcelain', '--untracked-files=no'])).split('\n').filter(Boolean).length;
+
+  let upstream = '', upstreamSha = '', remote = '', remoteRef = '', onUpstream = false, behind = 0;
+  if (branch) {
+    const line = (await g.raw(['for-each-ref',
+      '--format=%(upstream:short)%1f%(upstream)%1f%(upstream:remotename)%1f%(upstream:remoteref)',
+      `refs/heads/${branch}`])).trim();
+    const [short, ref, rname, rref] = line.split('\x1f');
+    // for-each-ref, not rev-parse --verify: an upstream whose remote branch was deleted is
+    // configured but has no ref, and this answers that with empty output instead of an
+    // exit code simple-git would swallow.
+    const sha = ref ? (await g.raw(['for-each-ref', '--format=%(objectname)', ref])).trim() : '';
+    if (sha && rname && rref) {
+      upstream = short; upstreamSha = sha; remote = rname; remoteRef = rref;
+      onUpstream = await isAncestor(full, sha);
+      behind = await count(`HEAD..${sha}`);
+    }
+  }
+
+  // Other local branches holding the commit keep the original — they are not rewritten.
+  const otherBranches = (await g.raw(['branch', '--format=%(refname:short)', '--contains', full]))
+    .split('\n').map(s => s.trim()).filter(s => s && s !== branch);
+
+  return { hash: full, branch, busy, onBranch, parents, mergesAfter, descendants, dirty,
+    upstream, upstreamSha, remote, remoteRef, onUpstream, behind, otherBranches, gitDir };
+}
+
+ipcMain.handle('repo:rewritePreview', wrap(async (_, hash) => {
+  const g = ensureGit();
+  if (!hash) throw new Error('Commit hash required');
+  const f = await rewriteFacts(g, hash);
+  const plan = rewritePlan(f);
+  return {
+    ...plan, branch: f.branch, descendants: f.descendants, upstream: f.upstream,
+    onUpstream: f.onUpstream, behind: f.behind, otherBranches: f.otherBranches
+  };
+}));
+
+ipcMain.handle('repo:rewriteCommitPaths', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const o = opts || {};
+  if (!o.hash) throw new Error('Commit hash required');
+  const keep = Array.from(new Set((o.paths || []).filter(Boolean)));
+  if (!keep.length) throw new Error('Nothing selected — every file in the commit was excluded.');
+
+  // Re-checked here, not trusted from the preview: the dialog may have sat open through a
+  // background fetch or a commit.
+  const f = await rewriteFacts(g, o.hash);
+  const plan = rewritePlan(f);
+  if (!plan.canRewrite) throw new Error(plan.reason);
+  const wantPush = !!o.push;
+  if (wantPush && !plan.canPush) throw new Error(plan.pushReason);
+
+  const full = f.hash;
+  const all = (await commitPathEntries(g, full)).map(e => e.path);
+  const known = new Set(all);
+  const strays = keep.filter(p => !known.has(p));
+  if (strays.length) throw new Error(`Not part of commit ${full.slice(0, 7)}: ${strays.slice(0, 3).join(', ')}`);
+  const keepSet = new Set(keep);
+  const excluded = all.filter(p => !keepSet.has(p));
+  if (!excluded.length) throw new Error('Nothing was left out — the commit would be rewritten unchanged.');
+
+  // Signing. commit-tree ignores commit.gpgsign (verified), so the effective choice is
+  // resolved here: the commit box's tick when it says anything, else the repo's config.
+  let signConfigured = false;
+  try { signConfigured = /^true$/i.test((await g.raw(['config', '--bool', '--get', 'commit.gpgsign'])).trim()); } catch (e) { /* unset */ }
+  const signing = o.sign === true || (o.sign === undefined && signConfigured);
+  const signArgs = signing ? ['-S'] : ['--no-gpg-sign'];
+
+  // Each rewritten commit keeps ALL of its metadata — author, committer, and both dates —
+  // the way filter-branch does. A fresh committer date is not cosmetic: the graph orders
+  // `--all` by it, so a replacement dated "now" jumped above the production branch it was
+  // forked from and took the main lane, reading as merged work continuing from production
+  // (reported). The committer identity is the one exception: a signature by you on a commit
+  // naming someone else as committer shows as unverified on GitHub, so when signing, the
+  // committer is you (the date is still kept).
+  const metaOf = async (h) => {
+    const m = (await g.raw(['log', '-1', '--format=%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%B', h])).split('\x1f');
+    return { an: m[0], ae: m[1], ad: m[2], cn: m[3], ce: m[4], cd: m[5], body: m.slice(6).join('\x1f') };
+  };
+  const envOf = (m) => Object.assign(
+    { GIT_AUTHOR_NAME: m.an, GIT_AUTHOR_EMAIL: m.ae, GIT_AUTHOR_DATE: m.ad, GIT_COMMITTER_DATE: m.cd },
+    signing ? {} : { GIT_COMMITTER_NAME: m.cn, GIT_COMMITTER_EMAIL: m.ce });
+
+  // Trees are built in a throwaway index: read the commit's tree, put the excluded paths
+  // back as the target's parent had them, write-tree. Literal pathspecs: a Unity path such
+  // as "Icon[64].png" must not be read as a glob. A root commit has no parent, so its
+  // excluded paths are dropped with update-index — `rm --cached` compares against the
+  // working tree and refuses (verified), and this index has nothing to do with it.
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const idx = path.join(os.tmpdir(), `gitgood-rewrite-${stamp}.index`);
+  const msgFile = path.join(os.tmpdir(), `gitgood-rewrite-${stamp}.msg`);
+  const idxEnv = { GIT_INDEX_FILE: idx, GIT_LITERAL_PATHSPECS: '1' };
+  const treeWithout = async (commit) => {
+    await gitWithEnv(['read-tree', commit], idxEnv);
+    await forEachPathChunk(excluded, chunk => f.parents
+      ? gitWithEnv(['reset', '-q', `${full}^1`, '--', ...chunk], idxEnv)
+      : gitWithEnv(['update-index', '--force-remove', '--', ...chunk], idxEnv));
+    return (await gitWithEnv(['write-tree'], idxEnv)).trim();
+  };
+  // The message goes through a file: it is multi-line and has no business on a command line.
+  const commitTree = async (tree, parent, meta, message) => {
+    fs.writeFileSync(msgFile, message.replace(/\s+$/, '') + '\n', 'utf8');
+    return (await gitWithEnv(
+      ['commit-tree', tree, ...(parent ? ['-p', parent] : []), ...signArgs, '-F', msgFile],
+      envOf(meta), signing ? 60000 : 0
+    )).trim();
+  };
+
+  // What came after the target. If none of those commits touched an excluded path, each
+  // one is rewritten exactly like the target — same tree minus the excluded files, same
+  // metadata, new parent — with no working tree involved. If one did, the result for that
+  // file is a real decision (the later edit, of a file that no longer exists), so the
+  // replay goes through `rebase` and its conflict instead.
+  const later = f.descendants
+    ? (await g.raw(['rev-list', '--reverse', `${full}..HEAD`])).split('\n').map(s => s.trim()).filter(Boolean)
+    : [];
+  let touchesExcluded = false;
+  for (const h of later) {
+    await forEachPathChunk(excluded, async (chunk) => {
+      if (touchesExcluded) return;
+      const out = await gitWithEnv(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', `${h}^1`, h, '--', ...chunk],
+        { GIT_LITERAL_PATHSPECS: '1' });
+      if (out.replace(/\0/g, '').trim()) touchesExcluded = true;
+    });
+    if (touchesExcluded) break;
+  }
+
+  let replacement;
+  let newTip;
+  try {
+    const targetMeta = await metaOf(full);
+    replacement = await commitTree(await treeWithout(full), f.parents ? `${full}^1` : null, targetMeta,
+      (o.message && o.message.trim()) ? o.message : targetMeta.body);
+    newTip = replacement;
+    if (!touchesExcluded) {
+      for (const h of later) {
+        const m = await metaOf(h);
+        newTip = await commitTree(await treeWithout(h), newTip, m, m.body);
+      }
+    }
+  } finally {
+    for (const p of [idx, idx + '.lock', msgFile]) { try { fs.unlinkSync(p); } catch (e) { /* best effort */ } }
+  }
+
+  const oldHead = (await g.raw(['rev-parse', 'HEAD'])).trim();
+  let backupRef = null;
+  if (o.backup !== false) {
+    const safeBranch = f.branch.replace(/[^\w.-]+/g, '-');
+    const when = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '');
+    backupRef = `gitgood-backup/${safeBranch}/${when}`;
+    await g.raw(['branch', backupRef, oldHead]);
+  }
+  const dropBackup = async () => {
+    if (backupRef) { try { await g.raw(['branch', '-D', backupRef]); } catch (e) { /* best effort */ } }
+  };
+
+  if (!touchesExcluded) {
+    // Move the branch onto the rewritten chain. --keep updates only the files that differ
+    // (the excluded ones) and refuses rather than overwrite anything, before moving.
+    try { await g.raw(['reset', '--keep', newTip]); }
+    catch (err) { await dropBackup(); throw err; }
+  } else {
+    // rebaseSafeEnv for the same reason repo:rebase uses it. These replayed commits get a
+    // fresh committer date — that is rebase's behaviour, and the price of the conflict.
+    const rg = simpleGit(currentRepoPath).env(Object.assign({}, rebaseSafeEnv(), { GIT_TERMINAL_PROMPT: '0' }));
+    try {
+      await rg.raw(['rebase', '--onto', replacement, full, f.branch]);
+    } catch (err) {
+      const paused = fs.existsSync(path.join(f.gitDir, 'rebase-merge')) || fs.existsSync(path.join(f.gitDir, 'rebase-apply'));
+      if (paused) {
+        return { conflicted: true, replacement, backupRef, excluded: excluded.length,
+          upstream: f.upstream, pushSkipped: wantPush };
+      }
+      // Refused before it started (an untracked file in the way, typically): the branch
+      // never moved, so the backup is noise.
+      await dropBackup();
+      throw err;
+    }
+  }
+  const newHead = (await g.raw(['rev-parse', 'HEAD'])).trim();
+
+  let pushed = false, pushError = null;
+  if (wantPush) {
+    // The local rewrite stands whatever happens here; a failure is reported, not thrown.
+    try {
+      const r = await gitRun(['push', '--porcelain',
+        `--force-with-lease=${f.remoteRef}:${f.upstreamSha}`, f.remote, `HEAD:${f.remoteRef}`]);
+      const refs = parsePushPorcelain(r.out);
+      const rejected = refs.find(x => x.result === 'rejected');
+      pushed = r.code === 0 && !rejected;
+      if (!pushed) {
+        pushError = (rejected && /stale info/i.test(rejected.summary))
+          ? `${f.upstream} moved since it was last fetched, so it was not overwritten. Fetch, check what arrived, then force-push yourself.`
+          // A protected branch refuses in stderr ("not allowed to force push"), not in the
+          // porcelain line, so the remote's own words go through.
+          : (r.err.trim() || (rejected && rejected.summary) || 'The remote refused the push.');
+      }
+    } catch (e) {
+      pushError = String(e && e.message || e);
+    }
+  }
+
+  return { rewritten: true, replacement, newHead, backupRef, excluded: excluded.length,
+    replayed: f.descendants, pushed, pushError, upstream: f.upstream, otherBranches: f.otherBranches };
 }));
 
 ipcMain.handle('repo:revert', wrap(async (_, hash) => {
@@ -4021,24 +4338,11 @@ function writeRebaseEditorScript(todoPath, messagesPath) {
   return script;
 }
 
-// Environment variables that simple-git refuses to pass through, because an editor,
-// pager, askpass or ssh command taken from the environment is arbitrary code execution.
-// A rebase inherits the whole ambient environment (it needs PATH, SystemRoot, HOME…),
-// so any of these that merely happen to be set on the user's machine would abort the
-// rebase before it started. Strip them: a local rebase needs none of them, and we set
-// GIT_TERMINAL_PROMPT=0 so there is nothing for an askpass helper to answer anyway.
-const GIT_UNSAFE_ENV_VARS = [
-  'GIT_ASKPASS', 'SSH_ASKPASS',
-  'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR',
-  'GIT_SSH_COMMAND', 'GIT_PROXY_COMMAND',
-  'GIT_EXTERNAL_DIFF', 'GIT_PAGER',
-  'GIT_CONFIG', 'GIT_CONFIG_COUNT'
-];
-
+// A rebase inherits the whole ambient environment (it needs PATH, SystemRoot, HOME…) minus
+// what simple-git would refuse — see withoutGuardedEnv. A local rebase needs none of those,
+// and GIT_TERMINAL_PROMPT=0 leaves nothing for an askpass helper to answer anyway.
 function rebaseSafeEnv() {
-  const env = Object.assign({}, process.env);
-  for (const key of GIT_UNSAFE_ENV_VARS) delete env[key];
-  return env;
+  return withoutGuardedEnv(process.env);
 }
 
 // Run a rebase. Two modes:

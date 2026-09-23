@@ -1746,6 +1746,11 @@ async function runCherryPickOnto(sourceHash, destBranch) {
 // holding just the files you keep. Ticked means included; the dialog is the exclude list.
 // The whole operation is refused rather than half-done (see repo:cherryPickPaths), so a
 // selection that conflicts leaves the repository untouched.
+//
+// The dialog's second mode goes the other way: when the commit is on the current branch,
+// "Replace it in history" swaps it for one without the unticked files and replays what
+// followed (repo:rewriteCommitPaths). That mode is offered or refused by rewritePlan in
+// main, and the dialog only draws its answer.
 
 // git's name-status letters, mapped onto the status classes the file lists already style.
 const PICK_STATUS_CLASS = { A: 'added', M: 'modified', D: 'deleted', T: 'modified', R: 'renamed', C: 'renamed' };
@@ -1755,15 +1760,20 @@ async function openPartialCherryPick(hash, preselected) {
   // Always ask main for the file list rather than reading the preview's: a large commit's
   // diff is truncated before it is rendered, and a file that was cut off the bottom must
   // still be excludable — it is exactly the file nobody looked at.
-  const r = await withLoading('Reading commit', () => gs.commitPathList(hash));
+  const [r, rw] = await withLoading('Reading commit',
+    () => Promise.all([gs.commitPathList(hash), gs.rewritePreview(hash)]));
   if (!r.ok) { showToast(r.error || 'Could not read that commit', 'error', 6000); return; }
   const data = r.data || {};
   const files = data.files || [];
   if (!files.length) { showToast('That commit changes no files.', 'error'); return; }
-  showPartialCherryPickDialog(hash, data, files, preselected);
+  // Whether the commit can be replaced in place is a separate question; failing to answer
+  // it only disables that mode.
+  const rewrite = rw.ok ? (rw.data || {}) : { canRewrite: false, reason: rw.error || 'Could not inspect the branch.' };
+  showPartialCherryPickDialog(hash, data, files, preselected, rewrite);
 }
 
-function showPartialCherryPickDialog(hash, meta, files, preselected) {
+function showPartialCherryPickDialog(hash, meta, files, preselected, rewrite) {
+  rewrite = rewrite || { canRewrite: false, reason: '' };
   // A selection carried in from the commit preview means "these ones"; no selection means
   // the whole commit, which the user then narrows by unticking.
   const pre = (preselected && preselected.length) ? new Set(preselected) : null;
@@ -1772,12 +1782,20 @@ function showPartialCherryPickDialog(hash, meta, files, preselected) {
 
   const body = document.createElement('div');
   body.className = 'cpick';
+  const later = rewrite.descendants || 0;
+  const others = rewrite.otherBranches || [];
   body.innerHTML = `
-    <p class="modal-text">A new commit on <code class="text-mono text-red">${escapeHtml(current)}</code>
-      from <code class="text-mono text-red">${escapeHtml(short)}</code>
+    <p class="modal-text"><code class="text-mono text-red">${escapeHtml(short)}</code>
       ${meta.subject ? escapeHtml(meta.subject) : ''}${meta.author ? ` <span class="text-muted">— ${escapeHtml(meta.author)}</span>` : ''}</p>
-    <p class="modal-text text-muted" style="font-size:12px">Ticked files come across. Untick anything that should not —
-      commit ${escapeHtml(short)} itself is never changed, so this is safe on work that is already pushed.</p>
+    <div class="cpick-modes">
+      <label class="cpick-mode"><input type="radio" name="cpick-mode" value="pick" checked />
+        <span><strong>New commit</strong> on <code class="text-mono">${escapeHtml(current)}</code> with the ticked files —
+          ${escapeHtml(short)} itself is never changed, so this is safe on work that is already pushed.</span></label>
+      <label class="cpick-mode${rewrite.canRewrite ? '' : ' disabled'}"><input type="radio" name="cpick-mode" value="rewrite"${rewrite.canRewrite ? '' : ' disabled'} />
+        <span><strong>Replace it in history</strong> — ${escapeHtml(short)} becomes a commit that never carried the unticked files${
+          rewrite.canRewrite ? `, and ${later === 1 ? 'the 1 commit' : `the ${later} commits`} after it on ${escapeHtml(rewrite.branch || current)} ${later === 1 ? 'is' : 'are'} replayed on top.` : '.'}
+          ${rewrite.canRewrite ? '' : `<span class="cpick-why">${escapeHtml(rewrite.reason || '')}</span>`}</span></label>
+    </div>
     <input type="search" class="modal-input cpick-filter" placeholder="Filter files…" />
     <div class="cpick-list">${files.map((f, i) =>
       `<label class="cpick-row" data-cpick="${i}">` +
@@ -1791,8 +1809,20 @@ function showPartialCherryPickDialog(hash, meta, files, preselected) {
       <span class="cpick-count" aria-live="polite"></span>
     </div>
     <div class="modal-field"><label>Commit message</label><textarea class="modal-input cpick-msg" rows="4"></textarea></div>
-    <label class="modal-checkbox"><input type="checkbox" class="cpick-commit" checked />
+    <label class="modal-checkbox cpick-pick-only"><input type="checkbox" class="cpick-commit" checked />
       Commit now — untick to leave the changes staged and commit them yourself</label>
+    <div class="cpick-rewrite-only" hidden>
+      <p class="cpick-warn">This rewrites the history of <strong>${escapeHtml(rewrite.branch || current)}</strong>. Every commit from
+        ${escapeHtml(short)} onward gets a new hash, and the unticked files disappear from your working tree too${
+        rewrite.onUpstream ? `. Anyone who already pulled ${escapeHtml(rewrite.upstream || '')} will need to reset onto the new history.` : '.'}${
+        others.length ? ` The original stays on ${others.slice(0, 3).map(b => escapeHtml(b)).join(', ')}${others.length > 3 ? ` and ${others.length - 3} more` : ''}, which ${others.length === 1 ? 'is' : 'are'} not rewritten.` : ''}</p>
+      <label class="modal-checkbox${rewrite.canPush ? '' : ' disabled'}"><input type="checkbox" class="cpick-push"${rewrite.canPush ? ' checked' : ' disabled'} />
+        Force-push to ${escapeHtml(rewrite.upstream || 'the remote')} afterwards (with lease), so the remote loses the original too</label>
+      ${rewrite.canPush ? '' : `<p class="cpick-why">${escapeHtml(rewrite.pushReason || '')}</p>`}
+      <label class="modal-checkbox"><input type="checkbox" class="cpick-backup" checked />
+        Keep a backup branch of the current tip (gitgood-backup/…) — the original stays
+        visible in the graph beside its replacement until you delete it</label>
+    </div>
   `;
 
   // Set by property, not markup: a message full of quotes and newlines has no business
@@ -1806,19 +1836,28 @@ function showPartialCherryPickDialog(hash, meta, files, preselected) {
 
   const countEl = body.querySelector('.cpick-count');
   const okBtn = document.createElement('button');
+  const mode = () => (body.querySelector('input[name="cpick-mode"]:checked') || {}).value || 'pick';
   const sync = () => {
     const n = checkedPaths().length;
     const out = files.length - n;
-    countEl.textContent = `${n} of ${files.length} included` + (out ? ` · ${out} left behind` : '');
+    const replacing = mode() === 'rewrite';
+    countEl.textContent = `${n} of ${files.length} ${replacing ? 'kept' : 'included'}` + (out ? ` · ${out} ${replacing ? 'removed from history' : 'left behind'}` : '');
     body.querySelectorAll('.cpick-row').forEach(row => {
       const cb = row.querySelector('.cpick-check');
       row.classList.toggle('excluded', !(cb && cb.checked));
     });
-    okBtn.disabled = n === 0;
-    okBtn.textContent = n === 1 ? 'Pick 1 File' : `Pick ${n} Files`;
+    body.querySelector('.cpick-pick-only').hidden = replacing;
+    body.querySelector('.cpick-rewrite-only').hidden = !replacing;
+    // Replacing with nothing left out would rewrite the branch for no change at all.
+    okBtn.disabled = n === 0 || (replacing && out === 0);
+    okBtn.className = replacing ? 'btn-medieval danger' : 'btn-medieval primary';
+    okBtn.textContent = replacing ? 'Rewrite History'
+      : (n === 1 ? 'Pick 1 File' : `Pick ${n} Files`);
   };
 
-  body.addEventListener('change', (e) => { if (e.target.closest('.cpick-check')) sync(); });
+  body.addEventListener('change', (e) => {
+    if (e.target.closest('.cpick-check') || e.target.name === 'cpick-mode') sync();
+  });
   body.querySelector('.cpick-all').onclick = () => { checks().forEach(c => { if (!c.closest('.cpick-row').hidden) c.checked = true; }); sync(); };
   body.querySelector('.cpick-none').onclick = () => { checks().forEach(c => { if (!c.closest('.cpick-row').hidden) c.checked = false; }); sync(); };
 
@@ -1838,11 +1877,18 @@ function showPartialCherryPickDialog(hash, meta, files, preselected) {
   cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
   cancelBtn.onclick = () => modal.hide();
 
-  okBtn.className = 'btn-medieval primary';
   okBtn.onclick = async () => {
     const paths = checkedPaths();
     if (!paths.length) return;
     const message = msgBox.value;
+    if (mode() === 'rewrite') {
+      const push = !!body.querySelector('.cpick-push').checked;
+      const backup = !!body.querySelector('.cpick-backup').checked;
+      modal.hide();
+      const sign = typeof commitSignChoice === 'function' ? commitSignChoice() : undefined;
+      await runRewriteCommitPaths({ hash, paths, message, sign, push, backup });
+      return;
+    }
     const doCommit = !!body.querySelector('.cpick-commit').checked;
     modal.hide();
     // The commit box's tick is the truth about signing, the same as an ordinary commit.
@@ -1861,6 +1907,31 @@ function showPartialCherryPickDialog(hash, meta, files, preselected) {
 
   sync();
   modal.show({ title: 'Cherry-pick Files', body, footer: [cancelBtn, okBtn] });
+}
+
+// The "Replace it in history" half of the dialog (repo:rewriteCommitPaths). Three outcomes:
+// done, done locally but the remote refused, or paused on a conflict because a later
+// commit touched a file that was taken out — the last is an ordinary rebase from there.
+async function runRewriteCommitPaths(opts) {
+  const r = await withLoading(opts.push ? 'Rewriting history and pushing' : 'Rewriting history',
+    () => gs.rewriteCommitPaths(opts));
+  await refreshAll();
+  if (!r.ok) { showToast(r.error || 'Could not rewrite the commit', 'error', 12000); return; }
+  const d = r.data || {};
+  const backup = d.backupRef ? ` Backup: ${d.backupRef}.` : '';
+  if (d.conflicted) {
+    showToast('A later commit also changed a removed file, so the replay paused on a conflict. Resolve it, then Continue.'
+      + (d.pushSkipped ? ' Nothing was pushed — force-push once the rebase is finished.' : '') + backup, 'info', 12000);
+    if (typeof openConflictResolver === 'function') openConflictResolver();
+    return;
+  }
+  const n = d.excluded || 0;
+  const what = `Replaced ${String(opts.hash).slice(0, 7)} with ${String(d.replacement || '').slice(0, 7)} — ${n} file${n === 1 ? '' : 's'} removed from history`;
+  if (opts.push && !d.pushed) {
+    showToast(`${what}, but the push failed: ${d.pushError || 'unknown error'}.${backup}`, 'error', 15000);
+    return;
+  }
+  showToast(`${what}${d.pushed ? `, and ${d.upstream} was force-pushed` : ''}.${backup}`, 'success', 9000);
 }
 
 // ============================================

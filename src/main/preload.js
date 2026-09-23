@@ -142,6 +142,9 @@ const api = {
   // section of main.js. commitPathList is the file list that dialog is built from.
   commitPathList: (h) => ipcRenderer.invoke('repo:commitPathList', h),
   cherryPickPaths: (opts) => ipcRenderer.invoke('repo:cherryPickPaths', opts),
+  // The same dialog's other mode: replace the commit in the branch's history instead.
+  rewritePreview: (h) => ipcRenderer.invoke('repo:rewritePreview', h),
+  rewriteCommitPaths: (opts) => ipcRenderer.invoke('repo:rewriteCommitPaths', opts),
   revert: (h) => ipcRenderer.invoke('repo:revert', h),
   reset: (opts) => ipcRenderer.invoke('repo:reset', opts),
   moveBranch: (opts) => ipcRenderer.invoke('repo:moveBranch', opts),

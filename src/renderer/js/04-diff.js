@@ -1374,21 +1374,25 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
 }
 
 // Context menu for a file (or selected files) within a commit preview.
-function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y) {
+// `opts.beforeDialog` runs before any item that opens a modal or overlay. The pop-out diff
+// viewer passes its own close here: it sits above every modal layer, so a dialog opened
+// from it would appear behind it.
+function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y, opts = {}) {
   const many = targetPaths.length > 1;
   const label = many ? `Restore ${targetPaths.length} files to working tree`
                       : `Restore “${shortenPath(rightClickedPath || targetPaths[0])}” to working tree`;
   const focus = rightClickedPath || targetPaths[0];
+  const dialog = (fn) => () => { if (opts.beforeDialog) opts.beforeDialog(); return fn(); };
   const items = [
-    { label, icon: '↩', action: () => restoreFilesFromCommit(hash, targetPaths) },
+    { label, icon: '↩', action: dialog(() => restoreFilesFromCommit(hash, targetPaths)) },
     { label: many ? `Cherry-pick these ${targetPaths.length} files onto current…` : 'Cherry-pick this file onto current…',
-      icon: '⚒', action: () => openPartialCherryPick(hash, targetPaths) },
+      icon: '⚒', action: dialog(() => openPartialCherryPick(hash, targetPaths)) },
     'sep',
-    { label: 'File history…', icon: '⌛', action: () => openFileHistory(focus) },
-    { label: 'Blame at this commit…', icon: '⚔', action: () => openBlame(focus, { rev: hash }) },
+    { label: 'File history…', icon: '⌛', action: dialog(() => openFileHistory(focus)) },
+    { label: 'Blame at this commit…', icon: '⚔', action: dialog(() => openBlame(focus, { rev: hash })) },
     // The third lens on the same file: history shows where it has been, blame who put it
     // there, and this what it looked like in the commits that are no longer in history.
-    { label: 'Peek at its soul…', icon: '☠', action: () => openSoulOfFile(focus) },
+    { label: 'Peek at its soul…', icon: '☠', action: dialog(() => openSoulOfFile(focus)) },
     'sep',
     { label: 'Copy path' + (many ? 's' : ''), icon: '⎘',
       action: () => copyText(targetPaths.join('\n'), 'Path' + (many ? 's' : '') + ' copied') },

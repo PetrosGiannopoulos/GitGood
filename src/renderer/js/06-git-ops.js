@@ -1591,6 +1591,7 @@ function buildPopoutModel() {
     const opts = owner._cfileOpts || {};
     return {
       kind: 'commit',
+      hash: opts.hash,
       label: opts.hash ? `Commit ${String(opts.hash).slice(0,7)}` : 'Commit changes',
       files: owner._cfiles.map(f => ({ path: f.path, status: f.status, _diff: f.diff })),
       render: (file, into) => {
@@ -1626,6 +1627,17 @@ function renderPopoutFileList() {
       <div class="file-status ${f.status || 'modified'}">${letterFor(f.status)}</div>
       <div class="file-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</div>`;
     li.onclick = () => selectPopoutFile(f);
+    // Same menu as the commit preview's file list. The popout selects one file at a time,
+    // so the menu always targets just the row that was right-clicked.
+    if (_popoutModel.kind === 'commit' && _popoutModel.hash) {
+      const hash = _popoutModel.hash;
+      li.oncontextmenu = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showCommitFileContextMenu(hash, [f.path], f.path, e.pageX, e.pageY,
+                                  { beforeDialog: closeDiffPopout });
+      };
+    }
     listEl.appendChild(li);
   });
 }
@@ -1676,12 +1688,14 @@ function openDiffPopout() {
 
   const overlay = document.getElementById('diff-popout-overlay');
   if (overlay) overlay.classList.remove('hidden');
+  document.body.classList.add('diff-popout-open');
   setTimeout(() => { const f = document.getElementById('diff-popout-filter'); if (f) f.focus(); }, 40);
 }
 
 function closeDiffPopout() {
   const overlay = document.getElementById('diff-popout-overlay');
   if (overlay) overlay.classList.add('hidden');
+  document.body.classList.remove('diff-popout-open');
   _popoutModel = null;
   _popoutActivePath = null;
 }
