@@ -1390,11 +1390,21 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y) {
     // there, and this what it looked like in the commits that are no longer in history.
     { label: 'Peek at its soul…', icon: '☠', action: () => openSoulOfFile(focus) },
     'sep',
-    { label: 'Copy path' + (many ? 's' : ''), icon: '⎘', action: () => {
-        navigator.clipboard.writeText(targetPaths.join('\n'));
-        showToast('Path' + (many ? 's' : '') + ' copied', 'success');
-      } }
+    { label: 'Copy path' + (many ? 's' : ''), icon: '⎘',
+      action: () => copyText(targetPaths.join('\n'), 'Path' + (many ? 's' : '') + ' copied') },
+    { label: 'Copy absolute path' + (many ? 's' : ''), icon: '⎘',
+      action: () => copyText(targetPaths.map(absoluteRepoPath).join('\n'),
+                             'Absolute path' + (many ? 's' : '') + ' copied') }
   ];
+  // Single file only, as in the Changes list. The commit's version of a file may no longer
+  // be on disk (deleted or renamed since), in which case main opens the nearest folder.
+  if (!many) {
+    items.push({ label: 'Show in File Explorer', icon: '⛬', action: async () => {
+      const r = await gs.revealPath(focus);
+      if (!r.ok) { showToast(r.error || 'Could not open the folder', 'error', 5000); return; }
+      if (r.data && !r.data.revealed) showToast('File is no longer on disk — opened its folder', 'info', 4000);
+    }});
+  }
   showContextMenu(items, x, y);
 }
 

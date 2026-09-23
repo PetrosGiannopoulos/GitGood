@@ -293,6 +293,15 @@ function showToast(message, type = 'info', timeout = 3500) {
   }, timeout);
 }
 
+// Join a git (repo-relative, '/'-separated) path onto the open repository's root, using
+// the root's own separator so a Windows path pastes as C:\repo\Assets\x.cs.
+function absoluteRepoPath(relPath) {
+  const root = (state.repo && state.repo.path) || '';
+  const sep = root.includes('\\') ? '\\' : '/';
+  const rel = String(relPath).split('/').join(sep);
+  return root.endsWith(sep) ? root + rel : root + sep + rel;
+}
+
 // Copy text to the clipboard. Prefers Electron's native clipboard (via IPC) because
 // navigator.clipboard.writeText is denied when invoked from a context-menu click —
 // the document isn't focused at that moment, so Chromium blocks the Async Clipboard
