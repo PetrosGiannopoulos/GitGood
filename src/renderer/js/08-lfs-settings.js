@@ -340,9 +340,17 @@ const ALACRITTY_THEMES = (typeof window !== 'undefined' && window.ALACRITTY_THEM
 const ALACRITTY_BY_ID = Object.create(null);
 for (const t of ALACRITTY_THEMES) ALACRITTY_BY_ID[t.id] = t;
 
-// The picker shows built-ins plus all Alacritty themes.
+// Marvel hero themes (00-hero-themes.js): heroes, anti-heroes and villains. Same `vars` shape
+// as the Alacritty palettes, so they ride the same injection path in applyTheme — registered
+// in ALACRITTY_BY_ID for exactly that reason. Their auras are CSS vars too (see 04-themes.css).
+const HERO_THEMES = (typeof window !== 'undefined' && window.HERO_THEMES) || [];
+for (const t of HERO_THEMES) ALACRITTY_BY_ID[t.id] = t;
+// The settings picker's sections, in order.
+const HERO_GROUPS = [['hero', 'Heroes'], ['antihero', 'Anti-heroes'], ['villain', 'Villains']];
+
+// The picker shows built-ins plus all Alacritty and hero themes.
 const AVAILABLE_THEMES = BUILTIN_THEMES.concat(
-  ALACRITTY_THEMES.map(t => ({ id: t.id, name: t.name, swatches: t.swatches, alacritty: true, dark: t.dark }))
+  ALACRITTY_THEMES.concat(HERO_THEMES).map(t => ({ id: t.id, name: t.name, swatches: t.swatches, alacritty: true, dark: t.dark }))
 );
 
 // Style element used to inject an Alacritty theme's CSS variables onto :root.
@@ -365,12 +373,15 @@ function applyTheme(themeId) {
   const html = document.documentElement;
   // Clear every possible theme class (built-ins + the alacritty marker)
   for (const t of BUILTIN_THEMES) html.classList.remove('theme-' + t.id);
-  html.classList.remove('theme-alacritty');
+  html.classList.remove('theme-alacritty', 'theme-hero');
+  for (const t of HERO_THEMES) html.classList.remove('theme-' + t.id);
 
   const alac = ALACRITTY_BY_ID[themeId];
   if (alac) {
     injectAlacrittyVars(alac);
     html.classList.add('theme-alacritty');
+    // Hero themes also get marker classes, which is what their auras in 04-themes.css key on.
+    if (HERO_THEMES.includes(alac)) html.classList.add('theme-hero', 'theme-' + alac.id);
     html.classList.toggle('theme-light', !alac.dark);
   } else {
     injectAlacrittyVars(null);            // remove any injected vars
@@ -687,6 +698,20 @@ async function showSettingsDialog() {
         </div>
       </div>
       <div class="settings-group">
+        <div class="settings-group-title">Marvel themes <span class="text-muted" style="font-weight:400">(${HERO_THEMES.length})</span></div>
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Heroes, anti-heroes and villains — each with its suit's palette and its own aura.</p>
+        <input type="search" id="hero-search" class="commit-search" style="margin:0 0 10px;width:100%" placeholder="Search ${HERO_THEMES.length} heroes & villains (e.g. thor, venom, thanos)…" />
+        <div class="hero-groups" id="hero-picker">
+          ${HERO_GROUPS.map(([group, title]) => {
+            const list = HERO_THEMES.filter(t => t.group === group);
+            return list.length ? `<div class="hero-group" data-group="${group}">
+              <div class="hero-group-title">${title}</div>
+              <div class="theme-picker">${list.map(t => heroCardHtml(t, appSettings.theme)).join('')}</div>
+            </div>` : '';
+          }).join('')}
+        </div>
+      </div>
+      <div class="settings-group">
         <div class="settings-group-title">Typography</div>
         <div class="settings-row">
           <div class="label">Font size<small>Multiplier for the UI text size</small></div>
@@ -752,6 +777,24 @@ async function showSettingsDialog() {
       search.onkeydown = (e) => { if (e.key === 'Escape') { search.value = ''; search.oninput(); } };
     }
 
+    // Marvel theme search: filters cards and hides a group left with none.
+    const heroSearch = panel.querySelector('#hero-search');
+    if (heroSearch) {
+      heroSearch.oninput = () => {
+        const q = heroSearch.value.trim().toLowerCase();
+        panel.querySelectorAll('#hero-picker .hero-group').forEach(g => {
+          let shown = 0;
+          g.querySelectorAll('.theme-card').forEach(card => {
+            const hit = !q || (card.dataset.name || '').toLowerCase().includes(q);
+            card.style.display = hit ? '' : 'none';
+            if (hit) shown++;
+          });
+          g.style.display = shown ? '' : 'none';
+        });
+      };
+      heroSearch.onkeydown = (e) => { if (e.key === 'Escape') { heroSearch.value = ''; heroSearch.oninput(); } };
+    }
+
     // Font scale
     const fs = panel.querySelector('#set-font-scale');
     fs.onchange = () => {
@@ -809,6 +852,18 @@ async function showSettingsDialog() {
   // One theme card. `dark` flag (Alacritty) tunes the name text via CSS if needed.
   function themeCardHtml(t, currentId) {
     return `<button class="theme-card ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}">
+      <div class="theme-swatches">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
+      <div class="theme-card-name">${escapeHtml(t.name)}</div>
+    </button>`;
+  }
+
+  // A Marvel theme card previews the theme itself: its own background with the accent and
+  // secondary glowing in opposite corners, and its own text colour. The colours are passed as
+  // custom properties so the rule in 04-themes.css stays one rule for all of them.
+  function heroCardHtml(t, currentId) {
+    const v = t.vars;
+    const style = `--hc-bg:${v['--bg']};--hc-accent:${v['--accent']};--hc-gold:${v['--gold-accent']};--hc-text:${v['--text']};--hc-border:${v['--border']}`;
+    return `<button class="theme-card hero-card ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}" style="${style}">
       <div class="theme-swatches">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
       <div class="theme-card-name">${escapeHtml(t.name)}</div>
     </button>`;
