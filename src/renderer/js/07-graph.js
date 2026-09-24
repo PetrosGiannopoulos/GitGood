@@ -341,6 +341,129 @@ function refreshThemeLaneColors() {
   } catch (e) { /* keep current palette */ }
 }
 
+// ----- Lane line styles -----
+// Purely cosmetic skins over the same geometry: 'default' | 'dragon' | 'gears' |
+// 'constellations'. Each styled edge is a <g class="graph-edge"> of stacked strokes, so the
+// ancestry dimming (opacity on .graph-edge) works unchanged. Commit dots stay plain <circle>s —
+// every click/drag/hover selector keys on `circle.commit-dot` — and a style's per-commit
+// ornament is drawn in its own pointer-events:none layer underneath them.
+const GRAPH_LINE_STYLES = ['default', 'dragon', 'gears', 'constellations'];
+function graphLineStyle() {
+  const s = typeof state !== 'undefined' && state.graphLineStyle;
+  return GRAPH_LINE_STYLES.includes(s) ? s : 'default';
+}
+
+// Dark / light companions of each lane colour, resolved once per render (SVG attributes
+// can't take color-mix, and resolving per edge would touch the DOM hundreds of times).
+function graphLaneShades() {
+  return LANE_COLORS.map(c => ({
+    base: c,
+    dark: resolveColor(`color-mix(in srgb, ${c} 38%, black)`),
+    light: resolveColor(`color-mix(in srgb, ${c} 55%, white)`),
+  }));
+}
+
+// A star polygon (alternating outer/inner radius). Serves the dragon's spiked knot, the
+// gear's cog (square-ish teeth via `teeth`) and the constellation's four-point sparkle.
+function graphStarPath(cx, cy, rOut, rIn, points, rot) {
+  const f = (n) => Math.round(n * 10) / 10;
+  let d = '';
+  for (let i = 0; i < points * 2; i++) {
+    const a = (rot || 0) + (Math.PI * i) / points;
+    const r = i % 2 ? rIn : rOut;
+    d += (i ? 'L' : 'M') + f(cx + r * Math.sin(a)) + ' ' + f(cy - r * Math.cos(a));
+  }
+  return d + 'Z';
+}
+function graphGearPath(cx, cy, rOut, rIn, teeth) {
+  const f = (n) => Math.round(n * 10) / 10;
+  const step = (Math.PI * 2) / teeth;
+  let d = '';
+  for (let i = 0; i < teeth; i++) {
+    const a = i * step;
+    // root → flank up → tooth top → flank down, each tooth ~45% of its pitch
+    const pts = [[rIn, a], [rOut, a + step * 0.12], [rOut, a + step * 0.45], [rIn, a + step * 0.57]];
+    for (const [r, t] of pts) d += (d ? 'L' : 'M') + f(cx + r * Math.sin(t)) + ' ' + f(cy - r * Math.cos(t));
+  }
+  return d + 'Z';
+}
+
+// <defs> + backdrop for a style, emitted once per render into the graph's <svg>.
+function graphStyleDefs(style, shades, width, height) {
+  if (style === 'dragon') {
+    // One scale texture per lane colour. userSpaceOnUse, so the scales sit still in document
+    // space and the lane reads as a hide the stroke is cut from.
+    const pats = shades.map((s, i) =>
+      `<pattern id="gg-scale-${i}" width="5" height="5" patternUnits="userSpaceOnUse">` +
+        `<rect width="5" height="5" fill="${s.base}"/>` +
+        `<path d="M0.9 0.4a1.6 1.6 0 0 0 3.2 0M-1.6 2.9a1.6 1.6 0 0 0 3.2 0M3.4 2.9a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="${s.light}" stroke-width="0.6" opacity="0.55"/>` +
+        `<path d="M0 0a2.5 2.5 0 0 0 5 0M-2.5 2.5a2.5 2.5 0 0 0 5 0M2.5 2.5a2.5 2.5 0 0 0 5 0" fill="none" stroke="${s.dark}" stroke-width="0.8"/>` +
+      `</pattern>`).join('');
+    return { defs: `<defs>${pats}</defs>`, backdrop: '' };
+  }
+  if (style === 'constellations') {
+    const star = resolveColor('var(--text, #efe6d4)');
+    const field = [[7, 5, 0.6, 0.7], [31, 13, 0.4, 0.5], [52, 3, 0.5, 0.45], [18, 27, 0.7, 0.6],
+      [44, 34, 0.4, 0.5], [3, 41, 0.5, 0.4], [26, 48, 0.4, 0.55], [57, 22, 0.6, 0.35], [38, 55, 0.5, 0.6]];
+    const dots = field.map(([x, y, r, o]) => `<circle cx="${x}" cy="${y}" r="${r}" fill="${star}" opacity="${o}"/>`).join('');
+    return {
+      defs: `<defs><pattern id="gg-starfield" width="61" height="59" patternUnits="userSpaceOnUse">${dots}</pattern></defs>`,
+      backdrop: `<rect class="graph-backdrop" x="0" y="0" width="${width}" height="${height}" fill="url(#gg-starfield)" opacity="0.55"/>`,
+    };
+  }
+  return { defs: '', backdrop: '' };
+}
+
+// The path `d` for a lane-changing edge. Constellations draw star-chart angles; every other
+// style keeps the default S-curve.
+function graphCrossEdgePath(style, x1, y1, x2, y2) {
+  const midY = y1 + (y2 - y1) / 2;
+  if (style === 'constellations') {
+    const h = Math.min(GRAPH_ROW_H / 2, (y2 - y1) / 2);
+    return `M ${x1} ${y1} L ${x1} ${midY - h} L ${x2} ${midY + h} L ${x2} ${y2}`;
+  }
+  return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
+}
+
+// The stacked strokes for one solid edge in a non-default style. `d` is a path; straight runs
+// are passed as a path too so every layer can share one geometry.
+function graphStyledEdge(style, d, shade, idx, cls, owner) {
+  const p = (attrs) => `<path d="${d}" fill="none" ${attrs}/>`;
+  let inner = '';
+  if (style === 'dragon') {
+    // dark hide outline → scaled body → a faint dorsal ridge
+    inner = p(`stroke="${shade.dark}" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"`) +
+      p(`stroke="url(#gg-scale-${idx})" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"`) +
+      p(`stroke="${shade.light}" stroke-width="0.9" stroke-dasharray="4 3" opacity="0.5"`);
+  } else if (style === 'gears') {
+    // toothed rack → dark rail → brass core → rivets
+    inner = p(`stroke="${shade.base}" stroke-width="8" stroke-dasharray="2 2.4" opacity="0.85"`) +
+      p(`stroke="${shade.dark}" stroke-width="4.5"`) +
+      p(`stroke="${shade.base}" stroke-width="2.2"`) +
+      p(`stroke="${shade.light}" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="0 9"`);
+  } else if (style === 'constellations') {
+    // soft glow under a fine chart line
+    inner = p(`stroke="${shade.base}" stroke-width="4" opacity="0.14" stroke-linejoin="round"`) +
+      p(`stroke="${shade.light}" stroke-width="1.1" opacity="0.9" stroke-linejoin="round"`);
+  }
+  return `<g class="${cls}"${owner}>${inner}</g>`;
+}
+
+// The ornament drawn under a commit dot (radius `r`) for a style; '' for default.
+function graphStyledDeco(style, cx, cy, r, shade, cls) {
+  if (style === 'dragon') {
+    return `<path class="${cls}" d="${graphStarPath(cx, cy, r + 6, r + 0.5, 5, 0)}" fill="${shade.dark}" stroke="${shade.base}" stroke-width="0.8" stroke-linejoin="round"/>`;
+  }
+  if (style === 'gears') {
+    return `<path class="${cls}" d="${graphGearPath(cx, cy, r + 4, r + 2, 9)}" fill="${shade.dark}" stroke="${shade.base}" stroke-width="0.9" stroke-linejoin="round"/>`;
+  }
+  if (style === 'constellations') {
+    return `<path class="${cls}" d="${graphStarPath(cx, cy, r + 6, 1.4, 4, 0)}" fill="${shade.light}" opacity="0.7"/>` +
+      `<circle class="${cls}" cx="${cx}" cy="${cy}" r="${r + 2.5}" fill="${shade.base}" opacity="0.18"/>`;
+  }
+  return '';
+}
+
 // ----- Branches column width (#readability) -----
 // Refs (branches/tags/HEAD) render in their own column to the left of the commit message
 // (GitKraken style). The column auto-grows to fit the busiest commit, so its width must be
@@ -511,6 +634,11 @@ function renderGraph() {
   // geometry and long carry lines that overshoot the viewport cost nothing extra. Only the
   // windowed subset of dots/edges exists in the DOM, rebuilt when the row window changes.
 
+  // Lane line style (cosmetic skin; see graphLineStyle) and its colour shades, resolved once.
+  const lineStyle = graphLineStyle();
+  const shades = lineStyle !== 'default' ? graphLaneShades() : null;
+  const styleDefs = graphStyleDefs(lineStyle, shades, svgWidth, totalHeight);
+
   // Build the SVG string for one edge. A straight run is a single <line> spanning all its
   // rows (#2); a column change is a short cubic.
   const buildEdge = (e) => {
@@ -532,6 +660,11 @@ function renderGraph() {
     }
     const y1 = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
     const y2 = e.toRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    if (lineStyle !== 'default') {
+      const idx = colorKey % shades.length;
+      const d = x1 === x2 ? `M ${x1} ${y1} L ${x2} ${y2}` : graphCrossEdgePath(lineStyle, x1, y1, x2, y2);
+      return graphStyledEdge(lineStyle, d, shades[idx], idx, `graph-edge styled${relCls}`, owner);
+    }
     if (x1 === x2) {
       return `<line class="graph-edge${relCls}"${owner} x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`;
     }
@@ -577,6 +710,17 @@ function renderGraph() {
       : '';
     dot += `<title style="pointer-events:none">${escapeHtml(lineLabel + foldHint)}</title>`;
     return dot + `</circle>`;
+  };
+
+  // The style's ornament under one commit dot (never a <circle.commit-dot>, and in a
+  // pointer-events:none layer, so every dot interaction is untouched).
+  const buildDeco = (c, pos) => {
+    const cx = GRAPH_LANE_X0 + pos.lane * GRAPH_LANE_W;
+    const cy = pos.row * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    const key = pos.colorIdx != null ? pos.colorIdx : pos.lane;
+    const r = (c.parents || []).length > 1 ? 6 : 5;
+    const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
+    return graphStyledDeco(lineStyle, cx, cy, r, shades[key % shades.length], `graph-deco-item${relCls}`);
   };
 
   // Build the branch-column cell for one commit. Refs live in their OWN virtualized column
@@ -675,8 +819,10 @@ function renderGraph() {
     `<div class="graph-svg-wrap${refColWidth > 0 ? ' has-refs' : ''}" style="grid-template-columns: ${gridCols}">` +
       refsColHtml +
       `<div class="graph-svg-col" style="height:${totalHeight}px;width:${svgWidth}px">` +
-        `<svg class="graph-svg" width="${svgWidth}" height="0" viewBox="0 0 ${svgWidth} 0" preserveAspectRatio="xMinYMin slice">` +
+        `<svg class="graph-svg line-style-${lineStyle}" width="${svgWidth}" height="0" viewBox="0 0 ${svgWidth} 0" preserveAspectRatio="xMinYMin slice">` +
+          styleDefs.defs + styleDefs.backdrop +
           `<g class="graph-edges"></g>` +
+          `<g class="graph-deco"></g>` +
           `<g class="graph-dots"></g>` +
         `</svg>` +
       `</div>` +
@@ -687,6 +833,7 @@ function renderGraph() {
 
   const edgesG = container.querySelector('.graph-edges');
   const dotsG = container.querySelector('.graph-dots');
+  const decoG = container.querySelector('.graph-deco');
   const rowsEl = container.querySelector('.graph-rows');
   const svgEl = container.querySelector('.graph-svg');
   const refsColEl = container.querySelector('.graph-refs-col');
@@ -721,15 +868,19 @@ function renderGraph() {
     const rowParts = [];
     const dotParts = [];
     const refParts = [];
+    const decoParts = [];
+    const withDeco = lineStyle !== 'default';
     for (let i = start; i <= end; i++) {
       const c = commits[i];
       const pos = positions.get(c.hash);
       if (!pos) continue;
       dotParts.push(buildDot(c, pos));
+      if (withDeco) decoParts.push(buildDeco(c, pos));
       rowParts.push(buildRow(c, pos));
       if (refsColEl) refParts.push(buildRefCell(c, pos));
     }
     dotsG.innerHTML = dotParts.join('');
+    if (withDeco) decoG.innerHTML = decoParts.join('');
     rowsEl.innerHTML = rowParts.join('');
     if (refsColEl) refsColEl.innerHTML = refParts.join('');
 
@@ -2641,11 +2792,14 @@ function wireGraphTab() {
     const hideLocalCb = $('#graph-opt-hide-local');
     const stripRemoteCb = $('#graph-opt-strip-remote');
     const hideLocalCommitsCb = $('#graph-opt-hide-local-commits');
+    const lineStyleRadios = $$('input[name="graph-line-style"]');
     // Reflect persisted state onto the checkboxes each time the menu opens.
     const syncChecks = () => {
       if (hideLocalCb) hideLocalCb.checked = !!state.graphHideLocal;
       if (stripRemoteCb) stripRemoteCb.checked = !!state.graphStripRemotePrefix;
       if (hideLocalCommitsCb) hideLocalCommitsCb.checked = !!state.graphHideLocalCommits;
+      const style = graphLineStyle();
+      for (const rb of lineStyleRadios) rb.checked = rb.value === style;
     };
     const closeMenu = () => {
       gearMenu.hidden = true;
@@ -2678,6 +2832,15 @@ function wireGraphTab() {
       if (state.graphHideLocalCommits) await ensureLocalOnlyCommits();
       relayoutGraph();
     };
+    // Line style is purely cosmetic: no relayout, just a repaint of the laid-out graph.
+    for (const rb of lineStyleRadios) {
+      rb.onchange = () => {
+        if (!rb.checked) return;
+        state.graphLineStyle = rb.value;
+        try { gs.setAppSettings({ graphLineStyle: rb.value }); } catch (e) {}
+        renderGraph();
+      };
+    }
   }
 
   // Graph search/filter (debounced so typing stays smooth on large graphs)

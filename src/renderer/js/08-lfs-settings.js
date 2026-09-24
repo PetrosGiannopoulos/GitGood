@@ -1209,6 +1209,7 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   graphHideLocal: false,
   graphStripRemotePrefix: false,
   graphHideLocalCommits: false,
+  graphLineStyle: 'default',
   autoFetchOnFocus: true,
   watchFileSystem: true,
   autoFetchMinutes: 10,
@@ -1239,6 +1240,7 @@ async function applySavedAppSettings() {
         state.graphHideLocal = !!r.data.graphHideLocal;
         state.graphStripRemotePrefix = !!r.data.graphStripRemotePrefix;
         state.graphHideLocalCommits = !!r.data.graphHideLocalCommits;
+        state.graphLineStyle = r.data.graphLineStyle || 'default';
         state.diffSyntax = r.data.diffSyntax !== false;
         state.llmEnabled = !!r.data.llmAssistant;
         state.llmModel = r.data.llmModel || 'llama3.2:3b';

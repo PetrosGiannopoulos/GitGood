@@ -1025,7 +1025,8 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
 }
 .cfile-selall:hover { color: var(--bone-white); }
 .cfile-selcount { color: var(--accent-bright); flex: 1; }
-.cfile-restore-btn {
+.cfile-restore-btn,
+.cfile-pick-btn {
   font-family: var(--font-display);
   font-size: 10px;
   letter-spacing: 0.05em;
@@ -1037,12 +1038,14 @@ html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at to
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.cfile-restore-btn:hover:not(:disabled) {
+.cfile-restore-btn:hover:not(:disabled),
+.cfile-pick-btn:hover:not(:disabled) {
   background: var(--accent);
   color: var(--bone-white);
   border-color: var(--accent-bright);
 }
-.cfile-restore-btn:disabled { opacity: 0.4; cursor: default; }
+.cfile-restore-btn:disabled,
+.cfile-pick-btn:disabled { opacity: 0.4; cursor: default; }
 .cfile-check { cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
 
 /* Partial cherry-pick dialog — the file list you untick to leave a file behind. */

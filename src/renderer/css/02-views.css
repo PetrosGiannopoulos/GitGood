@@ -1290,7 +1290,8 @@
   cursor: pointer;
 }
 .graph-settings-item:hover { background: color-mix(in srgb, var(--accent-bright) 14%, transparent); }
-.graph-settings-item input[type="checkbox"] { cursor: pointer; }
+.graph-settings-item input[type="checkbox"],
+.graph-settings-item input[type="radio"] { cursor: pointer; }
 
 /* Graph detail panel (right side) */
 .graph-detail {

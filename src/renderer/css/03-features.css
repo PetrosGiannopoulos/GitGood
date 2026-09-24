@@ -557,6 +557,19 @@
 #graph-container.graph-highlight-active .graph-edge.rel { stroke-width: 3; }
 .graph-svg .graph-edge { transition: opacity 0.12s ease, stroke-width 0.12s ease; }
 
+/* Lane line styles (dragon / gears / constellations). Styled edges are <g>s of stacked
+   strokes with their own widths, so the .rel widening above doesn't reach them — they lift
+   with a glow instead. Ornaments and the star backdrop must never take a click from a dot. */
+.graph-svg .graph-deco,
+.graph-svg .graph-backdrop { pointer-events: none; }
+.graph-svg .graph-deco-item { transition: opacity 0.12s ease; }
+#graph-container.graph-highlight-active .graph-deco-item:not(.rel) { opacity: 0.12; }
+#graph-container.graph-highlight-active .graph-edge.styled.rel {
+  filter: drop-shadow(0 0 2px var(--gold-accent));
+}
+.graph-svg.line-style-constellations circle.commit-dot:not(.merge):not(.head) { stroke: rgba(255, 255, 255, 0.85); stroke-width: 1; }
+.graph-svg.line-style-gears circle.commit-dot:not(.merge):not(.head) { stroke: #1a120a; }
+
 /* Foldable commit dots: subtle cue that they can be right-clicked to fold */
 .graph-svg circle.commit-dot[data-foldable="1"] {
   cursor: pointer;

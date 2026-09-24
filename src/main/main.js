@@ -3476,6 +3476,7 @@ const DEFAULT_APP_SETTINGS = {
   graphHideLocal: false,              // hide local-branch ref pills in the graph
   graphStripRemotePrefix: false,      // show remote branches without their "<remote>/" prefix
   graphHideLocalCommits: false,       // hide commits not reachable from any remote (unpushed)
+  graphLineStyle: 'default',          // lane line look: default|dragon|gears|constellations
   autoFetchOnFocus: true,             // auto-refresh on window focus
   watchFileSystem: true,              // watch the working tree and refresh when it changes
   diffSyntax: true,                   // syntax-highlight diff content

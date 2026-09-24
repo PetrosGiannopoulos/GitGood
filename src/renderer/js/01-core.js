@@ -56,6 +56,7 @@ const state = {
   graphHideLocal: false,   // when true, don't draw local-branch ref pills in the graph
   graphStripRemotePrefix: false, // when true, show remote branches without their "<remote>/" prefix
   graphHideLocalCommits: false,  // when true, hide commits not reachable from any remote (unpushed)
+  graphLineStyle: 'default', // 'default' | 'dragon' | 'gears' | 'constellations'
   collapsedCommits: null,  // Set<hash>: commits whose same-lane descendant chain is folded
   graphFilter: '',         // text filter for the graph tab
   graphFilterMode: 'message', // 'message' | 'files' | 'all'
