@@ -1,18 +1,22 @@
-// Hero themes: Marvel heroes, anti-heroes and villains, each a palette plus an "aura".
+// Hero themes: Marvel heroes, anti-heroes and villains, each a palette plus backdrop art.
 //
 // Same `vars` shape as the Alacritty palettes (00-alacritty-themes.js), so applyTheme in
-// 08-lfs-settings.js injects them the same way. What's extra is the aura: two fixed overlay
-// layers drawn by the html.theme-hero rules in 04-themes.css, fed through --hero-aura /
-// --hero-mask (layer 1, body::after) and --hero-aura-2 / --hero-mask-2 (layer 2,
-// .screen::after). The first six themes set those in 04-themes.css by hand; everything built
-// with heroFrom() carries them in its vars, composed from the motif library below.
+// 08-lfs-settings.js injects them the same way. What's extra is the art: two layers,
+// --hero-aura / --hero-mask and --hero-aura-2 / --hero-mask-2, which the HERO SUIT THEMES
+// block in 04-themes.css paints *underneath* the UI (body::before / body::after, below
+// .screen). The panels above it are made translucent with the --hero-glass-* colours solved
+// in heroTheme, so the art shows through them without ever being drawn over text.
 //
-// Two rules keep "epic" from turning into "hard to read":
-//   - Palettes are calm. Text is a soft off-white, accents sit a notch below full
-//     saturation and borders stay low-contrast (derivePalette). The drama is the aura's job.
-//   - Auras live at the edges. Every motif keeps its light to a corner, the top or bottom
-//     edge, or behind a mask that clears the middle of the window, where the diffs are.
-//     Both layers blend with `screen`, so a motif can only ever lighten what is under it.
+// How the art is built, from the bottom up:
+//   - materials: SVG filters (feTurbulence) for anything organic — fire, cloud, smoke,
+//     nebulae — so those read as the real thing rather than as a drawing of it.
+//   - ART: each character's own object drawn with its real construction (the gauntlet's
+//     plates and settings, Mjolnir's faces and wrapped grip, a helmet's faceplate).
+//   - M / SIG: the older ambient motifs (glows, webs, rain, embers) and single pieces.
+//   - SCENE: a character's two layers, composed from the above.
+// Rules that keep it a backdrop: palettes are calm (derivePalette); the subject sits in a
+// corner or along an edge; fills are faint and only edges and points of light carry
+// weight; --hero-strength (Settings → Appearance) scales the whole thing.
 (function () {
   // ---------- colour helpers ----------
   const hexRgb = (h) => {
@@ -79,21 +83,6 @@
       return { bg: `${img} 50% -190px / 400px 400px no-repeat, radial-gradient(ellipse 60% 40% at 50% 0%, ${rgba(rim, 0.12)}, transparent 70%)` };
     },
 
-    // Concentric rings with a star at the centre, rising out of the bottom-right corner.
-    shield(ring, inner, star) {
-      const pts = [];
-      for (let i = 0; i < 10; i++) { const r = i % 2 ? 32 : 78, a = -Math.PI / 2 + i * Math.PI / 5; pts.push(`${f1(200 + r * Math.cos(a))},${f1(200 + r * Math.sin(a))}`); }
-      const img = svg(400, 400,
-        `<defs>${blur('b', 5)}</defs>` +
-        `<circle cx='200' cy='200' r='178' fill='none' stroke='${ring}' stroke-opacity='.16' stroke-width='30'/>` +
-        `<circle cx='200' cy='200' r='145' fill='none' stroke='${star}' stroke-opacity='.08' stroke-width='28'/>` +
-        `<circle cx='200' cy='200' r='112' fill='none' stroke='${ring}' stroke-opacity='.16' stroke-width='28'/>` +
-        `<circle cx='200' cy='200' r='96' fill='${inner}' fill-opacity='.2'/>` +
-        `<polygon points='${pts.join(' ')}' fill='${star}' fill-opacity='.28' filter='url(#b)'/>` +
-        `<polygon points='${pts.join(' ')}' fill='${star}' fill-opacity='.22'/>`);
-      return { bg: `${img} right -130px bottom -130px / 400px 400px no-repeat, radial-gradient(circle at 100% 100%, ${rgba(inner, 0.14)}, transparent 40%)` };
-    },
-
     // Radiation pulsing up from the floor.
     gamma(c) {
       return {
@@ -106,7 +95,7 @@
     // A large faint sigil in a corner, drawn in a 100-unit box.
     emblem(shape, fill, stroke, corner = 'br') {
       const SHAPES = {
-        hourglass: { d: 'M22 12 H78 L50 50 Z M50 50 L78 88 H22 Z' },
+        hourglass: { d: 'M24 14 H76 L53 47 H47 Z M47 53 H53 L76 86 H24 Z', solid: 0.4 },
         skull: {
           d: 'M50 6 C27 6 13 22 13 43 C13 55 19 63 27 67 V76 H73 V67 C81 63 87 55 87 43 C87 22 73 6 50 6 Z ' +
             'M24 40 C24 31 42 31 42 42 C42 50 28 52 24 40 Z M76 40 C76 31 58 31 58 42 C58 50 72 52 76 40 Z M50 50 L45 62 H55 Z',
@@ -114,7 +103,7 @@
         },
       };
       const S = SHAPES[shape];
-      const body = `<path d='${S.d}' fill='${fill}' fill-opacity='.08' fill-rule='evenodd' stroke='${stroke}' stroke-opacity='.3' stroke-width='1.2'/>${S.extra || ''}`;
+      const body = `<path d='${S.d}' fill='${fill}' fill-opacity='${S.solid || 0.08}' fill-rule='evenodd' stroke='${stroke}' stroke-opacity='.3' stroke-width='1.2'/>${S.extra || ''}`;
       const img = svg(100, 100, `<defs>${blur('b', 1.6)}</defs><g filter='url(#b)' opacity='.9'>${body}</g>${body}`);
       const C = CORNERS[corner];
       const off = corner[0] === 't' ? 'top -30px' : 'bottom -40px';
@@ -173,21 +162,6 @@
       };
     },
 
-    // Deep space: a star field and nebulae, cleared out of the middle of the window.
-    cosmic(neb1, neb2, starColor = '#ffffff') {
-      const stars = scatter(1234, 22, 240, 240).map(([x, y, r]) =>
-        r > 0.9
-          ? `<path d='M${x} ${f1(y - 3.5)} L${f1(x + 0.8)} ${f1(y - 0.8)} L${f1(x + 3.5)} ${y} L${f1(x + 0.8)} ${f1(y + 0.8)} L${x} ${f1(y + 3.5)} L${f1(x - 0.8)} ${f1(y + 0.8)} L${f1(x - 3.5)} ${y} L${f1(x - 0.8)} ${f1(y - 0.8)} Z' fill='${starColor}' fill-opacity='.7'/>`
-          : `<circle cx='${x}' cy='${y}' r='${f1(0.4 + r * 0.8)}' fill='${starColor}' fill-opacity='${f1(0.3 + r * 0.5)}'/>`).join('');
-      return {
-        bg: `${svg(240, 240, stars)} 0 0 / 240px 240px repeat, ` +
-          `radial-gradient(ellipse 55% 60% at 0% 0%, ${rgba(neb1, 0.2)}, transparent 70%), ` +
-          `radial-gradient(ellipse 55% 60% at 100% 100%, ${rgba(neb2, 0.18)}, transparent 70%), ` +
-          `radial-gradient(ellipse 35% 40% at 100% 0%, ${rgba(neb2, 0.1)}, transparent 70%)`,
-        mask: 'radial-gradient(ellipse 70% 70% at 50% 50%, transparent 35%, #000 95%)',
-      };
-    },
-
     // Radar sweeping out from a corner: rings, fading with distance.
     sonar(color, corner = 'br') {
       const C = CORNERS[corner];
@@ -214,24 +188,6 @@
         `<ellipse cx='800' cy='56' rx='800' ry='14' fill='${color}' fill-opacity='.5' filter='url(#b)'/>` +
         `<ellipse cx='800' cy='56' rx='760' ry='2.4' fill='${core}' fill-opacity='.7' filter='url(#c)'/>`);
       return { bg: `${img} 50% 0 / 100% 112px no-repeat, radial-gradient(ellipse 70% 30% at 50% 0%, ${rgba(color, 0.12)}, transparent 70%)` };
-    },
-
-    // Fire rising from the bottom edge.
-    flames(base, tip) {
-      // [x, height, width, sway]: overlapping, uneven, each tip bent a little sideways.
-      const tongues = [[-14, 96, 46, 10], [18, 150, 40, -12], [44, 104, 34, 8], [70, 176, 46, 14], [104, 120, 38, -10],
-        [128, 160, 44, -16], [162, 98, 36, 10], [184, 140, 42, 12], [214, 112, 40, -8], [240, 150, 44, -14]];
-      const tongue = ([x, h, w, s], k, fill) => {
-        h *= k; const y = 220;
-        return `<path d='M${f1(x)} ${y} C${f1(x - w * 0.12)} ${f1(y - h * 0.5)} ${f1(x + w * 0.4 - s * 0.5)} ${f1(y - h * 0.62)} ${f1(x + w * 0.5 + s)} ${f1(y - h)} ` +
-          `C${f1(x + w * 0.6)} ${f1(y - h * 0.55)} ${f1(x + w * 1.12)} ${f1(y - h * 0.42)} ${f1(x + w)} ${y} Z' fill='${fill}'/>`;
-      };
-      const img = svg(260, 220,
-        `<defs>${blur('b', 2.5)}` +
-        `<linearGradient id='f' x1='0' y1='1' x2='0' y2='0'><stop offset='0' stop-color='${base}' stop-opacity='.42'/><stop offset='.55' stop-color='${base}' stop-opacity='.2'/><stop offset='1' stop-color='${tip}' stop-opacity='0'/></linearGradient>` +
-        `<linearGradient id='c' x1='0' y1='1' x2='0' y2='0'><stop offset='0' stop-color='${tip}' stop-opacity='.45'/><stop offset='.6' stop-color='${tip}' stop-opacity='.12'/><stop offset='1' stop-color='${tip}' stop-opacity='0'/></linearGradient></defs>` +
-        `<g filter='url(#b)'>${tongues.map(t => tongue(t, 1, 'url(#f)')).join('')}${tongues.map(([x, h, w, s]) => tongue([x + w * 0.22, h, w * 0.56, s * 0.7], 0.55, 'url(#c)')).join('')}</g>`);
-      return { bg: `${img} 0 100% / 260px 220px repeat-x, radial-gradient(ellipse 90% 40% at 50% 110%, ${rgba(base, 0.24)}, transparent 70%)` };
     },
 
     // Ice shards spreading from the top-left and bottom-right corners.
@@ -262,15 +218,18 @@
       };
     },
 
-    // Ten glowing rings hanging in an arc in the bottom-right corner.
+    // The Ten Rings circling in a tilted orbit, each a heavy metal band lit blue from inside.
     tenrings(color, glow) {
-      let body = `<defs>${blur('b', 5)}</defs>`;
+      let back = '', front = '';
       for (let i = 0; i < 10; i++) {
-        const a = Math.PI * (1.03 + i * 0.05), cx = f1(440 + 290 * Math.cos(a)), cy = f1(430 + 290 * Math.sin(a));
-        body += `<ellipse cx='${cx}' cy='${cy}' rx='24' ry='9' fill='none' stroke='${glow}' stroke-opacity='.5' stroke-width='7' filter='url(#b)'/>`;
-        body += `<ellipse cx='${cx}' cy='${cy}' rx='24' ry='9' fill='none' stroke='${color}' stroke-opacity='.7' stroke-width='2.4'/>`;
+        const a = i / 10 * Math.PI * 2, cx = f1(260 + 190 * Math.cos(a)), cy = f1(220 + 70 * Math.sin(a)), s = f1(0.75 + 0.25 * Math.sin(a));
+        const ring = `<g transform='translate(${cx} ${cy}) scale(${s}) rotate(${f1(Math.cos(a) * 30)})'>` +
+          `<ellipse rx='30' ry='12' fill='none' stroke='${glow}' stroke-opacity='.45' stroke-width='12' filter='url(#b)'/>` +
+          `<ellipse rx='30' ry='12' fill='none' stroke='url(#rm)' stroke-width='7'/><ellipse rx='30' ry='12' fill='none' stroke='${color}' stroke-opacity='.7' stroke-width='1.2'/></g>`;
+        if (Math.sin(a) < 0) back += ring; else front += ring;
       }
-      return { bg: `${svg(520, 420, body)} right -40px bottom -20px / 520px 420px no-repeat, radial-gradient(circle at 100% 100%, ${rgba(glow, 0.16)}, transparent 42%)` };
+      const defs = metalG('rm', '#ffffff', '#c0a860', '#5a4a20', 0, 1);
+      return { bg: `${art(520, 440, `<ellipse cx='260' cy='220' rx='190' ry='70' fill='none' stroke='${glow}' stroke-opacity='.15' stroke-width='3'/>${back}${front}`, 5, defs)} right -40px bottom -40px / 520px 440px no-repeat, radial-gradient(circle at 100% 100%, ${rgba(glow, 0.16)}, transparent 42%)` };
     },
 
     // Waves rolling along the bottom edge.
@@ -322,19 +281,6 @@
       return { bg: `${L} left center / 380px 600px no-repeat, ${R} right center / 380px 600px no-repeat` };
     },
 
-    // Blades fanning down from the top edge like a crown of swords.
-    blades(color, glow) {
-      let body = `<defs>${blur('b', 4)}<linearGradient id='f' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='${color}' stop-opacity='.4'/><stop offset='1' stop-color='${color}' stop-opacity='0'/></linearGradient></defs><g>`;
-      for (let i = -6; i <= 6; i++) {
-        const a = Math.PI / 2 + i * 0.16, len = 250 + (6 - Math.abs(i)) * 16;
-        const ox = 400, oy = -110, tx = ox + len * Math.cos(a), ty = oy + len * Math.sin(a);
-        const px = -Math.sin(a) * 6, py = Math.cos(a) * 6;
-        const pts = `${f1(ox + px)},${f1(oy + py)} ${f1(tx)},${f1(ty)} ${f1(ox - px)},${f1(oy - py)}`;
-        body += `<polygon points='${pts}' fill='${glow}' fill-opacity='.18' filter='url(#b)'/><polygon points='${pts}' fill='url(#f)' stroke='${color}' stroke-opacity='.25' stroke-width='.8'/>`;
-      }
-      return { bg: `${svg(800, 440, body + '</g>')} 50% 0 / 800px 440px no-repeat` };
-    },
-
     // Brushed metal across the top and a sheen raked over it.
     brushed(color) {
       return {
@@ -379,7 +325,512 @@
     return pts(out);
   }
 
+  // ---------- materials ----------
+  // Procedural texture via SVG filters (feTurbulence), which is what lets fire, smoke, cloud
+  // and nebula read as the real thing rather than as a drawing of it. Rasterised once per
+  // window size by the compositor; nothing here animates.
+  //
+  // Displace a shape's edges with noise: ragged fire, torn smoke, wet goo.
+  const warpF = (id, fx, fy, oct, seed, scale, blurS = 0) =>
+    `<filter id='${id}' x='-30%' y='-30%' width='160%' height='160%'>` +
+    `<feTurbulence type='fractalNoise' baseFrequency='${fx} ${fy}' numOctaves='${oct}' seed='${seed}' result='t'/>` +
+    `<feDisplacementMap in='SourceGraphic' in2='t' scale='${scale}' xChannelSelector='R' yChannelSelector='G'${blurS ? " result='d'/>" + `<feGaussianBlur in='d' stdDeviation='${blurS}'/>` : '/>'}</filter>`;
+  // Fill a shape with a noise texture in one colour: clouds, smoke, nebulae, dust. `k` is the
+  // contrast of the noise → alpha ramp, `o` its offset (lower = sparser).
+  const cloudF = (id, freq, oct, seed, colour, k = 2.4, o = -0.95) => {
+    const [r, g, b] = hexRgb(colour).map(v => f1(v / 255 * 100) / 100);
+    return `<filter id='${id}' x='0' y='0' width='100%' height='100%'>` +
+      `<feTurbulence type='fractalNoise' baseFrequency='${freq}' numOctaves='${oct}' seed='${seed}' result='t'/>` +
+      `<feColorMatrix in='t' type='matrix' values='0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  ${k} 0 0 0 ${o}' result='c'/>` +
+      `<feComposite in='c' in2='SourceGraphic' operator='in'/></filter>`;
+  };
+  // A vertical or diagonal metal ramp for shading plates: light, body, shadow.
+  const metalG = (id, light, body, dark, x2 = 1, y2 = 0.35) =>
+    `<linearGradient id='${id}' x1='0' y1='0' x2='${x2}' y2='${y2}'><stop offset='0' stop-color='${light}'/><stop offset='.45' stop-color='${body}'/><stop offset='1' stop-color='${dark}'/></linearGradient>`;
+  // A soft radial fade used as a mask: `white` where art may show, black where it may not.
+  const fadeMask = (id, w, h, cx, cy, r, inner = 0.35) =>
+    `<radialGradient id='${id}g' gradientUnits='userSpaceOnUse' cx='${cx}' cy='${cy}' r='${r}'><stop offset='${inner}' stop-color='white'/><stop offset='1' stop-color='black'/></radialGradient>` +
+    `<mask id='${id}'><rect width='${w}' height='${h}' fill='url(#${id}g)'/></mask>`;
+
+  // Flames: tongues of a vertical fire gradient, torn apart by noise so they lick upward.
+  // Drawn at the bottom of a w×h box; `heat` scales the tongues' height.
+  function fireBody(w, h, seed, cols, { heat = 1, count, glow = true, id = 'fb' } = {}) {
+    const [core, mid, outer] = cols;
+    const r = rng(seed);
+    const n = count || Math.round(w / 34);
+    let tongues = '';
+    for (let i = 0; i < n; i++) {
+      const x = (i + r() * 0.6 - 0.3) * (w / n), tw = (w / n) * (1.3 + r() * 0.9), th = h * heat * (0.35 + r() * 0.6), sway = (r() - 0.5) * tw * 0.8;
+      tongues += `<path d='M${f1(x - tw / 2)} ${h} C${f1(x - tw * 0.45)} ${f1(h - th * 0.45)} ${f1(x + sway * 0.4)} ${f1(h - th * 0.7)} ${f1(x + sway)} ${f1(h - th)} ` +
+        `C${f1(x + tw * 0.2)} ${f1(h - th * 0.6)} ${f1(x + tw * 0.5)} ${f1(h - th * 0.4)} ${f1(x + tw / 2)} ${h} Z'/>`;
+    }
+    const defs = `<linearGradient id='${id}g' x1='0' y1='1' x2='0' y2='0'>` +
+      `<stop offset='0' stop-color='${core}' stop-opacity='.75'/><stop offset='.18' stop-color='${mid}' stop-opacity='.6'/>` +
+      `<stop offset='.5' stop-color='${outer}' stop-opacity='.32'/><stop offset='1' stop-color='${outer}' stop-opacity='0'/></linearGradient>` +
+      warpF(id + 'w', 0.012, 0.035, 3, seed, 70) + warpF(id + 'v', 0.03, 0.08, 2, seed + 3, 30) + blur(id + 'b', 14);
+    const body = `<g fill='url(#${id}g)'>${tongues}</g>`;
+    return {
+      defs,
+      art: (glow ? `<g filter='url(#${id}b)' opacity='.7'>${body}</g>` : '') +
+        `<g filter='url(#${id}w)'>${body}</g><g filter='url(#${id}v)' opacity='.6' transform='translate(0 ${f1(h * 0.08)}) scale(1 .92)'>${body}</g>`,
+    };
+  }
+
+  // Mirror a left half about x=100, for faces and helmets drawn in a 200-wide box.
+  const sym = (half) => half + `<g transform='translate(200 0) scale(-1 1)'>${half}</g>`;
+
+  // ---------- illustrations ----------
+  // The characters' own objects, drawn as objects: shaded, with their real construction
+  // (a gauntlet has plates and knuckle settings, a hammer has faces and a wrapped grip).
+  // They sit in a corner or along an edge under glass, at backdrop strength — the fills are
+  // faint and only the edges and the few points of light carry any weight.
+  const ART = {
+    // The Infinity Gauntlet, back of the left hand, fingers raised: knuckle plates, jointed
+    // finger armour, the flared cuff, and the six stones in their MCU settings.
+    gauntlet(gold, stones) {
+      const G = (d, extra = '') => `<path d='${d}' fill='url(#gm)' fill-opacity='.34' stroke='${gold}' stroke-opacity='.62' stroke-width='1.6' stroke-linejoin='round' ${extra}/>`;
+      const hi = (d, o = 0.5) => `<path d='${d}' fill='none' stroke='#fff3c8' stroke-opacity='${o}' stroke-width='1.1' stroke-linecap='round'/>`;
+      let b = '';
+      // Cuff: three flared bands and a centre ridge.
+      b += G('M112 392 L298 392 L318 512 L92 512 Z');
+      b += G('M104 440 L306 440 L312 474 L98 474 Z');
+      b += hi('M114 398 H296') + hi('M205 392 V512', 0.3);
+      // Back of the hand, broad at the knuckles, a raised ridge down the middle.
+      b += G('M118 392 C112 340 104 280 110 236 C150 222 262 222 300 236 C306 282 300 340 292 392 Z');
+      b += `<path d='M150 240 L205 262 L260 240 M205 262 V380' fill='none' stroke='${gold}' stroke-opacity='.4' stroke-width='1.3'/>`;
+      b += hi('M122 250 C120 300 124 350 128 386', 0.35);
+      // Fingers: little, ring, middle, index — each three plates that overlap at the joints.
+      const fingers = [[124, 108, 30], [162, 62, 34], [204, 44, 35], [246, 72, 33]];
+      fingers.forEach(([x, top, w]) => {
+        const base = 238, seg = (base - top) / 3;
+        for (let k = 0; k < 3; k++) {
+          const y0 = base - seg * k, y1 = y0 - seg - 6, ww = w - k * 3, cx = x + w / 2;
+          b += G(`M${f1(cx - ww / 2)} ${f1(y0)} L${f1(cx - ww / 2 + 1)} ${f1(y1 + 10)} Q${f1(cx)} ${f1(y1 - (k === 2 ? 14 : 4))} ${f1(cx + ww / 2 - 1)} ${f1(y1 + 10)} L${f1(cx + ww / 2)} ${f1(y0)} Z`);
+          b += hi(`M${f1(cx - ww / 2 + 5)} ${f1(y0 - 4)} L${f1(cx - ww / 2 + 5)} ${f1(y1 + 14)}`, 0.28);
+        }
+      });
+      // Thumb, angled out from the side of the hand.
+      b += `<g transform='rotate(38 300 330)'>` + G('M284 340 L284 270 Q300 252 316 270 L316 340 Z') + G('M287 272 L287 214 Q300 194 313 214 L313 272 Z') + '</g>';
+      // Settings: a raised collar round each stone.
+      const set = [[139, 236, 13, stones[0]], [179, 236, 13, stones[1]], [221, 236, 13, stones[2]], [262, 236, 13, stones[3]], [300, 318, 13, stones[4]], [205, 318, 22, stones[5]]];
+      let s = '';
+      set.forEach(([x, y, R, c]) => {
+        s += `<circle cx='${x}' cy='${y}' r='${R + 6}' fill='url(#gm)' fill-opacity='.4' stroke='${gold}' stroke-opacity='.7' stroke-width='1.5'/>`;
+        s += `<circle cx='${x}' cy='${y}' r='${R * 2.2}' fill='${c}' fill-opacity='.28' filter='url(#b)'/>`;
+        s += `<ellipse cx='${x}' cy='${y}' rx='${R}' ry='${R * (R > 15 ? 1.25 : 1)}' fill='url(#st${c.slice(1)})'/>`;
+        s += `<ellipse cx='${x - R * 0.35}' cy='${y - R * 0.4}' rx='${R * 0.28}' ry='${R * 0.2}' fill='#ffffff' fill-opacity='.75'/>`;
+      });
+      const stoneG = [...new Set(set.map(z => z[3]))].map(c => `<radialGradient id='st${c.slice(1)}' cx='.4' cy='.35'><stop offset='0' stop-color='${mix(c, '#ffffff', 0.5)}' stop-opacity='.95'/><stop offset='.6' stop-color='${c}' stop-opacity='.85'/><stop offset='1' stop-color='${mix(c, '#000000', 0.4)}' stop-opacity='.8'/></radialGradient>`).join('');
+      return art(420, 520, `<g filter='url(#b)' opacity='.35'>${b}</g>${b}${s}`, 3,
+        metalG('gm', '#fbe7a4', gold, mix(gold, '#000000', 0.55), 1, 0.2) + stoneG);
+    },
+
+    // Mjolnir in three-quarter view: a block head with bevelled faces and the knotwork on its
+    // end, a leather-wrapped handle, the pommel and its wrist strap.
+    mjolnir(steel, leather) {
+      const dark = mix(steel, '#000000', 0.55);
+      let b = `<g transform='translate(210 150) rotate(-32)'>`;
+      // Head: front face, top face, end face.
+      b += `<path d='M-120 -58 L96 -58 L96 58 L-120 58 Z' fill='url(#hm)' fill-opacity='.36' stroke='${steel}' stroke-opacity='.7' stroke-width='1.8'/>`;
+      b += `<path d='M-120 -58 L-92 -84 L124 -84 L96 -58 Z' fill='${steel}' fill-opacity='.22' stroke='${steel}' stroke-opacity='.6' stroke-width='1.4'/>`;
+      b += `<path d='M96 -58 L124 -84 L124 32 L96 58 Z' fill='${dark}' fill-opacity='.3' stroke='${steel}' stroke-opacity='.6' stroke-width='1.4'/>`;
+      // Bevel lines inset on the front face, and the knot on the end.
+      b += `<path d='M-108 -46 H84 V46 H-108 Z' fill='none' stroke='${steel}' stroke-opacity='.3'/>`;
+      b += `<g transform='translate(110 -13) scale(.42 .9)'><circle r='40' fill='none' stroke='${steel}' stroke-opacity='.55' stroke-width='3'/>` +
+        [0, 120, 240].map(a => `<path d='M0 -34 C22 -20 22 10 0 4 C-22 10 -22 -20 0 -34 Z' fill='none' stroke='${steel}' stroke-opacity='.55' stroke-width='2.4' transform='rotate(${a})'/>`).join('') + '</g>';
+      b += `<path d='M-114 -52 L90 -52' stroke='#ffffff' stroke-opacity='.4' stroke-width='1.4'/>`;
+      // Handle: collar, a wrap of angled leather strips, pommel, strap.
+      b += `<rect x='-22' y='58' width='44' height='16' rx='3' fill='${steel}' fill-opacity='.3' stroke='${steel}' stroke-opacity='.6'/>`;
+      b += `<rect x='-15' y='74' width='30' height='210' fill='${leather}' fill-opacity='.28' stroke='${leather}' stroke-opacity='.55'/>`;
+      for (let i = 0; i < 12; i++) b += `<path d='M-15 ${80 + i * 17} L15 ${90 + i * 17}' stroke='${mix(leather, '#ffffff', 0.35)}' stroke-opacity='.45' stroke-width='2'/>`;
+      b += `<rect x='-19' y='284' width='38' height='22' rx='6' fill='url(#hm)' fill-opacity='.4' stroke='${steel}' stroke-opacity='.7'/>`;
+      b += `<path d='M-6 304 C-30 372 30 372 6 304' fill='none' stroke='${leather}' stroke-opacity='.55' stroke-width='4.5' stroke-linejoin='round'/>`;
+      b += '</g>';
+      return b;
+    },
+
+    // ----- faces, helmets and emblems -----
+    // All drawn in a 200-wide box, centred on x=100; most are drawn as a left half and
+    // mirrored (`sym`), which is what keeps a face from looking hand-wobbled.
+
+    // Mark-series helmet: red shell, gold faceplate with its widow's peak, slit eyes lit.
+    ironHelmet(red, gold, eye) {
+      const half = `<path d='M100 40 C74 40 56 52 50 74 L48 122 C50 150 58 172 72 190 L86 214 L100 218 Z' fill='url(#fp)' fill-opacity='.4' stroke='${gold}' stroke-opacity='.7' stroke-width='1.6'/>` +
+        `<path d='M50 78 C68 68 86 72 100 60' fill='none' stroke='${gold}' stroke-opacity='.55' stroke-width='1.4'/>` +
+        `<path d='M60 142 L76 178 L86 186 H100' fill='none' stroke='${gold}' stroke-opacity='.45' stroke-width='1.3'/>` +
+        `<path d='M54 102 L90 110 L88 119 L60 114 Z' fill='${eye}' fill-opacity='.85'/>`;
+      return `<path d='M100 6 C50 6 26 44 26 96 L28 150 C30 188 52 216 78 232 L122 232 C148 216 170 188 172 150 L174 96 C174 44 150 6 100 6 Z' fill='url(#sh)' fill-opacity='.36' stroke='${red}' stroke-opacity='.7' stroke-width='1.8'/>` +
+        sym(half) + `<path d='M100 126 V160' stroke='${gold}' stroke-opacity='.3'/><path d='M70 22 C84 16 116 16 130 22' fill='none' stroke='#ffffff' stroke-opacity='.35' stroke-width='1.6'/>` +
+        `<g filter='url(#b)'>${sym(`<path d='M54 102 L90 110 L88 119 L60 114 Z' fill='${eye}' fill-opacity='.9'/>`)}</g>`;
+    },
+
+    // The shield: red, silver, red, a blue field and the star; a sheen raked across it.
+    capShield(red, silver, blue) {
+      let b = `<circle cx='150' cy='150' r='146' fill='${red}' fill-opacity='.3' stroke='${silver}' stroke-opacity='.55' stroke-width='2'/>` +
+        `<circle cx='150' cy='150' r='116' fill='${silver}' fill-opacity='.22'/><circle cx='150' cy='150' r='86' fill='${red}' fill-opacity='.34'/>` +
+        `<circle cx='150' cy='150' r='57' fill='${blue}' fill-opacity='.45'/>` +
+        `<polygon points='${starPts(150, 150, 54, 21, 5)}' fill='${silver}' fill-opacity='.6'/>`;
+      [146, 116, 86, 57].forEach(r => { b += `<circle cx='150' cy='150' r='${r}' fill='none' stroke='#000000' stroke-opacity='.25' stroke-width='1.2'/>`; });
+      b += `<path d='M40 110 A118 118 0 0 1 120 34' fill='none' stroke='#ffffff' stroke-opacity='.35' stroke-width='5' stroke-linecap='round'/>`;
+      b += `<circle cx='150' cy='150' r='146' fill='url(#sn)'/>`;
+      return b;
+    },
+
+    // The Panther helmet: raised ears, angular lenses, the silver tracery of the suit.
+    pantherMask(silver, eye) {
+      const half = `<path d='M100 18 L60 22 L36 12 L42 80 C38 130 56 180 100 212 Z' fill='${silver}' fill-opacity='.08' stroke='${silver}' stroke-opacity='.55' stroke-width='1.6'/>` +
+        `<path d='M52 100 L92 110 L88 124 L60 120 C54 114 52 108 52 100 Z' fill='${eye}' fill-opacity='.75'/>` +
+        `<path d='M100 40 L76 56 L58 92 M100 40 L84 76 L92 108 M40 30 L62 56' fill='none' stroke='${silver}' stroke-opacity='.4' stroke-width='1.2'/>` +
+        `<path d='M100 128 L90 156 L100 164' fill='none' stroke='${silver}' stroke-opacity='.45' stroke-width='1.2'/>` +
+        `<path d='M60 150 L78 180 L100 188' fill='none' stroke='${silver}' stroke-opacity='.35' stroke-width='1.2'/>`;
+      return sym(half) + `<g filter='url(#b)'>${sym(`<path d='M52 100 L92 110 L88 124 L60 120 Z' fill='${eye}' fill-opacity='.8'/>`)}</g>`;
+    },
+
+    // Captain Marvel's eight-pointed star.
+    marvelStar(gold) {
+      const p = [];
+      for (let i = 0; i < 16; i++) { const a = -Math.PI / 2 + i * Math.PI / 8, R = i % 2 ? 26 : (i % 4 === 0 ? 96 : 56); p.push([100 + R * Math.cos(a), 100 + R * Math.sin(a)]); }
+      return `<polygon points='${pts(p)}' fill='url(#gs)' fill-opacity='.5' stroke='${gold}' stroke-opacity='.75' stroke-width='1.6' stroke-linejoin='round'/>` +
+        [0, 1, 2, 3].map(k => { const a = -Math.PI / 2 + k * Math.PI / 2; return line(100, 100, 100 + 92 * Math.cos(a), 100 + 92 * Math.sin(a), '#ffffff', 0.35, 1); }).join('');
+    },
+
+    // Ant-Man's helmet: two big lenses, the mouth grille, the breathing tubes.
+    antHelmet(shell, lens, steel) {
+      let half = `<path d='M100 14 C56 14 32 48 32 96 C32 150 56 190 100 200 Z' fill='${shell}' fill-opacity='.14' stroke='${steel}' stroke-opacity='.55' stroke-width='1.6'/>` +
+        `<path d='M92 80 C70 64 44 72 42 98 C40 124 62 136 86 124 C98 116 98 90 92 80 Z' fill='${lens}' fill-opacity='.55' stroke='${steel}' stroke-opacity='.6' stroke-width='2.4'/>` +
+        `<path d='M60 88 C68 80 78 80 84 86' fill='none' stroke='#ffffff' stroke-opacity='.5' stroke-width='2' stroke-linecap='round'/>` +
+        `<path d='M46 150 C30 160 26 184 38 196' fill='none' stroke='${steel}' stroke-opacity='.45' stroke-width='7' stroke-linecap='round'/>`;
+      let grille = `<rect x='74' y='140' width='52' height='46' rx='10' fill='${steel}' fill-opacity='.12' stroke='${steel}' stroke-opacity='.55' stroke-width='1.5'/>`;
+      for (let x = 82; x <= 118; x += 6) grille += line(x, 146, x, 180, steel, 0.4, 1.4);
+      return sym(half) + grille + `<g filter='url(#b)'>${sym(`<ellipse cx='66' cy='100' rx='18' ry='14' fill='${lens}' fill-opacity='.6'/>`)}</g>`;
+    },
+
+    // Venom: the white eyes swept back, the grin full of teeth, the tongue.
+    venomFace(white, tongue, sheen) {
+      const eye = `<path d='M96 70 C76 70 40 56 22 22 C58 36 82 44 98 58 Z' fill='${white}' fill-opacity='.7' stroke='${white}' stroke-opacity='.8'/>`;
+      let teeth = '';
+      for (let i = 0; i < 13; i++) {
+        const x = 38 + i * 10, up = 128 + Math.abs(i - 6) * -2.5 + Math.abs(i - 6) ** 2 * 0.7, dn = 188 - Math.abs(i - 6) ** 2 * 0.9;
+        teeth += `<polygon points='${pts([[x - 4, up], [x + 4, up], [x + 0.5, up + 24 - Math.abs(i - 6)]])}' fill='${white}' fill-opacity='.65'/>`;
+        teeth += `<polygon points='${pts([[x - 4, dn], [x + 4, dn], [x - 0.5, dn - 22 + Math.abs(i - 6)]])}' fill='${white}' fill-opacity='.6'/>`;
+      }
+      return `<path d='M100 0 C40 0 6 40 8 96 C10 150 44 200 100 210 C156 200 190 150 192 96 C194 40 160 0 100 0 Z' fill='${sheen}' fill-opacity='.05' stroke='${sheen}' stroke-opacity='.3' stroke-width='1.4'/>` +
+        `<path d='M30 128 C60 118 140 118 170 128 C164 170 136 196 100 196 C64 196 36 170 30 128 Z' fill='#000000' fill-opacity='.45' stroke='${white}' stroke-opacity='.3'/>` +
+        sym(eye) + teeth +
+        `<path d='M106 176 C120 200 104 236 86 246 C98 226 100 204 92 184 Z' fill='${tongue}' fill-opacity='.5' stroke='${tongue}' stroke-opacity='.6'/>` +
+        `<path d='M60 20 C80 10 120 10 140 20' fill='none' stroke='#ffffff' stroke-opacity='.3' stroke-width='3' stroke-linecap='round'/>`;
+    },
+
+    // The Punisher's skull: a rounded dome, deep sockets, and the long teeth.
+    punisherSkull(c) {
+      const half = `<path d='M100 8 C56 8 26 38 26 84 C26 118 38 138 52 150 L56 176 L100 176 Z' fill='${c}' fill-opacity='.16' stroke='${c}' stroke-opacity='.6' stroke-width='1.6'/>` +
+        `<path d='M92 98 C92 80 76 72 58 76 C44 80 40 96 46 110 C54 128 88 126 92 98 Z' fill='#000000' fill-opacity='.55' stroke='${c}' stroke-opacity='.5'/>`;
+      let teeth = '';
+      [58, 72, 86, 100, 114, 128].forEach((x, i) => { const L = 60 - Math.abs(i - 2.5) * 10; teeth += `<path d='M${x} 178 L${x} ${178 + L} C${x} ${184 + L} ${x + 12} ${184 + L} ${x + 12} ${178 + L} L${x + 12} 178 Z' fill='${c}' fill-opacity='.2' stroke='${c}' stroke-opacity='.6' stroke-width='1.4'/>`; });
+      return sym(half) + `<path d='M100 118 L90 144 H110 Z' fill='#000000' fill-opacity='.5' stroke='${c}' stroke-opacity='.45'/>` + teeth;
+    },
+
+    // Loki's helm: a gold cowl open at the face, and the two long horns sweeping out of the
+    // temples, up and back, to fine points. Drawn in a 200×260 box.
+    lokiHelm(gold) {
+      const half = `<path d='M100 92 C66 92 44 114 42 148 L40 250 L60 256 L62 172 C64 146 80 132 100 132 Z' fill='url(#lh)' fill-opacity='.4' stroke='${gold}' stroke-opacity='.7' stroke-width='1.5'/>` +
+        `<path d='M60 124 C24 116 -4 84 -2 10 C14 60 42 86 80 100 Z' fill='url(#lh)' fill-opacity='.48' stroke='${gold}' stroke-opacity='.75' stroke-width='1.5'/>` +
+        `<path d='M4 32 C14 70 40 90 66 102' fill='none' stroke='#fff3c0' stroke-opacity='.45' stroke-width='1.2'/>` +
+        `<path d='M100 92 V114 M74 104 C84 112 92 114 100 114' fill='none' stroke='${gold}' stroke-opacity='.4'/>` +
+        `<path d='M54 150 L52 240' stroke='#fff3c0' stroke-opacity='.3'/>`;
+      return sym(half);
+    },
+
+    // Magneto's helm: the domed crown, the ridge down to the brow, cheek guards notched.
+    magnetoHelm(c, dark) {
+      const half = `<path d='M100 6 C58 6 30 40 28 90 L26 170 L48 196 L56 150 C58 128 70 116 84 112 L100 128 Z' fill='${dark}' fill-opacity='.2' stroke='${c}' stroke-opacity='.65' stroke-width='1.6'/>` +
+        `<path d='M100 6 C88 30 86 70 92 110' fill='none' stroke='${c}' stroke-opacity='.45' stroke-width='1.3'/>` +
+        `<path d='M38 84 C54 70 74 66 90 70' fill='none' stroke='${c}' stroke-opacity='.4' stroke-width='1.2'/>` +
+        `<path d='M40 180 L30 196 M36 150 L28 160' stroke='${c}' stroke-opacity='.45' stroke-width='1.4'/>`;
+      return sym(half) + `<path d='M60 24 C80 12 120 12 140 24' fill='none' stroke='#ffffff' stroke-opacity='.3' stroke-width='2.5' stroke-linecap='round'/>`;
+    },
+
+    // Hela's headdress: black antler-blades swept outward and up off a pointed brow-piece,
+    // over the pale shape of her face.
+    helaCrown(c, glow) {
+      let b = '';
+      for (let i = 0; i < 6; i++) {
+        const bx = 84 - i * 6, by = 118 + i * 8, a = (-112 - i * 13) * Math.PI / 180, L = 170 - i * 12;
+        const tx = bx + Math.cos(a) * L, ty = by + Math.sin(a) * L;
+        const mx = (bx + tx) / 2 + Math.sin(a) * 26, my = (by + ty) / 2 - Math.cos(a) * 26;
+        b += `<path d='M${bx - 8} ${by + 4} Q${f1(mx - 6)} ${f1(my + 4)} ${f1(tx)} ${f1(ty)} Q${f1(mx + 6)} ${f1(my - 4)} ${bx + 8} ${by - 4} Z' fill='url(#hc)' fill-opacity='.6' stroke='${glow}' stroke-opacity='.55' stroke-width='1.2' stroke-linejoin='round'/>`;
+      }
+      b += `<path d='M100 96 L66 118 L56 150 C72 140 88 138 100 140 Z' fill='url(#hc)' fill-opacity='.7' stroke='${glow}' stroke-opacity='.6'/>`;
+      b += `<path d='M100 140 C80 140 66 152 64 176 C64 206 82 228 100 232 Z' fill='#dfe8e2' fill-opacity='.08' stroke='#dfe8e2' stroke-opacity='.3'/>`;
+      b += `<path d='M72 176 C80 170 88 170 94 176' fill='none' stroke='${glow}' stroke-opacity='.6' stroke-width='2'/>`;
+      return sym(b);
+    },
+
+    // Doom's mask: riveted iron with a brow ridge, slit eyes, the barred mouth, cheek plates,
+    // framed by the green hood. Drawn in a 200×240 box.
+    doomMask(iron, hood) {
+      const half = `<path d='M100 0 C46 0 10 40 8 110 L6 240 L44 232 L48 120 C50 80 70 58 100 56 Z' fill='${hood}' fill-opacity='.3' stroke='${hood}' stroke-opacity='.6' stroke-width='1.4'/>` +
+        `<path d='M100 60 C76 60 58 68 56 90 L56 150 C58 176 68 196 84 208 L100 214 Z' fill='url(#dm)' fill-opacity='.42' stroke='${iron}' stroke-opacity='.7' stroke-width='1.6'/>` +
+        `<path d='M58 96 C70 88 86 90 97 98' fill='none' stroke='${iron}' stroke-opacity='.65' stroke-width='2.2'/>` +
+        `<polygon points='64,104 93,106 93,114 66,112' fill='#000000' fill-opacity='.8' stroke='${iron}' stroke-opacity='.6'/>` +
+        `<path d='M58 128 L78 150 L80 186 M100 98 L93 140 L100 146' fill='none' stroke='${iron}' stroke-opacity='.45' stroke-width='1.3'/>` +
+        [[62, 160], [62, 176], [67, 192], [60, 80]].map(([x, y]) => `<circle cx='${x}' cy='${y}' r='2.4' fill='${iron}' fill-opacity='.7'/>`).join('');
+      let mouth = `<rect x='74' y='166' width='52' height='13' fill='#000000' fill-opacity='.7' stroke='${iron}' stroke-opacity='.55'/>`;
+      for (let x = 80; x < 126; x += 6.5) mouth += line(x, 166, x, 179, iron, 0.55, 1.2);
+      return sym(half) + mouth;
+    },
+
+    // The sling-ring mandala Strange conjures: rings of runes, two squares turned into a star.
+    mandala(c) {
+      const r = rng(17);
+      let b = '';
+      [[190, 2], [176, 1], [150, 1.4], [96, 1.2], [70, 2]].forEach(([R, w]) => { b += `<circle cx='200' cy='200' r='${R}' fill='none' stroke='${c}' stroke-opacity='.5' stroke-width='${w}'/>`; });
+      for (let i = 0; i < 64; i++) { const a = i / 64 * Math.PI * 2, x = 200 + 183 * Math.cos(a), y = 200 + 183 * Math.sin(a); b += `<path d='M${f1(x - 3)} ${f1(y - 3)} l${f1(r() * 6)} ${f1(r() * 6)} m-4 0 l${f1(r() * 5)} -2' stroke='${c}' stroke-opacity='.45' stroke-width='1' transform='rotate(${f1(a * 57.3 + 90)} ${f1(x)} ${f1(y)})'/>`; }
+      for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2; b += line(200 + 150 * Math.cos(a), 200 + 150 * Math.sin(a), 200 + 176 * Math.cos(a), 200 + 176 * Math.sin(a), c, 0.4, 1); }
+      b += `<rect x='94' y='94' width='212' height='212' fill='none' stroke='${c}' stroke-opacity='.45' stroke-width='1.5'/><rect x='94' y='94' width='212' height='212' fill='none' stroke='${c}' stroke-opacity='.45' stroke-width='1.5' transform='rotate(45 200 200)'/>`;
+      b += `<polygon points='${starPts(200, 200, 66, 30, 8)}' fill='${c}' fill-opacity='.08' stroke='${c}' stroke-opacity='.5'/>`;
+      return b;
+    },
+
+    // The Eye of Agamotto: a gold casing shaped like an eye, the green stone inside.
+    agamotto(gold, stone) {
+      return `<path d='M10 60 C40 20 120 20 150 60 C120 100 40 100 10 60 Z' fill='url(#ag)' fill-opacity='.4' stroke='${gold}' stroke-opacity='.75' stroke-width='2'/>` +
+        `<path d='M30 60 C52 36 108 36 130 60 C108 84 52 84 30 60 Z' fill='none' stroke='${gold}' stroke-opacity='.5'/>` +
+        `<circle cx='80' cy='60' r='18' fill='${stone}' fill-opacity='.6' filter='url(#b)'/><circle cx='80' cy='60' r='12' fill='${stone}' fill-opacity='.85'/>` +
+        `<path d='M80 18 V4 M80 102 V116' stroke='${gold}' stroke-opacity='.6' stroke-width='3'/>`;
+    },
+
+    // Three adamantium claws out of a fist's knuckles, shaded like polished steel.
+    claws(steel) {
+      let b = '';
+      [[0, 0], [34, 10], [68, 24]].forEach(([dx, dy], i) => {
+        b += `<g transform='translate(${40 + dx} ${300 + dy}) rotate(${-28 + i * 4})'>` +
+          `<path d='M-9 0 C-10 -120 -4 -220 6 -290 C12 -220 12 -120 9 0 Z' fill='url(#cl)' fill-opacity='.55' stroke='${steel}' stroke-opacity='.75' stroke-width='1.2'/>` +
+          `<path d='M-2 -10 C-2 -120 2 -210 5 -270' fill='none' stroke='#ffffff' stroke-opacity='.55' stroke-width='1.2'/></g>`;
+      });
+      return b;
+    },
+
+    // Deadpool's mask: red, the black patches, the white eyes narrowed.
+    deadpoolMask(red, white) {
+      const half = `<path d='M100 6 C48 6 20 46 20 100 C20 156 54 196 100 200 Z' fill='${red}' fill-opacity='.22' stroke='${red}' stroke-opacity='.6' stroke-width='1.6'/>` +
+        `<path d='M96 72 C70 58 38 64 30 90 C26 112 46 128 70 124 C88 120 98 100 96 72 Z' fill='#000000' fill-opacity='.6' stroke='${red}' stroke-opacity='.45'/>` +
+        `<path d='M86 92 C74 84 52 86 44 98 C54 106 76 106 86 92 Z' fill='${white}' fill-opacity='.8'/>`;
+      return sym(half) + `<path d='M100 20 V190' stroke='#000000' stroke-opacity='.3' stroke-width='1.5'/><path d='M60 22 C80 12 120 12 140 22' fill='none' stroke='#ffffff' stroke-opacity='.3' stroke-width='2.5' stroke-linecap='round'/>`;
+    },
+
+    // Star-Lord's mask: silver ribbed plates and the two red eyes.
+    starlordMask(silver, eye) {
+      const half = `<path d='M100 10 C56 10 30 44 30 96 C30 150 56 196 100 206 Z' fill='${silver}' fill-opacity='.1' stroke='${silver}' stroke-opacity='.55' stroke-width='1.6'/>` +
+        `<path d='M94 88 C74 76 46 80 40 102 C36 120 52 132 72 128 C90 124 98 106 94 88 Z' fill='${eye}' fill-opacity='.7' stroke='${silver}' stroke-opacity='.6' stroke-width='1.5'/>` +
+        `<path d='M40 150 C56 170 76 180 100 182 M36 128 C50 160 70 176 100 190' fill='none' stroke='${silver}' stroke-opacity='.4' stroke-width='1.2'/>` +
+        `<path d='M100 30 C80 34 62 46 52 66' fill='none' stroke='${silver}' stroke-opacity='.4' stroke-width='1.2'/>`;
+      return sym(half) + `<g filter='url(#b)'>${sym(`<ellipse cx='68' cy='104' rx='20' ry='16' fill='${eye}' fill-opacity='.6'/>`)}</g>`;
+    },
+
+    // A skull: cranium, brow, sockets, cheekbones, the nasal notch, a row of teeth.
+    skull(bone, socket) {
+      return `<path d='M100 14 C52 14 22 48 22 94 C22 124 36 144 50 154 L54 186 C54 196 64 202 74 200 L126 200 C136 202 146 196 146 186 L150 154 C164 144 178 124 178 94 C178 48 148 14 100 14 Z' fill='${bone}' fill-opacity='.14' stroke='${bone}' stroke-opacity='.6' stroke-width='2'/>` +
+        `<path d='M44 104 C46 84 64 76 84 84 C92 90 90 116 76 124 C60 132 44 124 44 104 Z' fill='${socket}' fill-opacity='.55' stroke='${bone}' stroke-opacity='.5' stroke-width='1.5'/>` +
+        `<path d='M156 104 C154 84 136 76 116 84 C108 90 110 116 124 124 C140 132 156 124 156 104 Z' fill='${socket}' fill-opacity='.55' stroke='${bone}' stroke-opacity='.5' stroke-width='1.5'/>` +
+        `<path d='M100 128 L90 150 C94 156 106 156 110 150 Z' fill='${socket}' fill-opacity='.5' stroke='${bone}' stroke-opacity='.45'/>` +
+        `<path d='M40 70 C60 58 80 62 96 72 M160 70 C140 58 120 62 104 72' fill='none' stroke='${bone}' stroke-opacity='.35' stroke-width='2'/>` +
+        `<path d='M58 158 C74 166 126 166 142 158' fill='none' stroke='${bone}' stroke-opacity='.4' stroke-width='1.5'/>` +
+        [66, 78, 90, 102, 114, 126].map(x => `<path d='M${x} 164 L${x} 186 C${x} 190 ${x + 10} 190 ${x + 10} 186 L${x + 10} 164' fill='${bone}' fill-opacity='.2' stroke='${bone}' stroke-opacity='.5' stroke-width='1.2'/>`).join('');
+    },
+  };
+
+  // A drawn piece with a soft glow behind it, as a CSS image.
+  const glowArt = (w, h, body, defs = '', s = 4, go = 0.35) => art(w, h, `<g filter='url(#b)' opacity='${go}'>${body}</g>${body}`, s, defs);
+  // A nebula: noise clouds in two or three colours, each confined to its own soft region.
+  function nebula(w, h, seed, clouds) {
+    let defs = '', body = '';
+    clouds.forEach(([c, cx, cy, r, k = 2.4, o = -1], i) => {
+      defs += cloudF('n' + i, 0.004 + i * 0.0015, 5, seed + i * 7, c, k, o) + fadeMask('m' + i, w, h, cx * w, cy * h, r * Math.max(w, h), 0.1);
+      body += `<g mask='url(#m${i})'><rect width='${w}' height='${h}' fill='#fff' filter='url(#n${i})'/></g>`;
+    });
+    return svg(w, h, `<defs>${defs}</defs>${body}`);
+  }
+  // A real orb-web: spokes out of a corner, each ring sagging between the spokes it joins.
+  function orbWeb(c, R = 520, spokes = 11, rings = 12) {
+    const ang = Array.from({ length: spokes }, (_, i) => (i / (spokes - 1)) * Math.PI / 2);
+    let b = ang.map(a => line(0, 0, R * Math.cos(a), R * Math.sin(a), c, 0.4, 1.1)).join('');
+    for (let k = 1; k <= rings; k++) {
+      const r = k * R / (rings + 0.5) * (1 + (k % 2) * 0.02);
+      let d = `M${f1(r * Math.cos(ang[0]))} ${f1(r * Math.sin(ang[0]))}`;
+      for (let i = 1; i < spokes; i++) {
+        const a0 = ang[i - 1], a1 = ang[i], am = (a0 + a1) / 2, rm = r * 0.9;
+        d += ` Q${f1(rm * Math.cos(am))} ${f1(rm * Math.sin(am))} ${f1(r * Math.cos(a1))} ${f1(r * Math.sin(a1))}`;
+      }
+      b += `<path d='${d}' fill='none' stroke='${c}' stroke-opacity='${f1(0.42 - k * 0.018)}' stroke-width='1'/>`;
+    }
+    return b;
+  }
+
+  // A sparse, tiled star field; the occasional star gets four points.
+  const starfield = (c) => `${svg(240, 240, scatter(1234, 22, 240, 240).map(([x, y, r]) => r > 0.9
+    ? `<polygon points='${starPts(x, y, 3.5, 0.8, 4)}' fill='${c}' fill-opacity='.6'/>`
+    : `<circle cx='${x}' cy='${y}' r='${f1(0.4 + r * 0.7)}' fill='${c}' fill-opacity='${f1(0.2 + r * 0.4)}'/>`).join(''))} 0 0 / 240px 240px repeat`;
+
+  // ---------- scenes ----------
+  // One composition per character where the art above is the subject.
+  const SCENE = {
+    ironman() {
+      const defs = metalG('fp', '#fbe3a0', '#d8a94a', '#7a5a1a', 0.3, 1) + metalG('sh', '#e86a5a', '#b8352e', '#4a0e0c', 0.6, 1);
+      return [
+        M.reactor('#8fe3ff', '#d8a94a', '#b8352e'),
+        layer([put(glowArt(200, 240, ART.ironHelmet('#d8483e', '#e0b050', '#bff4ff'), defs, 5), 'right 40px bottom 30px', 250, 300), rg('#b8352e', '100% 100%', '45% 50%', 0.14), SIG.ironmanHud('#8fe3ff').bg]),
+      ];
+    },
+    cap() {
+      const defs = `<radialGradient id='sn' cx='.3' cy='.25' r='.9'><stop offset='0' stop-color='#ffffff' stop-opacity='.22'/><stop offset='.5' stop-color='#ffffff' stop-opacity='0'/><stop offset='1' stop-color='#000000' stop-opacity='.3'/></radialGradient>`;
+      return [
+        layer([put(glowArt(300, 300, ART.capShield('#c8434c', '#e8ecf4', '#3f64b8'), defs, 5, 0.3), 'right -60px bottom -60px', 380, 380), rg('#3f64b8', '100% 100%', '45% 50%', 0.14)]),
+        SIG.starsStripes('#c0414a', '#e8ecf4'),
+      ];
+    },
+    hulk() {
+      const haze = cloudF('gh', '0.007 0.012', 4, 5, '#7fd05a', 2.4, -1.05) + fadeMask('fm', 1400, 420, 700, 470, 620, 0.15);
+      return [SIG.smash('#7fd05a', '#e0ffd0'),
+        layer([`${svg(1400, 420, `<defs>${haze}</defs><g mask='url(#fm)'><rect width='1400' height='420' fill='#fff' filter='url(#gh)'/></g>`)} 50% 100% / 1400px 420px no-repeat`, M.gamma('#7fd05a').bg], M.gamma('#7fd05a').mask)];
+    },
+    killmonger() {
+      return [
+        layer([put(glowArt(200, 220, ART.pantherMask('#e8c060', '#ffe9a0'), '', 4, 0.35), 'right 40px bottom 40px', 240, 264), rg('#d2ac3c', '100% 100%', '40% 45%', 0.14)]),
+        SIG.fangNecklace('#d2ac3c', '#ffe39a'),
+      ];
+    },
+    thor() { return [SIG.mjolnir('#c8d0dc', '#dfe9ff', '#6f9ee0'), SIG.bifrost()]; },
+    panther() {
+      return [
+        layer([put(glowArt(200, 220, ART.pantherMask('#c3c6d4', '#e8e4ff'), '', 4, 0.3), 'right 40px bottom 40px', 240, 264), SIG.kinetic('#b99cff', '#e0d4ff').bg]),
+        SIG.wakanda('#c3c6d4'),
+      ];
+    },
+    marvel() {
+      const defs = metalG('gs', '#fff1c4', '#e2bd4c', '#8a6a1a', 1, 1);
+      return [
+        layer([put(glowArt(200, 200, ART.marvelStar('#f0cc60'), defs, 6, 0.5), 'right 50px bottom 40px', 230, 230), `${nebula(900, 500, 3, [['#e2bd4c', 0.5, 0, 0.5], ['#c43a48', 0.9, 0.2, 0.4], ['#4f7ad8', 0.1, 0.2, 0.4]])} 50% 0 / 900px 500px no-repeat`]),
+        M.rays('#ffd98a', '#fff1c4', '50% -4%', { alpha: 0.07 }),
+      ];
+    },
+    antman() {
+      return [
+        layer([put(glowArt(200, 210, ART.antHelmet('#bd3a33', '#ff6a50', '#c8d0da'), '', 4, 0.3), 'right 40px bottom 40px', 230, 242), SIG.ants('#e0605a').bg]),
+        layer([`${nebula(1000, 700, 8, [['#3aa8ff', 0.05, 0.05, 0.45, 3.2, -1.15], ['#ff3ac0', 0.3, 0.0, 0.4, 3.2, -1.15], ['#ffa030', 0.0, 0.4, 0.35, 3.2, -1.15]])} left top / 1000px 700px no-repeat`], 'radial-gradient(ellipse 60% 70% at 0 0, #000 30%, transparent 100%)'),
+      ];
+    },
+    starlord() {
+      return [
+        layer([put(glowArt(200, 210, ART.starlordMask('#c8ccd6', '#ff3a30'), '', 4, 0.3), 'right 40px bottom 40px', 220, 231), SIG.mixtape('#e07a3a', '#ffc27a', false).bg]),
+        layer([`${nebula(1200, 800, 21, [['#c35a31', 0.0, 0.0, 0.5, 2.2, -1.05], ['#6fb3de', 1, 0.1, 0.45, 2.2, -1.05], ['#a060d0', 0.2, 1, 0.4, 2.2, -1.05]])} center / 1200px 800px no-repeat`, starfield('#ffffff')]),
+      ];
+    },
+    surfer() {
+      return [SIG.surfboard('#dfe8f5', '#9fc4ff'),
+        layer([`${nebula(1200, 800, 33, [['#6f9fe0', 0.0, 1.0, 0.5], ['#b4c1d6', 1, 0.9, 0.4], ['#8060d0', 0.1, 0.0, 0.35]])} center / 1200px 800px no-repeat`, SIG.warp('#dfe8ff').bg], SIG.warp('#dfe8ff').mask)];
+    },
+    storm() {
+      const r = rng(14);
+      const bolts = [jag(420, 150, 330, 520, 10, 18, r), jag(420, 150, 560, 460, 8, 14, r)].map(p => poly(p, '#9fc4ff', 0.35, 7) + poly(p, '#ffffff', 0.55, 1.4)).join('');
+      const defs = cloudF('c1', '0.005 0.009', 5, 12, '#b8c2d8', 2.2, -1.05) + fadeMask('fm', 900, 560, 360, 40, 420, 0.1);
+      const img = art(900, 560, `<g mask='url(#fm)'><rect width='900' height='560' fill='#fff' filter='url(#c1)'/></g><g filter='url(#b)'>${bolts}</g>${bolts}`, 5, defs);
+      return [layer([put(img, 'left -120px top -40px', 900, 560)]), SIG.wind('#e8f0ff')];
+    },
+    wanda() {
+      const defs = cloudF('ch', '0.009 0.006', 4, 7, '#ff3a60', 3, -1.35) + fadeMask('fm', 1400, 700, 700, 760, 820, 0.2);
+      return [SIG.tiara('#c43250', '#ff4f7a'),
+        layer([`${svg(1400, 700, `<defs>${defs}${warpF('w', 0.01, 0.01, 2, 3, 80)}</defs><g mask='url(#fm)' filter='url(#w)'><rect width='1400' height='700' fill='#fff' filter='url(#ch)'/></g>`)} 50% 100% / 1400px 700px no-repeat`, SIG.chaos('#ff4f7a', '#e0648e').bg], 'linear-gradient(0deg, #000 0, rgba(0,0,0,.45) 22%, transparent 45%)')];
+    },
+    venom() {
+      return [
+        layer([put(glowArt(200, 250, ART.venomFace('#f0f2f6', '#c0343c', '#8a90a0'), '', 5, 0.3), 'right 40px bottom 20px', 260, 325), rg('#c0343c', '100% 110%', '40% 35%', 0.12)]),
+        SIG.goo('#e8ecf4'),
+      ];
+    },
+    punisher() {
+      return [layer([put(glowArt(200, 250, ART.punisherSkull('#eceef4'), '', 4, 0.3), 'right 50px bottom 30px', 220, 275)]), SIG.bulletHoles('#e8e8ee')];
+    },
+    deadpool() {
+      return [
+        layer([put(glowArt(200, 210, ART.deadpoolMask('#e03a3a', '#ffffff'), '', 4, 0.3), 'right 50px bottom 40px', 220, 231), M.katanas('#e8ecf4', '#ff5555').bg]),
+        SIG.bubble('#f0f0f4'),
+      ];
+    },
+    loki() {
+      const defs = metalG('lh', '#fff0b0', '#d2ae40', '#6a5010', 0.7, 1);
+      return [
+        layer([put(glowArt(240, 262, `<g transform='translate(20 0)'>${ART.lokiHelm('#e2c050')}</g>`, defs, 5, 0.35), 'left 30px bottom 20px', 240, 262), rg('#e2c050', '0% 100%', '40% 40%', 0.1)]),
+        SIG.sceptre('#e2c050', '#7fd0ff', '#3f9a5a'),
+      ];
+    },
+    magneto() {
+      return [M.field('#d65a8a', '#9a7ae0'),
+        layer([put(glowArt(200, 200, ART.magnetoHelm('#e0709a', '#a42c4c'), '', 4, 0.3), 'right 40px bottom 40px', 240, 240), rg('#a42c4c', '100% 100%', '40% 45%', 0.14)])];
+    },
+    hela() {
+      return [
+        layer([put(glowArt(200, 240, ART.helaCrown('#1e3a2a', '#8fe0b0'), `<linearGradient id='hc' x1='0' y1='1' x2='0' y2='0'><stop offset='0' stop-color='#0c1a12'/><stop offset='1' stop-color='#3a8c5c'/></linearGradient>`, 4, 0.4), 'right 30px bottom 20px', 300, 360), rg('#3a8c5c', '100% 100%', '45% 45%', 0.14)]),
+        SIG.necroswords('#b8f0cc', '#3a8c5c'),
+      ];
+    },
+    redskull() {
+      return [SIG.tesseract('#7fd0ff', '#c02c2c'),
+        layer([put(glowArt(200, 210, ART.skull('#e05050', '#200606'), '', 4, 0.3), 'left 40px bottom 40px', 200, 210), rg('#c02c2c', '0% 100%', '40% 45%', 0.12)])];
+    },
+    doom() {
+      const defs = metalG('dm', '#e8ece6', '#9aa49c', '#3a403c', 0.5, 1);
+      const mist = cloudF('mi', '0.006 0.012', 4, 9, '#78c85a', 2.6, -1.1) + fadeMask('fm', 1400, 400, 700, 460, 700, 0.1);
+      return [
+        layer([put(glowArt(200, 230, ART.doomMask('#c8d0c8', '#2f5a28'), defs, 4, 0.3), 'right 40px bottom 30px', 240, 276), rg('#c2a24a', '88% -4%', '30% 30%', 0.1)]),
+        layer([`${svg(1400, 400, `<defs>${mist}</defs><g mask='url(#fm)'><rect width='1400' height='400' fill='#fff' filter='url(#mi)'/></g>`)} 50% 100% / 1400px 400px no-repeat`], 'linear-gradient(0deg, #000 0, rgba(0,0,0,.5) 18%, transparent 38%)'),
+      ];
+    },
+    strange() {
+      const defs = metalG('ag', '#fff0b0', '#d8a850', '#6a4a10', 1, 1);
+      return [
+        layer([put(glowArt(400, 400, ART.mandala('#f0a850'), '', 4, 0.45), 'right -120px top -80px', 460, 460), rg('#e0a458', '100% 0%', '40% 45%', 0.14)]),
+        layer([put(glowArt(160, 120, ART.agamotto('#e0b060', '#4fe08a'), defs, 4, 0.4), 'left 40px bottom 40px', 160, 120), rg('#b8364a', '0% 100%', '50% 55%', 0.14)]),
+      ];
+    },
+    spider(rev) {
+      const glowC = rev ? '#3f6fd1' : '#c73a44';
+      const spider = `<ellipse cx='100' cy='70' rx='14' ry='20' fill='#e8ebf4' fill-opacity='.35'/><ellipse cx='100' cy='118' rx='18' ry='32' fill='#e8ebf4' fill-opacity='.3'/>` +
+        sym(`<path d='M88 64 L60 30 L54 2 M88 76 L52 60 L30 40 M88 108 L50 124 L28 160 M88 124 L62 156 L56 196' fill='none' stroke='#e8ebf4' stroke-opacity='.45' stroke-width='3' stroke-linejoin='round' stroke-linecap='round'/>`);
+      return [
+        layer([put(art(560, 560, lit(orbWeb('#c8d2ee')), 1.5), 'left top', 560, 560), rg(glowC, '0% 0%', '40% 45%', 0.14)]),
+        layer([put(glowArt(200, 200, spider, '', 3, 0.3), 'right 50px bottom 40px', 180, 180)]),
+      ];
+    },
+    wolverine() {
+      const defs = metalG('cl', '#ffffff', '#c8d4e4', '#5a6474', 1, 0.2);
+      return [
+        layer([put(glowArt(200, 330, ART.claws('#dfe8f4'), defs, 4, 0.3), 'right 30px bottom 0', 220, 363), rg('#e0b43a', '100% 100%', '40% 45%', 0.12)]),
+        layer([SIG.slashes('#dfe8f4', '#e0b43a').bg, rg('#5a7fd0', '0% 100%', '45% 50%', 0.14)]),
+      ];
+    },
+    vision() {
+      const facets = `<polygon points='60,10 100,0 140,10 150,40 100,70 50,40' fill='url(#gv)' fill-opacity='.7' stroke='#fff6c0' stroke-opacity='.8'/>` +
+        `<path d='M60 10 L80 40 L100 0 L120 40 L140 10 M50 40 H150 M80 40 L100 70 L120 40' fill='none' stroke='#fff6c0' stroke-opacity='.55'/>`;
+      const defs = `<linearGradient id='gv' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#fff6c0'/><stop offset='1' stop-color='#e8b83a'/></linearGradient>`;
+      return [
+        layer([put(glowArt(200, 80, facets, defs, 8, 0.8), '50% 8px', 120, 48), rg('#6cc394', '50% -6%', '65% 40%', 0.12), rg('#c24b56', '50% 115%', '60% 40%', 0.1)]),
+        M.rays('#e8cc5a', '#fff6c0', '50% 2%', { alpha: 0.06 }),
+      ];
+    },
+  };
+
   const SIG = {
+    // Three claw marks raked across the top-right: a steel cut with a hot edge, fading out.
+    slashes(steel, hot) {
+      let b = '';
+      [0, 34, 68].forEach((o, i) => {
+        const d = `M${260 + o} 20 C${200 + o} 120 ${130 + o} 220 ${60 + o} ${300 - i * 10}`;
+        b += `<path d='${d}' fill='none' stroke='${hot}' stroke-opacity='.14' stroke-width='8' stroke-linecap='round'/><path d='${d}' fill='none' stroke='${steel}' stroke-opacity='.35' stroke-width='1.8' stroke-linecap='round'/>`;
+      });
+      return layer([put(art(360, 340, lit(b), 4), 'right 60px top 60px', 360, 340)]);
+    },
+
     // Arc reactor crowning the toolbar, HUD brackets framing the four corners.
     ironmanHud(c) {
       let b = `<path d='M14 84 V14 H84' fill='none' stroke='${c}' stroke-opacity='.5' stroke-width='2'/>` +
@@ -411,24 +862,19 @@
       ]);
     },
 
-    // Mjolnir in the top-right, lightning crackling off its head.
+    // Mjolnir in the top-right under a storm: noise-built thunderheads, lightning forking
+    // out of the cloud and off the hammer's head.
     mjolnir(steel, bolt, glow) {
       const r = rng(11);
-      let h = `<g transform='rotate(-35 260 102)'>` +
-        `<rect x='190' y='60' width='140' height='84' rx='8' fill='${steel}' fill-opacity='.12' stroke='${steel}' stroke-opacity='.6' stroke-width='2'/>` +
-        `<rect x='203' y='73' width='114' height='58' rx='4' fill='none' stroke='${steel}' stroke-opacity='.3'/>` +
-        `<rect x='178' y='68' width='12' height='68' rx='3' fill='${steel}' fill-opacity='.1' stroke='${steel}' stroke-opacity='.45'/>` +
-        `<rect x='330' y='68' width='12' height='68' rx='3' fill='${steel}' fill-opacity='.1' stroke='${steel}' stroke-opacity='.45'/>` +
-        `<rect x='250' y='144' width='20' height='190' rx='5' fill='#b08a5a' fill-opacity='.16' stroke='#d8b88a' stroke-opacity='.4'/>`;
-      for (let i = 0; i < 9; i++) h += line(250, 156 + i * 19, 270, 164 + i * 19, '#d8b88a', 0.32, 1.4);
-      h += `<rect x='246' y='332' width='28' height='16' rx='4' fill='${steel}' fill-opacity='.14' stroke='${steel}' stroke-opacity='.5'/>` +
-        `<path d='M260 348 C236 392 284 392 260 348' fill='none' stroke='#d8b88a' stroke-opacity='.4' stroke-width='2'/></g>`;
       let bolts = '';
-      [[40, 40], [30, 230], [120, 400], [360, 300], [200, 10]].forEach(([x, y], i) => {
-        const p = jag(250, 110, x, y, 7, 16, r);
-        bolts += poly(p, glow, 0.5, 9) + poly(p, bolt, 0.6, 2.2) + poly(p, '#ffffff', 0.5, 0.9);
+      [[250, 190, 120, 440, 6], [250, 190, 60, 60, 5], [250, 190, 470, 450, 6], [640, 40, 560, 280, 5]].forEach(([x1, y1, x2, y2, n]) => {
+        const p = jag(x1, y1, x2, y2, n * 2, 14, r);
+        bolts += poly(p, glow, 0.3, 7) + poly(p, bolt, 0.45, 1.8) + poly(p, '#ffffff', 0.45, 0.7);
       });
-      return layer([put(art(400, 440, `<g filter='url(#b)'>${bolts}</g>${bolts}${lit(h)}`, 5), 'right -20px top -10px', 400, 440), rg(glow, '100% 0%', '45% 50%', 0.18)]);
+      const defs = cloudF('cl', '0.006 0.012', 5, 4, mix(glow, '#8a93a8', 0.6), 2.6, -1.05) + fadeMask('fm', 700, 460, 520, 0, 520, 0.2) + metalG('hm', '#eef3fa', steel, mix(steel, '#000000', 0.5), 0.6, 1);
+      const img = art(700, 460, `<g mask='url(#fm)'><rect width='700' height='300' filter='url(#cl)' fill='#fff'/></g>` +
+        `<g filter='url(#b)'>${bolts}</g>${bolts}<g transform='translate(290 70) scale(.8)'>${lit(ART.mjolnir(steel, '#a8805a'))}</g>`, 4, defs);
+      return layer([put(img, 'right 0 top 0', 700, 460), rg(glow, '100% 0%', '45% 50%', 0.12)]);
     },
 
     // The Bifrost: a rainbow road rising out of the bottom-left corner.
@@ -447,11 +893,11 @@
       for (let k = 0; k < 11; k++) {
         const a = Math.PI + (k + 0.5) / 11 * Math.PI, len = 140 + r() * 200;
         const x2 = 500 + Math.cos(a) * len, y2 = 330 + Math.sin(a) * len;
-        cracks += poly(jag(500, 330, x2, y2, 7, 14, r), glow, 0.34, 5);
+        cracks += poly(jag(500, 330, x2, y2, 7, 14, r), glow, 0.22, 5);
         const mx = 500 + Math.cos(a) * len * 0.5, my = 330 + Math.sin(a) * len * 0.5, b = a + (r() - 0.5) * 1.2;
-        cracks += poly(jag(mx, my, mx + Math.cos(b) * len * 0.35, my + Math.sin(b) * len * 0.35, 4, 8, r), glow, 0.26, 3);
+        cracks += poly(jag(mx, my, mx + Math.cos(b) * len * 0.35, my + Math.sin(b) * len * 0.35, 4, 8, r), glow, 0.16, 3);
       }
-      const coreLines = cracks.replace(new RegExp(`stroke='${glow}'`, 'g'), `stroke='${core}'`).replace(/stroke-width='[35]'/g, "stroke-width='1.1'").replace(/stroke-opacity='0\.(34|26)'/g, "stroke-opacity='0.4'");
+      const coreLines = cracks.replace(new RegExp(`stroke='${glow}'`, 'g'), `stroke='${core}'`).replace(/stroke-width='[35]'/g, "stroke-width='1.1'").replace(/stroke-opacity='0\.(22|16)'/g, "stroke-opacity='0.3'");
       return layer([put(art(1000, 330, `<g filter='url(#b)'>${cracks}</g>${coreLines}`, 4), '50% 100%', 1000, 330), rg(glow, '50% 108%', '70% 40%', 0.22)]);
     },
 
@@ -492,18 +938,6 @@
       return layer([`${tile} 0 0 / 24px 41.57px repeat`], 'radial-gradient(circle at 0 0, #000, transparent 32%), radial-gradient(circle at 100% 0, #000, transparent 32%)');
     },
 
-    // A lens flare burning at the top of the window, its ghosts falling away to the right.
-    photonFlare(core, gold, red, blue) {
-      const spike = (L, w, rot) => `<polygon points='${pts([[350 - L, 40], [350, 40 - w], [350 + L, 40], [350, 40 + w]])}' fill='${core}' fill-opacity='.5' transform='rotate(${rot} 350 40)'/>`;
-      const star = spike(330, 3, 0) + spike(200, 3, 90) + spike(90, 2, 45) + spike(90, 2, -45);
-      const ghosts = `<circle cx='430' cy='118' r='14' fill='${gold}' fill-opacity='.18'/>` +
-        `<circle cx='482' cy='168' r='26' fill='none' stroke='${red}' stroke-opacity='.18' stroke-width='3'/>` +
-        `<polygon points='${starPts(524, 212, 12, 12, 3, 0)}' fill='${blue}' fill-opacity='.2'/>` +
-        `<circle cx='570' cy='256' r='40' fill='none' stroke='${gold}' stroke-opacity='.1' stroke-width='6'/>`;
-      const g = `<radialGradient id='g'><stop offset='0' stop-color='#ffffff' stop-opacity='.8'/><stop offset='.25' stop-color='${core}' stop-opacity='.35'/><stop offset='1' stop-color='${core}' stop-opacity='0'/></radialGradient>`;
-      return layer([put(art(700, 320, `<circle cx='350' cy='40' r='90' fill='url(#g)'/>${lit(star)}${ghosts}`, 3, g), '50% 0', 700, 320)]);
-    },
-
     // Wanda's crown glowing at the top edge.
     tiara(fill, glow) {
       const d = 'M60 120 C110 110 140 80 160 40 L180 90 L200 8 L220 90 L240 40 C260 80 290 110 340 120 C280 100 240 104 200 118 C160 104 120 100 60 120 Z';
@@ -522,16 +956,6 @@
       return layer([put(img(''), 'left bottom', 460, 460), put(img('translate(460 0) scale(-1 1)'), 'right bottom', 460, 460), rg(c, '50% 110%', '70% 35%', 0.14)]);
     },
 
-    // The Quantum Realm: a tunnel of turning hexagons in the top-right.
-    quantum(cols) {
-      let b = '';
-      for (let i = 0; i < 10; i++) {
-        const s = 12 + i * 20, rot = i * 7;
-        b += `<polygon points='${starPts(380, 150, s, s, 3, rot * Math.PI / 180)}' fill='none' stroke='${cols[i % cols.length]}' stroke-opacity='${f1(0.55 - i * 0.04)}' stroke-width='1.4'/>`;
-      }
-      const g = `<radialGradient id='g'><stop offset='0' stop-color='#ffffff' stop-opacity='.5'/><stop offset='1' stop-color='${cols[0]}' stop-opacity='0'/></radialGradient>`;
-      return layer([put(art(540, 520, `<circle cx='380' cy='150' r='60' fill='url(#g)'/>${lit(b)}`, 3, g), 'right -60px top -40px', 540, 520)]);
-    },
     // A line of ants marching along the bottom edge.
     ants(c) {
       const ant = (x, y) => `<ellipse cx='${x}' cy='${y}' rx='2.4' ry='2.2' fill='${c}'/><ellipse cx='${x + 5}' cy='${y}' rx='2.8' ry='2'/><ellipse cx='${x + 11}' cy='${y}' rx='4.4' ry='3.2' fill='${c}'/>` +
@@ -555,22 +979,24 @@
       return layer([put(art(440, 330, lit(wings), 3), 'left -10px top 40px', 440, 330), put(art(320, 240, lit(blasts), 3), 'right 20px bottom 20px', 320, 240)]);
     },
 
-    // Mechanical wings fanned from the top-left; Redwing flying a red trail across the top-right.
+    // Falcon's wings spread from the top-left: carbon feathers fanned on a steel frame, red
+    // tips; Redwing crossing the top-right on a red trail.
     falconWings(steel, red) {
       let f = '';
-      for (let i = 0; i < 10; i++) {
-        const a = 6 + i * 8.5, len = 230 + i * 12;
-        f += `<g transform='rotate(${a})'><rect x='30' y='-9' width='${len}' height='18' rx='9' fill='${steel}' fill-opacity='.05' stroke='${steel}' stroke-opacity='.3' stroke-width='1.1'/>` +
-          line(40, 0, len + 10, 0, steel, 0.22, 0.8) + line(len - 4, -5, len + 20, -5, red, 0.6, 2) + '</g>';
+      for (let i = 0; i < 12; i++) {
+        const a = 4 + i * 7.5, len = 240 + Math.sin(i / 11 * Math.PI) * 110;
+        f += `<g transform='rotate(${f1(a)})'><path d='M24 -10 L${f1(len)} -7 L${f1(len + 34)} 0 L${f1(len)} 8 L24 10 Z' fill='url(#fw)' fill-opacity='.4' stroke='${steel}' stroke-opacity='.55' stroke-width='1.1'/>` +
+          line(34, 0, len + 20, 0, '#ffffff', 0.3, 0.8) + `<path d='M${f1(len - 30)} -7 L${f1(len)} -7 L${f1(len + 34)} 0 L${f1(len)} 8 L${f1(len - 30)} 8 Z' fill='${red}' fill-opacity='.45'/></g>`;
       }
-      const tr = `<linearGradient id='t' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='${red}' stop-opacity='0'/><stop offset='1' stop-color='${red}' stop-opacity='.6'/></linearGradient>`;
+      f += `<circle cx='20' cy='20' r='26' fill='${steel}' fill-opacity='.2' stroke='${steel}' stroke-opacity='.6' stroke-width='2'/>`;
+      const tr = `<linearGradient id='t' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='${red}' stop-opacity='0'/><stop offset='1' stop-color='${red}' stop-opacity='.55'/></linearGradient>` + metalG('fw', '#ffffff', steel, mix(steel, '#000000', 0.55), 1, 0.2);
       const drone = `<path d='M20 190 C160 160 300 70 456 76' fill='none' stroke='url(#t)' stroke-width='3'/>` +
         `<polygon points='${pts([[486, 74], [450, 60], [458, 76], [450, 92]])}' fill='${red}' fill-opacity='.5' stroke='${red}' stroke-opacity='.8'/><circle cx='470' cy='76' r='3' fill='#ffffff' fill-opacity='.9'/>`;
-      return layer([put(art(480, 480, lit(f), 3), 'left -10px top 30px', 480, 480), put(art(520, 220, lit(drone), 4, tr), 'right 10px top 70px', 520, 220)]);
+      return layer([put(art(480, 480, lit(f), 3, tr), 'left 0 top 40px', 480, 480), put(art(520, 220, lit(drone), 4, tr), 'right 10px top 70px', 520, 220)]);
     },
 
     // An equaliser dancing along the bottom edge, the Awesome Mix in the corner.
-    mixtape(orange, gold) {
+    mixtape(orange, gold, withTape = true) {
       const r = rng(77);
       let bars = '';
       for (let i = 0; i < 16; i++) {
@@ -584,7 +1010,7 @@
         `<rect x='30' y='24' width='180' height='26' rx='3' fill='none' stroke='${gold}' stroke-opacity='.35'/>` +
         `<rect x='60' y='54' width='120' height='34' rx='6' fill='none' stroke='${orange}' stroke-opacity='.4'/>${reel(84)}${reel(156)}` +
         `<path d='M60 140 L76 110 H164 L180 140' fill='none' stroke='${orange}' stroke-opacity='.4' stroke-width='1.5'/>`;
-      return layer([`${art(240, 150, lit(bars), 2.5, q)} 0 100% / 240px 150px repeat-x`, put(art(240, 150, lit(tape), 3), 'right 24px bottom 24px', 240, 150)]);
+      return layer([`${art(240, 150, lit(bars), 2.5, q)} 0 100% / 240px 150px repeat-x`, withTape && put(art(240, 150, lit(tape), 3), 'right 24px bottom 24px', 240, 150)]);
     },
 
     // The Godslayer: a long blade drawn across the top-right, green light along its edge.
@@ -673,15 +1099,6 @@
       return layer([`${svg(160, 160, s)} 0 0 / 160px 160px repeat`], 'radial-gradient(ellipse 70% 70% at 50% 50%, transparent 40%, #000 95%)');
     },
 
-    // A storm's vortex over the top-left corner, lightning dropping out of its eye.
-    vortex(cloud, bolt) {
-      const r = rng(14);
-      let arms = '';
-      for (let k = 0; k < 5; k++) { const p = spiral(160, 150, 14, 0.2, 1.6, k * Math.PI * 2 / 5, 0.8); arms += poly(p, cloud, 0.1, 14) + poly(p, cloud, 0.42, 1.6); }
-      const bolts = [jag(200, 210, 330, 520, 9, 16, r), jag(260, 350, 190, 470, 5, 10, r)].map(p => poly(p, bolt, 0.4, 8) + poly(p, '#ffffff', 0.6, 1.6)).join('');
-      const g = `<radialGradient id='g'><stop offset='0' stop-color='#ffffff' stop-opacity='.3'/><stop offset='1' stop-color='${cloud}' stop-opacity='0'/></radialGradient>`;
-      return layer([put(art(560, 560, `<circle cx='160' cy='150' r='34' fill='url(#g)'/><g filter='url(#b)'>${arms}${bolts}</g>${arms}${bolts}`, 5, g), 'left -40px top -30px', 560, 560)]);
-    },
     // Gusts of wind sweeping along the bottom edge.
     wind(c) {
       let b = '';
@@ -699,18 +1116,21 @@
       return put(art(220, 220, lit(b), 4), 'right 30px bottom 30px', 220, 220);
     },
 
-    // The Phoenix Force: a firebird with its wings spread across the top of the window.
+    // The Phoenix Force: a firebird with its wings raised, its body and tail made of flame —
+    // the silhouette is filled with a fire ramp and torn by noise, so it burns rather than
+    // being outlined.
     firebird(flame, gold) {
-      let b = '';
-      for (const s of [-1, 1]) for (let i = 0; i < 7; i++) {
-        const tx = 450 + s * (140 + i * 44), ty = 30 + i * 24, cx = 450 + s * (60 + i * 22), cy = 150 - i * 4;
-        b += `<path d='M${450 + s * 14} 140 Q${cx} ${cy} ${tx} ${ty}' fill='none' stroke='${flame}' stroke-opacity='.45' stroke-width='${f1(9 - i)}' stroke-linecap='round'/>`;
-        b += `<path d='M${tx} ${ty} q${s * 18} -6 ${s * 10} -22' fill='none' stroke='${gold}' stroke-opacity='.45' stroke-width='2'/>`;
-      }
-      b += `<ellipse cx='450' cy='150' rx='16' ry='34' fill='${flame}' fill-opacity='.35'/><circle cx='450' cy='104' r='11' fill='${gold}' fill-opacity='.5'/>` +
-        `<polygon points='450,86 444,98 456,98' fill='${gold}' fill-opacity='.7'/>`;
-      [[-40, 330], [0, 360], [40, 330]].forEach(([dx, y]) => { b += `<path d='M450 180 C${450 + dx * 0.2} 240 ${450 + dx * 1.4} 280 ${450 + dx} ${y}' fill='none' stroke='${flame}' stroke-opacity='.4' stroke-width='5' stroke-linecap='round'/>`; });
-      return layer([put(art(900, 380, lit(b), 6), '50% -10px', 900, 380), rg(gold, '50% 0%', '45% 30%', 0.16)]);
+      // Leading edge out to the tip, then back along a trailing edge of feather points.
+      const wingPts = [[392, 236], [330, 170], [230, 108], [120, 52], [30, 14], [70, 96], [104, 84], [128, 150], [168, 136], [196, 200], [234, 186], [262, 244], [300, 232], [330, 280], [364, 270], [396, 300]];
+      const wing = 'M' + wingPts.map(([x, y]) => `${x} ${y}`).join(' L') + ' Z';
+      const bird = `<path d='${wing}'/><path d='${wing}' transform='translate(800 0) scale(-1 1)'/>` +
+        `<path d='M400 170 C420 170 432 190 428 214 L440 250 C440 300 424 330 400 420 C376 330 360 300 360 250 L372 214 C368 190 380 170 400 170 Z'/>` +
+        `<path d='M400 330 C380 400 330 440 300 470 C350 450 380 430 400 400 C420 430 450 450 500 470 C470 440 420 400 400 330 Z'/>`;
+      const defs = `<linearGradient id='pg' x1='0' y1='1' x2='0' y2='0'><stop offset='0' stop-color='${flame}' stop-opacity='.2'/><stop offset='.5' stop-color='${flame}' stop-opacity='.5'/><stop offset='.85' stop-color='${gold}' stop-opacity='.6'/><stop offset='1' stop-color='#fff4c8' stop-opacity='.7'/></linearGradient>` +
+        warpF('pw', 0.03, 0.06, 2, 6, 12) + blur('pb', 14);
+      const body = `<g fill='url(#pg)'>${bird}</g>`;
+      const img = svg(800, 480, `<defs>${defs}</defs><g filter='url(#pb)' opacity='.8'>${body}</g><g filter='url(#pw)'>${body}</g><circle cx='400' cy='196' r='6' fill='#ffffff' fill-opacity='.8'/>`);
+      return layer([put(img, '50% 20px', 720, 432), rg(gold, '50% 0%', '45% 35%', 0.14)]);
     },
 
     // Snowflakes drifting across the top edge.
@@ -727,24 +1147,14 @@
       return layer([`${art(320, 320, lit(t), 1.5)} 0 0 / 320px 320px repeat`], 'linear-gradient(180deg, #000 0, rgba(0,0,0,.4) 22%, transparent 42%)');
     },
 
-    // Flame on: a comet of fire arcing across the top, trailing sparks.
+    // Flame on: fire climbing the right edge of the window, sparks thrown off it.
     flameComet(flame, gold) {
+      const f = fireBody(520, 620, 23, ['#fff4c8', gold, flame], { heat: 1, count: 9, id: 'tc' });
       const r = rng(31);
-      const t = `<linearGradient id='t' gradientUnits='userSpaceOnUse' x1='40' y1='0' x2='1300' y2='0'><stop offset='0' stop-color='${flame}' stop-opacity='0'/><stop offset='.6' stop-color='${flame}' stop-opacity='.4'/><stop offset='1' stop-color='${gold}' stop-opacity='.7'/></linearGradient>`;
-      const d = 'M40 200 C400 60 900 20 1300 70';
-      let b = `<path d='${d}' fill='none' stroke='url(#t)' stroke-width='22' stroke-linecap='round' filter='url(#b)'/>` +
-        `<path d='${d}' fill='none' stroke='url(#t)' stroke-width='7' stroke-linecap='round'/><path d='${d}' fill='none' stroke='#fff6d8' stroke-opacity='.4' stroke-width='1.5'/>` +
-        `<circle cx='1300' cy='70' r='30' fill='${gold}' fill-opacity='.6' filter='url(#b)'/><circle cx='1300' cy='70' r='10' fill='#ffffff' fill-opacity='.85'/>`;
-      for (let i = 0; i < 40; i++) { const x = 200 + r() * 1080, y = 200 - (x - 40) * 0.1 + (r() - 0.5) * 70; b += `<circle cx='${f1(x)}' cy='${f1(y)}' r='${f1(0.8 + r() * 1.6)}' fill='${gold}' fill-opacity='${f1(0.3 + r() * 0.5)}'/>`; }
-      return layer([put(art(1400, 260, b, 8, t), '50% 0', 1400, 260)]);
+      let sparks = '';
+      for (let i = 0; i < 40; i++) sparks += `<circle cx='${f1(80 + r() * 440)}' cy='${f1(r() * 420)}' r='${f1(0.8 + r() * 1.8)}' fill='${gold}' fill-opacity='${f1(0.25 + r() * 0.45)}'/>`;
+      return layer([put(art(520, 620, f.art + sparks, 4, f.defs), 'right -60px bottom 0', 520, 620), rg(flame, '100% 100%', '50% 55%', 0.16)]);
     },
-    // The 4 in its ring, bottom-right.
-    fourEmblem(ring, glow) {
-      const b = `<circle cx='100' cy='100' r='78' fill='none' stroke='${ring}' stroke-opacity='.5' stroke-width='8'/>` +
-        `<path d='M114 48 L62 120 H138 M114 48 V156' fill='none' stroke='${ring}' stroke-opacity='.6' stroke-width='14' stroke-linecap='square' stroke-linejoin='miter'/>`;
-      return layer([put(art(200, 200, lit(b), 4), 'right 30px bottom 30px', 200, 200), rg(glow, '50% 110%', '70% 35%', 0.18)]);
-    },
-
     // The Great Protector's scales rising from the floor.
     dragonScales(c, gold) {
       const tile = svg(40, 22, `<path d='M0 22 A20 20 0 0 1 40 22 M-20 11 A20 20 0 0 1 20 11 M20 11 A20 20 0 0 1 60 11' fill='none' stroke='${c}' stroke-opacity='.22' stroke-width='1'/>`);
@@ -793,19 +1203,11 @@
       return layer([put(svg(1200, 500, b), '50% 0', 1200, 500)]);
     },
 
-    // Crossed katanas behind the shoulder, and the mask's two white eyes beside them.
-    deadpoolMask(red, white) {
-      const b = `<path d='M84 12 A78 78 0 0 0 84 168 Z' fill='${red}' fill-opacity='.2' stroke='${red}' stroke-opacity='.55' stroke-width='3'/>` +
-        `<path d='M96 12 A78 78 0 0 1 96 168 Z' fill='${red}' fill-opacity='.2' stroke='${red}' stroke-opacity='.55' stroke-width='3'/>` +
-        `<path d='M34 76 C48 62 66 66 76 80 C62 90 44 88 34 76 Z' fill='${white}' fill-opacity='.55'/>` +
-        `<path d='M146 76 C132 62 114 66 104 80 C118 90 136 88 146 76 Z' fill='${white}' fill-opacity='.55'/>`;
-      return put(art(180, 180, lit(b), 3), 'left 30px bottom 30px', 180, 180);
-    },
     // A speech bubble, because he would.
     bubble(c) {
       const b = `<path d='M16 12 H204 A12 12 0 0 1 216 24 V84 A12 12 0 0 1 204 96 H70 L40 122 L46 96 H16 A12 12 0 0 1 4 84 V24 A12 12 0 0 1 16 12 Z' fill='${c}' fill-opacity='.05' stroke='${c}' stroke-opacity='.4' stroke-width='2'/>` +
         [80, 110, 140].map(x => `<circle cx='${x}' cy='54' r='6' fill='${c}' fill-opacity='.5'/>`).join('');
-      return layer([put(art(220, 130, lit(b), 2), 'right 40px top 72px', 220, 130), rg('#c22c2c', '0% 0%', '40% 45%', 0.14)]);
+      return layer([put(art(220, 130, lit(b), 2), 'left 30px top 70%', 220, 130), rg('#c22c2c', '0% 0%', '40% 45%', 0.14)]);
     },
 
     // Symbiote dripping from the top edge, lit only by its own gloss.
@@ -817,19 +1219,6 @@
       });
       return layer([`${art(320, 180, lit(b), 2)} 0 0 / 320px 180px repeat-x`, rg(sheen, '50% 0%', '70% 20%', 0.06)]);
     },
-    // The white spider, legs sweeping round from the bottom of the window.
-    venomSpider(c, tongue) {
-      let b = `<ellipse cx='350' cy='232' rx='16' ry='22' fill='${c}' fill-opacity='.16' stroke='${c}' stroke-opacity='.5' stroke-width='2'/>` +
-        `<ellipse cx='350' cy='290' rx='28' ry='44' fill='${c}' fill-opacity='.14' stroke='${c}' stroke-opacity='.5' stroke-width='2'/>`;
-      for (const s of [-1, 1]) {
-        [[250, 130, 150, 40], [230, 190, 100, 150], [240, 280, 110, 330], [260, 320, 180, 400]].forEach(([mx, my, ex, ey], i) => {
-          const x0 = 350 + s * 16, y0 = 230 + i * 18;
-          b += `<path d='M${x0} ${y0} Q${350 + s * (350 - mx)} ${my} ${350 + s * (350 - ex)} ${ey}' fill='none' stroke='${c}' stroke-opacity='.26' stroke-width='${5 - i * 0.6}' stroke-linecap='round'/>`;
-        });
-      }
-      return layer([put(art(700, 400, lit(b), 5), '50% calc(100% + 30px)', 700, 400), rg(tongue, '50% 115%', '50% 30%', 0.16)]);
-    },
-
     // Bullet holes in the glass, top-left.
     bulletHoles(c) {
       const r = rng(4);
@@ -842,18 +1231,20 @@
       return layer([put(art(320, 240, lit(b), 1.5), 'left 0 top 66px', 320, 240), rg('#9a2a2a', '0% 0%', '40% 45%', 0.14)]);
     },
 
-    // The Hell Cycle's burning wheel, bottom-right.
-    burningWheel(fire, bone) {
-      let b = `<circle cx='130' cy='130' r='100' fill='none' stroke='${fire}' stroke-opacity='.45' stroke-width='16'/>` +
-        `<circle cx='130' cy='130' r='110' fill='none' stroke='${bone}' stroke-opacity='.3' stroke-width='6' stroke-dasharray='6 8'/>` +
-        `<circle cx='130' cy='130' r='16' fill='none' stroke='${bone}' stroke-opacity='.5' stroke-width='3'/>`;
-      for (let k = 0; k < 12; k++) { const a = k * Math.PI / 6; b += line(130 + 16 * Math.cos(a), 130 + 16 * Math.sin(a), 130 + 92 * Math.cos(a), 130 + 92 * Math.sin(a), bone, 0.3, 1.4); }
-      for (let k = 0; k < 11; k++) {
-        const a = Math.PI + 0.1 + k / 10 * (Math.PI - 0.2), x = 130 + 112 * Math.cos(a), y = 130 + 112 * Math.sin(a), ox = Math.cos(a), oy = Math.sin(a);
-        b += `<path d='M${f1(x - oy * 8)} ${f1(y + ox * 8)} Q${f1(x + ox * 30 + 6)} ${f1(y + oy * 30 - 10)} ${f1(x + ox * 40)} ${f1(y + oy * 40 - 14)} Q${f1(x + ox * 18)} ${f1(y + oy * 18)} ${f1(x + oy * 8)} ${f1(y - ox * 8)} Z' fill='${fire}' fill-opacity='.35'/>`;
-      }
-      return put(art(260, 260, lit(b), 4), 'right -60px bottom -60px', 260, 260);
+    // Hellfire along the floor and the Rider's skull burning in the bottom-left corner.
+    hellfire(bone) {
+      const cols = ['#fff1b0', '#ff9a2a', '#d8401a'];
+      const floor = fireBody(1400, 260, 5, cols, { heat: 0.8, id: 'ff' });
+      const head = fireBody(300, 300, 9, cols, { heat: 1.1, count: 7, id: 'fh' });
+      const skull = `<g transform='translate(50 140) scale(1)'>${ART.skull(bone, '#ff7a1a')}` +
+        `<ellipse cx='64' cy='104' rx='14' ry='12' fill='#ffb040' fill-opacity='.5' filter='url(#b)'/><ellipse cx='136' cy='104' rx='14' ry='12' fill='#ffb040' fill-opacity='.5' filter='url(#b)'/></g>`;
+      return layer([
+        `${art(1400, 260, floor.art, 6, floor.defs)} 50% 100% / 1400px 260px repeat-x`,
+        put(art(300, 360, `<g transform='translate(0 -10)'>${head.art}</g>${skull}`, 5, head.defs), 'left 30px bottom 40px', 300, 360),
+        rg('#d8401a', '50% 115%', '80% 40%', 0.18),
+      ]);
     },
+
     // A chain hung across the top of the window, glowing with hellfire.
     hellChain(steel, fire) {
       const Y = (x) => 22 + 96 * (1 - Math.pow((x - 700) / 700, 2));
@@ -865,15 +1256,6 @@
       return layer([put(art(1400, 170, b, 6), '50% 0', 1400, 170)]);
     },
 
-    // Loki's horned helm at the top edge.
-    horns(gold) {
-      const horn = (m) => {
-        const X = (x) => m ? 520 - x : x;
-        return `<path d='M${X(222)} 150 C${X(170)} 110 ${X(120)} 40 ${X(56)} 8 C${X(112)} 52 ${X(158)} 112 ${X(202)} 162 Z' fill='${gold}' fill-opacity='.2' stroke='${gold}' stroke-opacity='.65' stroke-width='1.6'/>`;
-      };
-      const b = horn(false) + horn(true) + `<path d='M186 176 Q260 130 334 176' fill='none' stroke='${gold}' stroke-opacity='.55' stroke-width='6' stroke-linecap='round'/>`;
-      return layer([put(art(520, 200, lit(b), 5), '50% -6px', 520, 200), rg(gold, '50% 0%', '40% 22%', 0.12)]);
-    },
     // The sceptre, its gem burning blue, bottom-right.
     sceptre(gold, gem, magic) {
       const b = line(330, 350, 130, 150, gold, 0.5, 5, "stroke-linecap='round'") +
@@ -934,27 +1316,23 @@
       return layer([put(art(260, 430, lit(b), 3), 'right 20px bottom 6px', 260, 430)]);
     },
 
-    // The metal arm's plates down the left edge, the red star on the shoulder.
+    // The metal arm down the left edge: overlapping plates, the red star on the shoulder.
     metalArm(steel, red) {
-      let b = '';
-      for (let i = 0; i < 10; i++) {
-        const y = 20 + i * 58;
-        b += `<path d='M0 ${y} C60 ${y - 10} 120 ${y - 4} 170 ${y + 10} L170 ${y + 54} C120 ${y + 44} 60 ${y + 50} 0 ${y + 60} Z' fill='${steel}' fill-opacity='.05' stroke='${steel}' stroke-opacity='.32' stroke-width='1.2'/>` +
-          line(20, y + 30, 150, y + 34, steel, 0.12, 1);
+      let b = `<path d='M0 20 C80 0 150 20 180 70 C190 100 180 130 170 150 L0 160 Z' fill='url(#ma)' fill-opacity='.35' stroke='${steel}' stroke-opacity='.6' stroke-width='1.5'/>`;
+      for (let i = 0; i < 9; i++) {
+        const y = 150 + i * 52;
+        b += `<path d='M0 ${y} C60 ${y - 10} 120 ${y - 4} 168 ${y + 8} L166 ${y + 56} C120 ${y + 46} 60 ${y + 50} 0 ${y + 60} Z' fill='url(#ma)' fill-opacity='.3' stroke='${steel}' stroke-opacity='.55' stroke-width='1.3'/>` +
+          line(12, y + 6, 156, y + 12, '#ffffff', 0.25, 1);
       }
-      b += `<polygon points='${starPts(84, 112, 34, 14, 5)}' fill='${red}' fill-opacity='.35' stroke='${red}' stroke-opacity='.7' stroke-width='1.5'/>`;
-      return layer([put(art(200, 620, lit(b), 3), 'left -24px top 60%', 200, 620)]);
+      b += `<polygon points='${starPts(92, 88, 38, 15, 5)}' fill='${red}' fill-opacity='.5' stroke='${red}' stroke-opacity='.85' stroke-width='1.5'/>`;
+      return layer([put(art(200, 640, lit(b), 3, metalG('ma', '#ffffff', steel, mix(steel, '#000000', 0.6), 1, 0.3)), 'left -20px top 50px', 200, 640)]);
     },
 
-    // The Infinity Gauntlet: a gold hand, a stone in every socket.
+    // The Infinity Gauntlet raised in the bottom-right, a violet haze behind it.
     gauntletHand(gold) {
-      let hand = `<rect x='90' y='180' width='190' height='170' rx='30' fill='${gold}' fill-opacity='.07' stroke='${gold}' stroke-opacity='.45' stroke-width='2'/>`;
-      [0, 1, 2, 3].forEach(i => { const y = i === 1 || i === 2 ? 50 : 70; hand += `<rect x='${94 + i * 47}' y='${y}' width='40' height='${190 - y}' rx='16' fill='${gold}' fill-opacity='.06' stroke='${gold}' stroke-opacity='.4' stroke-width='1.8'/>` + line(98 + i * 47, y + 50, 130 + i * 47, y + 50, gold, 0.3, 1.2); });
-      hand += `<rect x='40' y='200' width='40' height='110' rx='16' fill='${gold}' fill-opacity='.06' stroke='${gold}' stroke-opacity='.4' stroke-width='1.8' transform='rotate(-35 60 255)'/>`;
-      const stones = [[114, 192, '#9a4fe0'], [161, 192, '#4f8cff'], [208, 192, '#e0303a'], [255, 192, '#f08a2a'], [62, 238, '#3fd07a'], [185, 270, '#f2d541']];
-      let s = '';
-      stones.forEach(([x, y, c], i) => { const R = i === 5 ? 16 : 10; s += `<circle cx='${x}' cy='${y}' r='${R * 2}' fill='${c}' fill-opacity='.5' filter='url(#b)'/><circle cx='${x}' cy='${y}' r='${R}' fill='${c}' fill-opacity='.85'/><circle cx='${x - 2}' cy='${y - 2}' r='${R / 3}' fill='#ffffff' fill-opacity='.8'/>`; });
-      return layer([put(art(360, 380, lit(hand) + s, 6), 'right 0 bottom -30px', 360, 380), rg(gold, '100% 100%', '40% 45%', 0.2)]);
+      // Little, ring, middle, index, thumb, back of the hand: Soul, Reality, Space, Power, Time, Mind.
+      const img = ART.gauntlet(gold, ['#f08a2a', '#e0303a', '#4f8cff', '#9a4fe0', '#3fd07a', '#f2d541']);
+      return layer([put(img, 'right 10px bottom -60px', 378, 468), rg('#7d52b4', '100% 100%', '45% 55%', 0.16), rg(gold, '96% 92%', '22% 28%', 0.08)]);
     },
     // The snap: the left edge turning to dust and drifting away.
     snapDust(a, b) {
@@ -967,24 +1345,14 @@
       return layer([put(svg(700, 500, d), 'left 0 top 70%', 700, 500)]);
     },
 
-    // Magneto's helm at the top edge, shards of metal hanging in the field around it.
-    magnetoHelm(c, steel) {
-      const r = rng(66);
-      let b = `<path d='M130 190 C130 60 290 60 290 190' fill='${c}' fill-opacity='.08' stroke='${c}' stroke-opacity='.55' stroke-width='2'/>` +
-        `<path d='M210 60 L196 110 L210 190 L224 110 Z' fill='${c}' fill-opacity='.14' stroke='${c}' stroke-opacity='.5'/>` +
-        `<path d='M130 150 L104 210 L150 190 M290 150 L316 210 L270 190' fill='none' stroke='${c}' stroke-opacity='.5' stroke-width='2'/>` +
-        `<path d='M150 170 H270' stroke='${c}' stroke-opacity='.3'/>`;
-      let shards = '';
-      for (let i = 0; i < 12; i++) { const x = r() < 0.5 ? r() * 90 : 330 + r() * 90, y = 30 + r() * 160, s = 5 + r() * 9, a = r() * 6; shards += `<polygon points='${pts([[x, y - s], [x + s * 0.6, y + s * 0.4], [x - s * 0.5, y + s * 0.6]])}' fill='${steel}' fill-opacity='.25' stroke='${steel}' stroke-opacity='.5' transform='rotate(${f1(a * 57)} ${f1(x)} ${f1(y)})'/>`; }
-      return layer([put(art(420, 220, lit(b) + lit(shards), 4), '50% -24px', 420, 220), rg(c, '50% 0%', '45% 28%', 0.12)]);
-    },
-
-    // Ultron's eyes, burning at the top of the window.
+    // Ultron's face: angular silver plates, eyes and mouth burning red, bottom-right.
     ultronEyes(red) {
-      const eye = (m) => { const X = (x) => m ? 700 - x : x; return `<polygon points='${pts([[X(236), 104], [X(320), 90], [X(330), 114], [X(246), 122]])}' fill='${red}' fill-opacity='.6'/>`; };
-      const b = eye(false) + eye(true) + `<path d='M160 36 C200 230 500 230 540 36' fill='none' stroke='${red}' stroke-opacity='.18' stroke-width='2'/>` +
-        line(300, 196, 400, 196, red, 0.4, 3, "stroke-linecap='round'") + line(250, 110, 316, 102, '#ffffff', 0.6, 1.2) + line(450, 110, 384, 102, '#ffffff', 0.6, 1.2);
-      return layer([put(art(700, 240, `<g filter='url(#b)'>${b}${b}</g>${b}`, 7), '50% 24px', 700, 240), rg(red, '50% 0%', '45% 30%', 0.14)]);
+      const half = `<path d='M100 8 L60 18 L34 56 L30 122 L44 170 L72 202 L100 210 Z' fill='#9aa4b0' fill-opacity='.14' stroke='#c8d0da' stroke-opacity='.55' stroke-width='1.6'/>` +
+        `<path d='M50 100 L90 110 L86 120 L56 114 Z' fill='${red}' fill-opacity='.85'/>` +
+        `<path d='M100 40 L80 60 L60 58 M36 90 L54 130 L60 170 M100 130 L92 150 L100 156 M48 150 L72 186' fill='none' stroke='#c8d0da' stroke-opacity='.4' stroke-width='1.2'/>` +
+        `<path d='M68 174 L100 170 L100 180 L72 184 Z' fill='${red}' fill-opacity='.6'/>`;
+      const glowEyes = sym(`<path d='M50 100 L90 110 L86 120 L56 114 Z' fill='${red}' fill-opacity='.9'/><path d='M68 174 L100 170 L100 180 L72 184 Z' fill='${red}' fill-opacity='.7'/>`);
+      return layer([put(art(200, 220, `${sym(half)}<g filter='url(#b)'>${glowEyes}</g>`, 5), 'right 40px bottom 30px', 230, 253), rg(red, '100% 100%', '40% 45%', 0.12)]);
     },
 
     // Pumpkin bombs, their carved faces lit from inside.
@@ -1010,19 +1378,21 @@
       return layer([put(art(420, 260, lit(b), 4), 'left 20px top 60px', 420, 260), rg(c, '0% 0%', '40% 40%', 0.14), rg(c, '50% 110%', '70% 30%', 0.12)]);
     },
 
-    // Four mechanical arms rising from the bottom-left, pincers open, a red light in each.
+    // Four mechanical arms rising from the bottom-left: stacked armoured segments that narrow
+    // toward three-fingered pincers, a red sensor at each tip.
     ockArms(steel, light) {
       let b = '';
-      const arms = [[[0, 560], [120, 360], [60, 200], [230, 120]], [[0, 560], [200, 420], [260, 300], [400, 250]],
-        [[0, 560], [60, 420], [-20, 300], [80, 160]], [[0, 560], [240, 520], [360, 480], [520, 420]]];
+      const arms = [[[0, 580], [120, 380], [60, 220], [240, 130]], [[0, 580], [210, 440], [270, 320], [420, 270]],
+        [[0, 580], [50, 430], [-10, 310], [90, 170]], [[0, 580], [240, 540], [370, 500], [540, 440]]];
+      const defs = `<radialGradient id='sg' cx='.35' cy='.3'><stop offset='0' stop-color='#ffffff' stop-opacity='.5'/><stop offset='.5' stop-color='${steel}' stop-opacity='.3'/><stop offset='1' stop-color='${mix(steel, '#000000', 0.6)}' stop-opacity='.4'/></radialGradient>`;
       arms.forEach(([p0, p1, p2, p3]) => {
         const at = (t) => { const u = 1 - t; return [0, 1].map(k => u * u * u * p0[k] + 3 * u * u * t * p1[k] + 3 * u * t * t * p2[k] + t * t * t * p3[k]); };
-        for (let i = 0; i <= 18; i++) { const [x, y] = at(i / 18); b += `<circle cx='${f1(x)}' cy='${f1(y)}' r='${f1(10 - i * 0.3)}' fill='${steel}' fill-opacity='.07' stroke='${steel}' stroke-opacity='.4' stroke-width='1.2'/>`; }
-        const [ex, ey] = at(1), [bx, by] = at(0.94), a = Math.atan2(ey - by, ex - bx);
-        [-0.6, 0, 0.6].forEach(o => { b += `<path d='M${f1(ex)} ${f1(ey)} q${f1(Math.cos(a + o) * 22)} ${f1(Math.sin(a + o) * 22)} ${f1(Math.cos(a + o * 1.8) * 34)} ${f1(Math.sin(a + o * 1.8) * 34)}' fill='none' stroke='${steel}' stroke-opacity='.6' stroke-width='3' stroke-linecap='round'/>`; });
-        b += `<circle cx='${f1(ex)}' cy='${f1(ey)}' r='5' fill='${light}' fill-opacity='.85'/>`;
+        for (let i = 0; i <= 30; i++) { const [x, y] = at(i / 30), R = f1(17 - i * 0.28); b += `<circle cx='${f1(x)}' cy='${f1(y)}' r='${R}' fill='url(#sg)' stroke='${steel}' stroke-opacity='.5' stroke-width='1.1'/>`; }
+        const [ex, ey] = at(1), [bx, by] = at(0.95), a = Math.atan2(ey - by, ex - bx);
+        [-0.7, 0, 0.7].forEach(o => { b += `<path d='M${f1(ex)} ${f1(ey)} q${f1(Math.cos(a + o) * 24)} ${f1(Math.sin(a + o) * 24)} ${f1(Math.cos(a + o * 1.6) * 38)} ${f1(Math.sin(a + o * 1.6) * 38)}' fill='none' stroke='${steel}' stroke-opacity='.7' stroke-width='4' stroke-linecap='round'/>`; });
+        b += `<circle cx='${f1(ex)}' cy='${f1(ey)}' r='9' fill='${light}' fill-opacity='.5' filter='url(#b)'/><circle cx='${f1(ex)}' cy='${f1(ey)}' r='4.5' fill='${light}' fill-opacity='.9'/>`;
       });
-      return layer([put(art(620, 580, lit(b), 3), 'left -20px bottom -20px', 620, 580)]);
+      return layer([put(art(640, 600, b, 4, defs), 'left -20px bottom -20px', 640, 600)]);
     },
     // A captive fusion sun burning in the top-right.
     fusionSun(core, flare) {
@@ -1063,21 +1433,13 @@
       return layer([put(img(''), 'left 0 top 60px', 320, 380), put(img('translate(320 0) scale(-1 1)'), 'right 0 top 60px', 320, 380)]);
     },
 
-    // Dormammu's face: two eyes burning in a crown of flame at the top of the window.
+    // Dormammu: a head made of fire, two eyes burning white in it, over the right edge.
     dormammuFace(fire, core) {
-      const r = rng(61);
-      let flames = '';
-      for (let i = 0; i < 15; i++) {
-        const w = 34 + r() * 26, x = 20 + i * 44 + (r() - 0.5) * 16, h = 90 + r() * 110, s = (r() - 0.5) * 30, y = 250;
-        flames += `<path d='M${f1(x)} ${y} C${f1(x - w * 0.1)} ${f1(y - h * 0.5)} ${f1(x + w * 0.4 - s * 0.5)} ${f1(y - h * 0.62)} ${f1(x + w * 0.5 + s)} ${f1(y - h)} ` +
-          `C${f1(x + w * 0.6)} ${f1(y - h * 0.55)} ${f1(x + w * 1.1)} ${f1(y - h * 0.42)} ${f1(x + w)} ${y} Z' fill='url(#f)'/>`;
-      }
-      const eye = (x) => `<path d='M${x - 52} 172 C${x - 26} 140 ${x + 26} 140 ${x + 52} 172 C${x + 26} 188 ${x - 26} 188 ${x - 52} 172 Z' fill='${core}' fill-opacity='.45'/>`;
-      const eyes = eye(262) + eye(438);
-      // The fire fades out towards both ends and towards its base, so the crown has no edges.
-      const defs = `<linearGradient id='f' x1='0' y1='1' x2='0' y2='0'><stop offset='0' stop-color='${fire}' stop-opacity='0'/><stop offset='.22' stop-color='${fire}' stop-opacity='.34'/><stop offset='.6' stop-color='${fire}' stop-opacity='.16'/><stop offset='1' stop-color='${core}' stop-opacity='0'/></linearGradient>` +
-        `<radialGradient id='e' cx='.5' cy='.62' r='.62'><stop offset='.55' stop-color='white'/><stop offset='1' stop-color='black'/></radialGradient><mask id='m'><rect width='700' height='260' fill='url(#e)'/></mask>`;
-      return layer([put(art(700, 260, `<g mask='url(#m)'>${lit(flames)}</g><g filter='url(#b)'>${eyes}${eyes}</g>${eyes}`, 3, defs), '50% -150px', 700, 260), rg(fire, '50% 0%', '55% 30%', 0.18)]);
+      const f = fireBody(460, 560, 61, ['#fff0c0', '#ff9a3a', fire], { heat: 1.05, count: 8, id: 'dh' });
+      const eye = (x) => `<path d='M${x - 44} 290 C${x - 20} 262 ${x + 20} 262 ${x + 44} 290 C${x + 20} 304 ${x - 20} 304 ${x - 44} 290 Z' fill='${core}' fill-opacity='.75'/>`;
+      const eyes = eye(170) + eye(290) + `<path d='M170 400 C200 420 260 420 290 400' fill='none' stroke='${core}' stroke-opacity='.35' stroke-width='5' stroke-linecap='round'/>`;
+      const defs = f.defs + fadeMask('hm', 460, 560, 250, 340, 250, 0.35);
+      return layer([put(art(460, 560, `<g mask='url(#hm)'>${f.art}</g><g filter='url(#b)'>${eyes}${eyes}</g>${eyes}`, 5, defs), 'right -40px bottom -20px', 460, 560), rg(fire, '100% 100%', '50% 55%', 0.16)]);
     },
     // The Dark Dimension turning beneath everything.
     darkVortex(c) {
@@ -1086,13 +1448,16 @@
       return layer([put(art(800, 520, `<g filter='url(#b)'>${arms}</g>${arms}`, 5), '50% 100%', 800, 520), rg(c, '50% 110%', '60% 35%', 0.16)]);
     },
 
-    // Galactus's helm, looming over the top of the window.
+    // Galactus's helm: the dome with its crest over a face in shadow, and the two tall fins
+    // rising from the temples.
     galactusHelm(c, deep) {
-      let b = `<path d='M280 300 C280 150 520 150 520 300' fill='${deep}' fill-opacity='.1' stroke='${c}' stroke-opacity='.55' stroke-width='2'/>` +
-        `<path d='M340 300 V232 H460 V300' fill='none' stroke='${c}' stroke-opacity='.4' stroke-width='2'/>` +
-        `<polyline points='350,190 375,228 400,198 425,228 450,190' fill='none' stroke='${c}' stroke-opacity='.6' stroke-width='3'/>`;
-      for (const m of [false, true]) { const X = (x) => m ? 800 - x : x; b += `<polygon points='${pts([[X(300), 212], [X(222), 22], [X(262), 24], [X(334), 186]])}' fill='${deep}' fill-opacity='.14' stroke='${c}' stroke-opacity='.55' stroke-width='1.8'/>`; }
-      return layer([put(art(800, 300, lit(b), 5), '50% -40px', 800, 300), rg(c, '50% 0%', '45% 30%', 0.14)]);
+      const half = `<path d='M100 60 C62 60 40 86 38 130 L36 250 L64 256 L66 160 C68 132 82 118 100 118 Z' fill='${deep}' fill-opacity='.3' stroke='${c}' stroke-opacity='.6' stroke-width='1.6'/>` +
+        `<path d='M46 120 L20 118 L6 -4 L34 0 L52 96 Z' fill='${deep}' fill-opacity='.32' stroke='${c}' stroke-opacity='.65' stroke-width='1.6'/>` +
+        `<path d='M26 108 L14 12' stroke='#ffffff' stroke-opacity='.3'/>` +
+        `<path d='M100 70 L84 70 L74 96 L88 86 L100 104' fill='none' stroke='${c}' stroke-opacity='.6' stroke-width='2'/>` +
+        `<path d='M100 118 C86 118 76 130 74 150 L74 210 C80 236 92 248 100 250 Z' fill='#000000' fill-opacity='.35'/>` +
+        `<path d='M78 156 L96 160 L94 166 L80 163 Z' fill='${c}' fill-opacity='.8'/>`;
+      return layer([put(art(200, 260, lit(sym(half)), 4), 'left 40px bottom 20px', 220, 286), rg(c, '0% 100%', '40% 45%', 0.14)]);
     },
     // A world being eaten: a planet in the bottom-right, its energy streaming away.
     devouredPlanet(c, planet) {
@@ -1175,7 +1540,7 @@
       let b = '';
       for (let i = 0; i < nodes.length - 1; i++) for (let k = 0; k < 3; k++) {
         const p = jag(nodes[i][0], nodes[i][1], nodes[i + 1][0], nodes[i + 1][1], 14, 16, r);
-        b += poly(p, glow, 0.35, 6) + poly(p, c, 0.55, 1);
+        b += poly(p, glow, 0.16, 6) + poly(p, c, 0.38, 1);
       }
       nodes.forEach(([x, y]) => { b += `<circle cx='${x}' cy='${y}' r='6' fill='${c}' fill-opacity='.8'/><circle cx='${x}' cy='${y}' r='18' fill='${glow}' fill-opacity='.25'/>`; });
       return layer([put(art(300, 700, `<g filter='url(#b)'>${b}</g>${b}`, 4), 'right 0 center', 300, 700)]);
@@ -1190,15 +1555,6 @@
         b += `<polygon points='${pts([[x - dx / l * w, y - dy / l * w], [x + nx * L, y + ny * L], [x + dx / l * w, y + dy / l * w]])}' fill='${gold}' fill-opacity='.16' stroke='${pale}' stroke-opacity='.55' stroke-width='1'/>`;
       }
       return layer([put(art(1000, 200, lit(b), 4), '50% 0', 1000, 200), rg(gold, '50% 0%', '50% 25%', 0.1)]);
-    },
-    // Scars in rows of raised dots, bottom-left.
-    scars(c) {
-      let b = '';
-      for (let k = 0; k < 9; k++) for (let x = 20; x <= 250; x += 12) {
-        const y = 36 + k * 26 - Math.abs(x - 135) * 0.22;
-        b += `<circle cx='${x}' cy='${f1(y)}' r='2.2' fill='${c}' fill-opacity='.45'/>`;
-      }
-      return layer([put(art(280, 300, lit(b), 1.5), 'left 12px bottom 12px', 280, 300), rg(c, '0% 100%', '35% 40%', 0.12)]);
     },
   };
 
@@ -1224,6 +1580,18 @@
     };
   }
 
+  // The translucent colour that, laid over `base`, gives exactly `target`: the smallest alpha
+  // for which the needed colour still fits in 0–255. This is how a panel keeps its look while
+  // the backdrop art shows through it (see the HERO SUIT THEMES block in 04-themes.css).
+  function glass(target, base) {
+    const T = hexRgb(target), B = hexRgb(base);
+    let a = 0.02;
+    T.forEach((t, i) => { const d = t - B[i]; if (d > 0) a = Math.max(a, d / (255 - B[i])); else if (d < 0) a = Math.max(a, -d / B[i]); });
+    a = Math.min(1, a);
+    const C = T.map((t, i) => Math.max(0, Math.min(255, Math.round(B[i] + (t - B[i]) / a))));
+    return `rgba(${C.join(', ')}, ${Math.round(a * 1000) / 1000})`;
+  }
+
   function heroTheme(id, name, group, p, layers) {
     const vars = {
       '--ink-black': p.bg, '--shadow-black': p.shadow, '--panel-black': p.panel, '--raised-black': p.raised,
@@ -1237,6 +1605,10 @@
       '--accent': p.accent, '--accent-bright': p.bright,
       '--added': p.added, '--added-bg': p.addedBg, '--removed': p.removed, '--removed-bg': p.removedBg,
       '--head-pill-text': p.pillText || '#0a0606',
+      '--hero-solid-bg': p.bg, '--hero-solid-panel': p.panel, '--hero-solid-raised': p.raised, '--hero-solid-shadow': p.shadow,
+      '--hero-glass-panel': glass(p.panel, p.bg), '--hero-glass-raised': glass(p.raised, p.bg), '--hero-glass-shadow': glass(p.shadow, p.bg),
+      '--hero-glass-added': glass(p.addedBg, p.bg), '--hero-glass-removed': glass(p.removedBg, p.bg),
+      '--hero-frost-bg': rgba(p.bg, 0.86), '--hero-frost-panel': rgba(p.panel, 0.88), '--hero-frost-raised': rgba(p.raised, 0.9), '--hero-frost-shadow': rgba(p.shadow, 0.9),
     };
     if (layers) {
       const [one, two] = layers;
@@ -1250,7 +1622,7 @@
   const heroFrom = (id, name, group, colours, layers) => heroTheme(id, name, group, derivePalette(colours), layers);
 
   // ---------- the roster ----------
-  // The first six are hand-tuned palettes whose auras live in 04-themes.css.
+  // The first six keep hand-tuned palettes; everything after derives its palette from three colours.
   const HERO_THEMES = [
     // Iron mask, forest-green cloak, gold clasp.
     heroTheme('hero-doom', 'Doctor Doom', 'villain', {
@@ -1258,21 +1630,21 @@
       text: '#d6dbd4', dim: '#9aa59e', muted: '#6c7770',
       accent: '#5f8f4a', bright: '#79a862', deep: '#3f6630', blood: '#2a4520', gold: '#c2a24a',
       added: '#8dbf73', addedBg: '#1b2c1b', removed: '#c9695f', removedBg: '#33201d',
-    }),
+    }, SCENE.doom()),
     // Indigo tunic, crimson Cloak of Levitation, the Eye's amber glow.
     heroTheme('hero-strange', 'Doctor Strange', 'hero', {
       bg: '#0f1224', shadow: '#0a0c19', panel: '#141934', raised: '#1b2143', border: '#2a3160', borderStrong: '#5a3350',
       text: '#e6e0d2', dim: '#a8abc6', muted: '#737a9a',
       accent: '#b8364a', bright: '#cf5064', deep: '#8a2436', blood: '#5c1826', gold: '#e0a458',
       added: '#62b98f', addedBg: '#16302d', removed: '#e07a6e', removedBg: '#351a28', pillText: '#ffffff',
-    }),
+    }, SCENE.strange()),
     // Suit red over suit blue, silver webbing.
     heroTheme('hero-spider', 'Spider-Man', 'hero', {
       bg: '#0e1224', shadow: '#090c19', panel: '#131a33', raised: '#1a2245', border: '#283466', borderStrong: '#3d5294',
       text: '#e8ebf4', dim: '#a7b0d0', muted: '#707a9e',
       accent: '#c73a44', bright: '#dc5560', deep: '#962a33', blood: '#621b22', gold: '#6f95e8',
       added: '#5bbf82', addedBg: '#14302c', removed: '#e8806f', removedBg: '#351a26', pillText: '#ffffff',
-    }),
+    }, SCENE.spider(false)),
     // The same suit with its colours swapped: blue leads, red is the secondary, and the
     // surfaces take the red's dark tint where the classic suit has navy.
     heroTheme('hero-spider-rev', 'Spider-Man Reversed', 'hero', {
@@ -1280,49 +1652,49 @@
       text: '#f1e9ec', dim: '#cfb0b8', muted: '#9a7480',
       accent: '#3f6fd1', bright: '#5a88e6', deep: '#2b4f9e', blood: '#1c3470', gold: '#dc5560',
       added: '#5bbf82', addedBg: '#1a2c24', removed: '#e8806f', removedBg: '#3a1a22', pillText: '#ffffff',
-    }),
+    }, SCENE.spider(true)),
     // Mustard yellow and blue, adamantium steel.
     heroTheme('hero-wolverine', 'Wolverine', 'antihero', {
       bg: '#11141b', shadow: '#0b0d12', panel: '#161a24', raised: '#1e2331', border: '#2d3547', borderStrong: '#6e6230',
       text: '#e8e9ec', dim: '#a8afbe', muted: '#717a8c',
       accent: '#e0b43a', bright: '#efc75a', deep: '#a8841f', blood: '#6e5614', gold: '#5a7fd0',
       added: '#6cbd7a', addedBg: '#182c20', removed: '#d9705a', removedBg: '#33201c', pillText: '#1a1407',
-    }),
+    }, SCENE.wolverine()),
     // Crimson synthezoid skin, green suit, the Mind Stone's yellow.
     heroTheme('hero-vision', 'Vision', 'hero', {
       bg: '#0f1813', shadow: '#0a110d', panel: '#142019', raised: '#1b2a21', border: '#2a3d31', borderStrong: '#466b52',
       text: '#e6ede3', dim: '#a4b6a8', muted: '#6e8274',
       accent: '#c24b56', bright: '#d8646e', deep: '#8e3540', blood: '#5e2229', gold: '#e8cc5a',
       added: '#6cc394', addedBg: '#163026', removed: '#e68a64', removedBg: '#33221b', pillText: '#ffffff',
-    }),
+    }, SCENE.vision()),
 
     // ----- Heroes -----
     heroFrom('hero-ironman', 'Iron Man', 'hero', { bg: '#170d0d', accent: '#b8352e', gold: '#d8a94a' },
-      [M.reactor('#8fe3ff', '#d8a94a', '#b8352e'), SIG.ironmanHud('#8fe3ff')]),
+      SCENE.ironman()),
     heroFrom('hero-cap', 'Captain America', 'hero', { bg: '#0e1426', accent: '#3f64b8', gold: '#c0414a' },
-      [M.shield('#c0414a', '#3f64b8', '#e8ecf4'), SIG.starsStripes('#c0414a', '#e8ecf4')]),
+      SCENE.cap()),
     heroFrom('hero-thor', 'Thor', 'hero', { bg: '#0e121c', accent: '#6f9ee0', gold: '#b8403a' },
-      [SIG.mjolnir('#c8d0dc', '#dfe9ff', '#6f9ee0'), SIG.bifrost()]),
+      SCENE.thor()),
     heroFrom('hero-hulk', 'Hulk', 'hero', { bg: '#0f160f', accent: '#5f9f4a', gold: '#7d58a8' },
-      [SIG.smash('#7fd05a', '#e0ffd0'), M.gamma('#7fd05a')]),
+      SCENE.hulk()),
     heroFrom('hero-widow', 'Black Widow', 'hero', { bg: '#0f0d10', accent: '#c0343c', gold: '#8e96a4' },
       [M.emblem('hourglass', '#c0343c', '#ff5a64', 'br'), SIG.widowBites('#6fb0ff')]),
     heroFrom('hero-hawkeye', 'Hawkeye', 'hero', { bg: '#130f1a', accent: '#8651bf', gold: '#d0a24a' },
       [M.arrows('#d0a24a', '#c9a3f0'), SIG.target('#8651bf', '#d0a24a')]),
     heroFrom('hero-panther', 'Black Panther', 'hero', { bg: '#0c0b12', accent: '#8d62e8', gold: '#c3c6d4' },
-      [SIG.kinetic('#b99cff', '#e0d4ff'), SIG.wakanda('#c3c6d4')]),
+      SCENE.panther()),
     heroFrom('hero-marvel', 'Captain Marvel', 'hero', { bg: '#0f1428', accent: '#c43a48', gold: '#e2bd4c' },
-      [SIG.photonFlare('#fff1c4', '#e2bd4c', '#c43a48', '#6f95e8'), M.rays('#ffd98a', '#fff1c4', '50% -4%', { alpha: 0.09 })]),
+      SCENE.marvel()),
     heroFrom('hero-wanda', 'Scarlet Witch', 'hero', { bg: '#160a10', accent: '#c43250', gold: '#e0648e' },
-      [SIG.tiara('#c43250', '#ff4f7a'), SIG.chaos('#ff4f7a', '#e0648e')]),
+      SCENE.wanda()),
     heroFrom('hero-antman', 'Ant-Man', 'hero', { bg: '#130d0e', accent: '#bd3a33', gold: '#8f9aa8' },
-      [SIG.quantum(['#7ad0ff', '#ff5ad0', '#ffb04a']), SIG.ants('#e0605a')]),
+      SCENE.antman()),
     heroFrom('hero-wasp', 'The Wasp', 'hero', { bg: '#12100a', accent: '#d9ad3c', gold: '#c24a3a' },
       [SIG.waspWings('#ffd76a', '#ffe9a8', '#fff2a0'), M.hex('#ffd76a', 'tr', '#d9ad3c')]),
     heroFrom('hero-falcon', 'Falcon', 'hero', { bg: '#10141c', accent: '#c03e3e', gold: '#98a6ba' },
       [SIG.falconWings('#c8d4e6', '#e04848'), M.glows([['#c03e3e', '100% 100%', '50% 55%', 0.14], ['#98a6ba', '0% 0%', '35% 40%', 0.1]])]),
     heroFrom('hero-starlord', 'Star-Lord', 'hero', { bg: '#150e0c', accent: '#c35a31', gold: '#6fb3de' },
-      [SIG.mixtape('#e07a3a', '#ffc27a'), M.cosmic('#c35a31', '#6fb3de')]),
+      SCENE.starlord()),
     heroFrom('hero-gamora', 'Gamora', 'hero', { bg: '#0c140f', accent: '#4aa874', gold: '#c4508c' },
       [SIG.godslayer('#e0f0e8', '#4fd08a'), SIG.zenMarks('#dfe8e4')]),
     heroFrom('hero-groot', 'Groot', 'hero', { bg: '#120f0a', accent: '#7c9b4c', gold: '#a8763e' },
@@ -1330,11 +1702,11 @@
     heroFrom('hero-rocket', 'Rocket', 'hero', { bg: '#14100c', accent: '#cf8a3c', gold: '#5a8ac2' },
       [SIG.blueprint('#5ab0e8', '#dff0ff'), SIG.reticle('#ffa040')]),
     heroFrom('hero-surfer', 'Silver Surfer', 'hero', { bg: '#0b0f18', accent: '#b4c1d6', gold: '#6f9fe0' },
-      [SIG.surfboard('#dfe8f5', '#9fc4ff'), SIG.warp('#dfe8ff')]),
+      SCENE.surfer()),
     heroFrom('hero-daredevil', 'Daredevil', 'hero', { bg: '#140808', accent: '#b0272f', gold: '#d45c3c' },
       [plus(M.sonar('#ff4b4b', 'br'), SIG.ddEmblem('#ff5a5a')), SIG.rain('#f0c8c8')]),
     heroFrom('hero-storm', 'Storm', 'hero', { bg: '#0f1320', accent: '#cfd6e4', gold: '#6f9fe0' },
-      [SIG.vortex('#cfd6e4', '#9fc4ff'), SIG.wind('#e8f0ff')]),
+      SCENE.storm()),
     heroFrom('hero-cyclops', 'Cyclops', 'hero', { bg: '#0f1220', accent: '#d43a40', gold: '#e0b44a' },
       [M.beam('#ff4a55', '#ffd0d4'), plus(M.glows([['#3f64b8', '0% 100%', '45% 50%', 0.14]]), SIG.xEmblem('#e0b44a', '#d43a40'))]),
     heroFrom('hero-phoenix', 'Phoenix', 'hero', { bg: '#160c08', accent: '#de5c2c', gold: '#eec048' },
@@ -1342,7 +1714,7 @@
     heroFrom('hero-iceman', 'Iceman', 'hero', { bg: '#0b141a', accent: '#7cc4e4', gold: '#e0f2ff' },
       [M.frost('#bfeaff', '#7cc4e4'), SIG.snowflakes('#e8f8ff')]),
     heroFrom('hero-torch', 'Human Torch', 'hero', { bg: '#160c06', accent: '#e6732c', gold: '#f0c048' },
-      [SIG.flameComet('#ff7a2a', '#ffd060'), SIG.fourEmblem('#9fc4ff', '#e6732c')]),
+      [SIG.flameComet('#ff7a2a', '#ffd060'), M.embers('#ffb04a', '#fff0a0')]),
     heroFrom('hero-shangchi', 'Shang-Chi', 'hero', { bg: '#140c0c', accent: '#c4363c', gold: '#dcb048' },
       [M.tenrings('#9fd0ff', '#5aa8ff'), SIG.dragonScales('#4fd0c0', '#dcb048')]),
     heroFrom('hero-miles', 'Miles Morales', 'hero', { bg: '#0c0c10', accent: '#d02e3e', gold: '#cfd4de' },
@@ -1352,15 +1724,15 @@
 
     // ----- Anti-heroes -----
     heroFrom('hero-deadpool', 'Deadpool', 'antihero', { bg: '#140909', accent: '#c22c2c', gold: '#d8d8de' },
-      [plus(M.katanas('#e8ecf4', '#ff5555'), SIG.deadpoolMask('#e03a3a', '#ffffff')), SIG.bubble('#f0f0f4')]),
+      SCENE.deadpool()),
     heroFrom('hero-venom', 'Venom', 'antihero', { bg: '#08090c', accent: '#d6dbe4', gold: '#c0343c' },
-      [SIG.goo('#e8ecf4'), SIG.venomSpider('#f0f2f6', '#c0343c')]),
+      SCENE.venom()),
     heroFrom('hero-punisher', 'Punisher', 'antihero', { bg: '#0c0c0e', accent: '#dcdde3', gold: '#9a2a2a' },
-      [M.emblem('skull', '#ffffff', '#ffffff', 'br'), SIG.bulletHoles('#e8e8ee')]),
+      SCENE.punisher()),
     heroFrom('hero-ghostrider', 'Ghost Rider', 'antihero', { bg: '#120806', accent: '#ec7a2c', gold: '#d6cebe' },
-      [plus(M.flames('#ec7a2c', '#ffcf6a'), SIG.burningWheel('#ff8a3a', '#e8dcc8')), SIG.hellChain('#d6cebe', '#ff7a2a')]),
+      [SIG.hellfire('#e8dcc8'), SIG.hellChain('#d6cebe', '#ff7a2a')]),
     heroFrom('hero-loki', 'Loki', 'antihero', { bg: '#0c1410', accent: '#3f9a5a', gold: '#d2ae40' },
-      [SIG.horns('#e2c050'), SIG.sceptre('#e2c050', '#7fd0ff', '#3f9a5a')]),
+      SCENE.loki()),
     heroFrom('hero-elektra', 'Elektra', 'antihero', { bg: '#140a0a', accent: '#b82c3c', gold: '#c9a34c' },
       [SIG.sais('#f0e0d0', '#e0404c'), SIG.ribbon('#d8384a')]),
     heroFrom('hero-blade', 'Blade', 'antihero', { bg: '#0e0a0a', accent: '#9e2028', gold: '#b8bcc6' },
@@ -1376,7 +1748,7 @@
     heroFrom('hero-thanos', 'Thanos', 'villain', { bg: '#110c16', accent: '#7d52b4', gold: '#d4ae3c' },
       [SIG.gauntletHand('#e2bd4c'), SIG.snapDust('#c8a070', '#8a7a70')]),
     heroFrom('hero-magneto', 'Magneto', 'villain', { bg: '#140a14', accent: '#a42c4c', gold: '#7c52b2' },
-      [M.field('#d65a8a', '#9a7ae0'), SIG.magnetoHelm('#e0709a', '#c8c8d8')]),
+      SCENE.magneto()),
     heroFrom('hero-ultron', 'Ultron', 'villain', { bg: '#0c0d10', accent: '#d0303a', gold: '#9aa4b0' },
       [SIG.ultronEyes('#ff3a44'), M.circuit('#ff5a64', '#d0303a')]),
     heroFrom('hero-goblin', 'Green Goblin', 'villain', { bg: '#0e120c', accent: '#6aa03c', gold: '#8252b0' },
@@ -1384,9 +1756,9 @@
     heroFrom('hero-octopus', 'Doctor Octopus', 'villain', { bg: '#0e1210', accent: '#4f9a6c', gold: '#c8a24c' },
       [SIG.ockArms('#d8e0c8', '#ff4a4a'), SIG.fusionSun('#ffd060', '#ff8a3a')]),
     heroFrom('hero-redskull', 'Red Skull', 'villain', { bg: '#120808', accent: '#c02c2c', gold: '#4fa8e8' },
-      [SIG.tesseract('#7fd0ff', '#c02c2c'), M.glows([['#c02c2c', '0% 100%', '40% 45%', 0.12]])]),
+      SCENE.redskull()),
     heroFrom('hero-hela', 'Hela', 'villain', { bg: '#0c100e', accent: '#3a8c5c', gold: '#9aa29c' },
-      [M.blades('#8fe0b0', '#3a8c5c'), SIG.necroswords('#b8f0cc', '#3a8c5c')]),
+      SCENE.hela()),
     heroFrom('hero-dormammu', 'Dormammu', 'villain', { bg: '#150806', accent: '#e05c2c', gold: '#9a4ce0' },
       [SIG.dormammuFace('#ff7a2a', '#fff0c0'), SIG.darkVortex('#b87aff')]),
     heroFrom('hero-galactus', 'Galactus', 'villain', { bg: '#0c0c18', accent: '#6a52c4', gold: '#3f6ad2' },
@@ -1400,7 +1772,7 @@
     heroFrom('hero-electro', 'Electro', 'villain', { bg: '#0c0f14', accent: '#cfcf3c', gold: '#3a9ae0' },
       [SIG.starburst('#f8ffb0', '#e0e03a'), SIG.arcs('#f8ffb0', '#e0e03a')]),
     heroFrom('hero-killmonger', 'Killmonger', 'villain', { bg: '#0c0b10', accent: '#d2ac3c', gold: '#a0402e' },
-      [SIG.fangNecklace('#d2ac3c', '#ffe39a'), SIG.scars('#e8c060')]),
+      SCENE.killmonger()),
   ];
 
   if (typeof window !== 'undefined') window.HERO_THEMES = HERO_THEMES;

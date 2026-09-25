@@ -212,126 +212,90 @@ html.theme-monastery #welcome-screen { background: radial-gradient(ellipse at to
 html.theme-racing    #welcome-screen { background: radial-gradient(ellipse at top, #26260f 0%, var(--ink-black) 55%), var(--ink-black); }
 
 /* ============================================
-   HERO SUIT THEMES — auras
-   Colours come from injected vars (HERO_THEMES in 08-lfs-settings.js); this is only the
-   atmosphere, in two fixed overlays that never take a click:
-     1. body::after   — --hero-aura, masked by --hero-mask. Above the screens (which are
-        opaque, so nothing beneath them would be seen), blended with `screen` so it can
-        only lighten.
-     2. .screen::after — --hero-aura-2 / --hero-mask-2, a second motif with its own mask,
-        because one mask can't both confine a detailed pattern to a corner and let a
-        broad glow reach the far side. Takes full `background` shorthand layers, so a
-        tiled pattern can carry its own `/ size`. (.screen::before is the film grain.)
-   Every motif keeps its strongest light to a corner or an edge, away from the text.
+   HERO SUIT THEMES — the backdrop
+   Colours come from injected vars (00-hero-themes.js via applyTheme); this is only how the
+   art is laid under the UI. The art is a *backdrop*, never an overlay:
+     - body paints the solid suit colour, and body::before / body::after paint the two art
+       layers (--hero-aura / --hero-aura-2, each with an optional mask) on top of it —
+       all of it underneath .screen (z-index 2), so nothing is ever drawn over text.
+     - Inside .screen the surface colours are swapped for translucent "glass" versions
+       (--hero-glass-*, solved in heroTheme so that over the bare suit colour they produce
+       exactly the solid colour). A panel therefore looks the way it always did, except
+       that the art shows through it. --bg itself becomes transparent.
+     - Anything that floats over other UI must stay opaque, or the UI beneath would show
+       through it. The overlays (modals, menus, toasts, palette…) live outside .screen and
+       keep the solid vars untouched; the dropdowns that live inside it get them back
+       below. Sticky headers get frosted glass, since rows scroll underneath them.
+   --hero-strength (0–1, Settings → Appearance) scales both art layers.
    ============================================ */
-html.theme-hero body::after,
-html.theme-hero .screen::after {
+html.theme-hero body { background: var(--hero-solid-bg, var(--ink-black)); }
+/* Doubled class: 05-effects.css claims body::before for its film grain at the same
+   specificity and loads later. The grain survives on .screen::before. */
+html.theme-hero.theme-hero body::before,
+html.theme-hero.theme-hero body::after {
   content: '';
   position: fixed;
   inset: 0;
   pointer-events: none;
-  mix-blend-mode: screen;
+  z-index: 1;
+  mix-blend-mode: normal;
+  opacity: var(--hero-strength, 0.75);
 }
-html.theme-hero body::after {
-  z-index: 3;
+html.theme-hero.theme-hero body::before {
   background: var(--hero-aura, none);
   -webkit-mask-image: var(--hero-mask, none);
           mask-image: var(--hero-mask, none);
 }
-html.theme-hero .screen::after {
-  z-index: 9998;
+html.theme-hero.theme-hero body::after {
   background: var(--hero-aura-2, none);
   -webkit-mask-image: var(--hero-mask-2, none);
           mask-image: var(--hero-mask-2, none);
 }
+html.theme-hero .screen {
+  --ink-black: transparent;
+  --bg: transparent;
+  --panel-black: var(--hero-glass-panel);
+  --bg-panel: var(--hero-glass-panel);
+  --raised-black: var(--hero-glass-raised);
+  --bg-raised: var(--hero-glass-raised);
+  --shadow-black: var(--hero-glass-shadow);
+  --added-bg: var(--hero-glass-added);
+  --removed-bg: var(--hero-glass-removed);
+}
+/* Floating, but inside .screen: opaque again. */
+html.theme-hero :is(.custom-select-dropdown, .tool-dropdown-menu, .graph-settings-dropdown, .repo-path-tip, .branch-select option) {
+  --ink-black: var(--hero-solid-bg);
+  --bg: var(--hero-solid-bg);
+  --panel-black: var(--hero-solid-panel);
+  --bg-panel: var(--hero-solid-panel);
+  --raised-black: var(--hero-solid-raised);
+  --bg-raised: var(--hero-solid-raised);
+  --shadow-black: var(--hero-solid-shadow);
+}
+/* Sticky: rows scroll beneath these, so they are frosted rather than clear. */
+html.theme-hero :is(.changes-header, .changes-toolbar-sticky, .dpartial-bar, .forge-list-foot, .forge-detail-head, .graph-toolbar) {
+  --bg: var(--hero-frost-bg);
+  --bg-panel: var(--hero-frost-panel);
+  --panel-black: var(--hero-frost-panel);
+  --bg-raised: var(--hero-frost-raised);
+  --raised-black: var(--hero-frost-raised);
+  --shadow-black: var(--hero-frost-shadow);
+  -webkit-backdrop-filter: blur(10px);
+          backdrop-filter: blur(10px);
+}
+/* The few places the base colour is used as *ink* (dark text on a bright chip). */
+html.theme-hero .screen :is(.graph-fold-btn.collapsed, .cfile-status) { color: var(--hero-solid-bg); }
+html.theme-hero ::-webkit-scrollbar-thumb { background-clip: padding-box; }
 html.theme-hero .toolbar {
   background: linear-gradient(180deg, var(--raised-black) 0%, var(--shadow-black) 100%);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
 }
 html.theme-hero .toolbar::after {
   background: linear-gradient(90deg, transparent, var(--gold-accent) 22%, var(--accent) 50%, var(--gold-accent) 78%, transparent);
   opacity: 0.4;
 }
 html.theme-hero #welcome-screen {
-  background: radial-gradient(ellipse at top, color-mix(in srgb, var(--accent) 16%, var(--ink-black)) 0%, var(--ink-black) 60%), var(--ink-black);
-}
-
-/* Doctor Doom — green fog rising from the floor of Latveria, witch-fire in both lower
-   corners, a gold glint above; the toolbar band is riveted armour plate. */
-html.theme-hero-doom {
-  --hero-aura:
-    radial-gradient(ellipse 95% 60% at 50% 115%, rgba(95, 143, 74, 0.24), transparent 70%),
-    radial-gradient(ellipse 30% 45% at 0% 105%, rgba(120, 200, 90, 0.24), transparent 70%),
-    radial-gradient(ellipse 30% 45% at 100% 105%, rgba(120, 200, 90, 0.24), transparent 70%),
-    radial-gradient(circle at 88% -4%, rgba(194, 162, 74, 0.12), transparent 30%),
-    radial-gradient(circle at 12% -4%, rgba(194, 162, 74, 0.06), transparent 24%);
-  --hero-aura-2:
-    radial-gradient(circle, rgba(205, 215, 205, 0.16) 0 1.4px, transparent 2px) 0 6px / 96px 44px,
-    repeating-linear-gradient(90deg, rgba(160, 175, 165, 0.06) 0 1px, transparent 1px 96px),
-    linear-gradient(180deg, rgba(160, 175, 165, 0.06), transparent);
-  --hero-mask-2: linear-gradient(180deg, #000 0, #000 40px, transparent 62px);
-}
-
-/* Doctor Strange — a sigil turning in the corner: amber glow, three rings, a band of
-   ticks between them and sparks thrown off its edge; the crimson cloak glows below. */
-html.theme-hero-strange {
-  --hero-aura:
-    radial-gradient(circle at 100% 0%, transparent 0 15.6%, rgba(224, 164, 88, 0.12) 15.9% 16.2%, transparent 16.6%),
-    radial-gradient(circle at 100% 0%, transparent 0 21.6%, rgba(224, 164, 88, 0.14) 21.9% 22.2%, transparent 22.6%),
-    radial-gradient(circle at 100% 0%, transparent 0 26.4%, rgba(224, 164, 88, 0.07) 26.6% 26.8%, transparent 27.2%),
-    radial-gradient(circle at 100% 0%, rgba(224, 164, 88, 0.18), transparent 24%),
-    radial-gradient(circle at 74% 31%, rgba(255, 196, 120, 0.30) 0 1.5px, transparent 3px),
-    radial-gradient(circle at 81% 38%, rgba(255, 196, 120, 0.22) 0 1px, transparent 2.5px),
-    radial-gradient(circle at 70% 18%, rgba(255, 196, 120, 0.20) 0 1px, transparent 2.5px),
-    radial-gradient(circle at 88% 43%, rgba(255, 196, 120, 0.16) 0 1px, transparent 2px),
-    radial-gradient(ellipse 55% 60% at 0% 100%, rgba(184, 54, 74, 0.16), transparent 70%);
-  --hero-aura-2:
-    repeating-conic-gradient(from 0deg at 100% 0%, rgba(224, 164, 88, 0.16) 0 0.5deg, transparent 0.5deg 3deg);
-  --hero-mask-2: radial-gradient(circle at 100% 0%, transparent 0 16.8%, #000 17.2% 20.8%, transparent 21.2%);
-}
-
-/* Spider-Man — a web spun into the top-left corner, fading out before it reaches the work.
-   Shared by both suits; --spider-glow is the only difference. */
-html.theme-hero-spider,
-html.theme-hero-spider-rev {
-  --hero-aura:
-    repeating-radial-gradient(circle at 0 0, transparent 0 46px, rgba(175, 190, 235, 0.09) 47px 48px),
-    repeating-conic-gradient(from 90deg at 0 0, rgba(175, 190, 235, 0.09) 0 0.35deg, transparent 0.35deg 11.25deg),
-    radial-gradient(circle at 0 0, var(--spider-glow), transparent 40%);
-  --hero-mask: radial-gradient(circle at 0 0, #000 0%, transparent 44%);
-}
-html.theme-hero-spider     { --spider-glow: rgba(199, 58, 68, 0.14); }
-html.theme-hero-spider-rev { --spider-glow: rgba(63, 111, 209, 0.18); }
-
-/* Wolverine — three claw marks raked across the top-right, each a steel cut with a hot
-   yellow edge; brushed adamantium sheen above, suit-blue glow from the far corner. */
-html.theme-hero-wolverine {
-  --hero-aura:
-    linear-gradient(118deg, transparent 0 69.2%,
-      rgba(224, 180, 58, 0.10) 69.2% 69.5%, rgba(215, 225, 238, 0.20) 69.5% 69.9%, transparent 69.9% 71.4%,
-      rgba(224, 180, 58, 0.10) 71.4% 71.7%, rgba(215, 225, 238, 0.20) 71.7% 72.1%, transparent 72.1% 73.6%,
-      rgba(224, 180, 58, 0.10) 73.6% 73.9%, rgba(215, 225, 238, 0.20) 73.9% 74.3%, transparent 74.3%),
-    radial-gradient(circle at 100% 0%, rgba(224, 180, 58, 0.18), transparent 45%);
-  --hero-mask: radial-gradient(ellipse 65% 75% at 100% 0%, #000 30%, transparent 100%);
-  --hero-aura-2:
-    linear-gradient(118deg, transparent 30%, rgba(200, 212, 228, 0.07) 45%, transparent 60%),
-    repeating-linear-gradient(0deg, rgba(200, 212, 228, 0.035) 0 1px, transparent 1px 3px),
-    radial-gradient(ellipse 50% 55% at 0% 100%, rgba(90, 127, 208, 0.16), transparent 70%);
-  --hero-mask-2: linear-gradient(180deg, #000 0, #000 56px, rgba(0, 0, 0, 0.25) 130px, rgba(0, 0, 0, 0.9) 100%);
-}
-
-/* Vision — the Mind Stone blazing at the brow with rays turning out of it, a green halo,
-   the cape's colours rising from both lower corners. */
-html.theme-hero-vision {
-  --hero-aura:
-    radial-gradient(circle at 50% -4%, rgba(255, 236, 140, 0.30) 0 1.2%, rgba(232, 204, 90, 0.18) 3%, transparent 14%),
-    radial-gradient(ellipse 65% 40% at 50% -6%, rgba(108, 195, 148, 0.13), transparent 70%),
-    radial-gradient(ellipse 35% 45% at 0% 105%, rgba(108, 195, 148, 0.12), transparent 70%),
-    radial-gradient(ellipse 35% 45% at 100% 105%, rgba(232, 204, 90, 0.10), transparent 70%),
-    radial-gradient(ellipse at 50% 115%, rgba(194, 75, 86, 0.12), transparent 55%);
-  --hero-aura-2:
-    repeating-conic-gradient(from 0deg at 50% -4%, rgba(232, 204, 90, 0.08) 0 1.2deg, transparent 1.2deg 9deg);
-  --hero-mask-2: radial-gradient(ellipse 45% 55% at 50% -4%, #000 8%, transparent 100%);
+  background: radial-gradient(ellipse at top, color-mix(in srgb, var(--accent) 12%, transparent) 0%, transparent 60%);
 }
 
 /* ============================================

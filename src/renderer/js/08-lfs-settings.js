@@ -396,6 +396,13 @@ function applyTheme(themeId) {
   }
 }
 
+// Marvel themes: how strongly the backdrop art shows through the UI (0–100, a percentage).
+// Only html.theme-hero reads --hero-strength, so this is inert for every other theme.
+function applyHeroBackdrop(pct) {
+  const v = Number.isFinite(+pct) ? Math.max(0, Math.min(100, +pct)) : 75;
+  document.documentElement.style.setProperty('--hero-strength', String(v / 100));
+}
+
 // Apply font scale by genuinely resizing fonts (not zooming layout). The UI uses
 // many hardcoded px font sizes, so we walk every CSS rule once, record each rule's
 // base font-size in px, and on scale change rewrite them to base*scale. This affects
@@ -699,7 +706,14 @@ async function showSettingsDialog() {
       </div>
       <div class="settings-group">
         <div class="settings-group-title">Marvel themes <span class="text-muted" style="font-weight:400">(${HERO_THEMES.length})</span></div>
-        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Heroes, anti-heroes and villains — each with its suit's palette and its own aura.</p>
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Heroes, anti-heroes and villains — each with its suit's palette and its own art, drawn behind the interface.</p>
+        <div class="settings-row">
+          <div class="label">Backdrop strength<small>How strongly a Marvel theme's art shows through the panels</small></div>
+          <div class="control">
+            <input type="range" id="set-hero-backdrop" min="0" max="100" step="5" value="${appSettings.heroBackdrop ?? 75}" />
+            <span id="set-hero-backdrop-val" style="color:var(--muted-text);font-size:11px;min-width:34px">${appSettings.heroBackdrop ?? 75}%</span>
+          </div>
+        </div>
         <input type="search" id="hero-search" class="commit-search" style="margin:0 0 10px;width:100%" placeholder="Search ${HERO_THEMES.length} heroes & villains (e.g. thor, venom, thanos)…" />
         <div class="hero-groups" id="hero-picker">
           ${HERO_GROUPS.map(([group, title]) => {
@@ -793,6 +807,17 @@ async function showSettingsDialog() {
         });
       };
       heroSearch.onkeydown = (e) => { if (e.key === 'Escape') { heroSearch.value = ''; heroSearch.oninput(); } };
+    }
+
+    // Marvel backdrop strength — live preview while dragging, persisted on Save.
+    const hb = panel.querySelector('#set-hero-backdrop');
+    if (hb) {
+      hb.oninput = () => {
+        const v = parseInt(hb.value, 10);
+        panel.querySelector('#set-hero-backdrop-val').textContent = v + '%';
+        appChanges.heroBackdrop = v;
+        applyHeroBackdrop(v);
+      };
     }
 
     // Font scale
@@ -1172,6 +1197,7 @@ async function showSettingsDialog() {
         Object.keys(appChanges).forEach(k => delete appChanges[k]);
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
+        applyHeroBackdrop(appSettings.heroBackdrop);
         applyFonts(appSettings.monoFont, appSettings.uiFont);
         showToast('Preferences reset', 'success');
       }
@@ -1204,6 +1230,7 @@ async function showSettingsDialog() {
     // Roll back any live theme/font preview changes
     applyTheme(appSettings.theme);
     applyFontScale(appSettings.fontScale);
+    applyHeroBackdrop(appSettings.heroBackdrop);
     applyFonts(appSettings.monoFont, appSettings.uiFont);
     modal.hide();
   };
@@ -1228,6 +1255,7 @@ async function showSettingsDialog() {
         // Re-apply in case Save changed anything
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
+        applyHeroBackdrop(appSettings.heroBackdrop);
         applyFonts(appSettings.monoFont, appSettings.uiFont);
       }
     }
@@ -1272,6 +1300,7 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   confirmDestructive: true,
   defaultSshKeyPath: '',
   fontScale: 1.0,
+  heroBackdrop: 75,
   monoFont: 'default',
   uiFont: 'default',
   llmAssistant: false,
@@ -1288,6 +1317,7 @@ async function applySavedAppSettings() {
     if (r && r.ok) {
       applyTheme(r.data.theme);
       applyFontScale(r.data.fontScale);
+      applyHeroBackdrop(r.data.heroBackdrop);
       applyFonts(r.data.monoFont, r.data.uiFont);
       // Mirror a few into state for downstream code
       if (typeof state !== 'undefined') {
