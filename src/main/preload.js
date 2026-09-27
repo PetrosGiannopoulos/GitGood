@@ -262,6 +262,8 @@ const api = {
   openInExplorer: (p) => ipcRenderer.invoke('repo:openInExplorer', p),
   // Opens the containing folder with the file selected (openInExplorer takes a folder).
   revealPath: (p) => ipcRenderer.invoke('repo:revealPath', p),
+  // Zips the commit's version of `paths` into the repo root and reveals the zip.
+  zipCommitFiles: (hash, paths) => ipcRenderer.invoke('repo:zipCommitFiles', { hash, paths }),
   showCommit: (opts) => ipcRenderer.invoke('repo:showCommit', opts),
   showCommitFileDiff: (opts) => ipcRenderer.invoke('repo:showCommitFileDiff', opts),
   rawCommand: (args) => ipcRenderer.invoke('repo:rawCommand', args),

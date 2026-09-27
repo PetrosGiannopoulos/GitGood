@@ -1472,13 +1472,14 @@ ipcMain.handle('repo:cherryPickPaths', wrap(async (_, opts) => {
 // a timeout: commit-tree -S can wait forever on a pinentry a GUI process cannot show.
 // gitRun resolves with both streams and the exit code whatever happened — the push below
 // needs its porcelain stdout precisely when it fails, which is when simple-git drops it.
-function gitRun(args, extraEnv, timeoutMs) {
+function gitRun(args, extraEnv, timeoutMs, input) {
   return new Promise((resolve, reject) => {
     const { spawn } = require('child_process');
     const proc = spawn('git', args, {
       cwd: currentRepoPath,
       env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' }, extraEnv || {})
     });
+    if (input !== undefined) proc.stdin.end(input);
     let out = '';
     let err = '';
     let timedOut = false;
@@ -1493,8 +1494,8 @@ function gitRun(args, extraEnv, timeoutMs) {
   });
 }
 
-async function gitWithEnv(args, extraEnv, timeoutMs) {
-  const r = await gitRun(args, extraEnv, timeoutMs);
+async function gitWithEnv(args, extraEnv, timeoutMs, input) {
+  const r = await gitRun(args, extraEnv, timeoutMs, input);
   if (r.timedOut) throw new Error(`git ${args[0]} timed out — if it was signing, the key may be waiting for a passphrase prompt that cannot appear.`);
   if (r.code !== 0) throw new Error(r.err.trim() || `git ${args[0]} exited ${r.code}`);
   return r.out;
@@ -2215,6 +2216,46 @@ ipcMain.handle('repo:revealPath', wrap(async (_, relPath) => {
   const err = await shell.openPath(dir);
   if (err) throw new Error(err);
   return { revealed: false, path: dir };
+}));
+
+// Zip the chosen files *as they are in the commit* into the repository's root folder, then
+// reveal the zip. `git archive` does the zipping, but it has no --pathspec-from-file, so a
+// selection past the command-line cap could not be passed to it directly. Instead the
+// selected entries are copied into a throwaway index (ls-tree, chunked, feeds
+// update-index --index-info verbatim) and archive is given the tree written from that —
+// one invocation, however many files. Paths the commit deleted have no blob to copy and
+// are reported as skipped rather than failing the whole zip.
+ipcMain.handle('repo:zipCommitFiles', wrap(async (_, { hash, paths } = {}) => {
+  ensureGit();
+  if (!hash) throw new Error('Hash required');
+  const list = Array.from(new Set(paths || [])).filter(Boolean);
+  if (!list.length) throw new Error('No files selected');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitgood-zip-'));
+  const idxEnv = { GIT_INDEX_FILE: path.join(tmpDir, 'index'), GIT_LITERAL_PATHSPECS: '1' };
+  try {
+    let entries = '';
+    await forEachPathChunk(list, async (chunk) => {
+      entries += await gitWithEnv(['ls-tree', '-r', '-z', '--full-tree', hash, '--', ...chunk], idxEnv);
+    });
+    const found = entries.split('\0').filter(Boolean);
+    if (!found.length) throw new Error('None of the selected files exist in this commit — it deleted them.');
+    await gitWithEnv(['update-index', '-z', '--index-info'], idxEnv, 0, entries);
+    const tree = (await gitWithEnv(['write-tree'], idxEnv)).trim();
+
+    const repoName = path.basename(path.resolve(currentRepoPath));
+    const short = (await gitWithEnv(['rev-parse', '--short', hash])).trim();
+    const base = `${repoName}-${short}`;
+    let out = path.join(currentRepoPath, base + '.zip');
+    for (let n = 2; fs.existsSync(out); n++) out = path.join(currentRepoPath, `${base} (${n}).zip`);
+
+    await gitWithEnv(['archive', '--format=zip', '-o', out, tree]);
+    shell.showItemInFolder(out);
+    const foundPaths = new Set(found.map(e => e.slice(e.indexOf('\t') + 1)));
+    return { path: out, count: foundPaths.size, skipped: list.filter(p => !foundPaths.has(p)) };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* temp cleanup only */ }
+  }
 }));
 
 ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {

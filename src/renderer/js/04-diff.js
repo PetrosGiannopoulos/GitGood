@@ -1398,7 +1398,9 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y, op
       action: () => copyText(targetPaths.join('\n'), 'Path' + (many ? 's' : '') + ' copied') },
     { label: 'Copy absolute path' + (many ? 's' : ''), icon: '⎘',
       action: () => copyText(targetPaths.map(absoluteRepoPath).join('\n'),
-                             'Absolute path' + (many ? 's' : '') + ' copied') }
+                             'Absolute path' + (many ? 's' : '') + ' copied') },
+    { label: many ? `Zip these ${targetPaths.length} files` : 'Zip this file', icon: '▣',
+      action: () => zipCommitFiles(hash, targetPaths) }
   ];
   // Single file only, as in the Changes list. The commit's version of a file may no longer
   // be on disk (deleted or renamed since), in which case main opens the nearest folder.
@@ -1410,6 +1412,19 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y, op
     }});
   }
   showContextMenu(items, x, y);
+}
+
+// The zip holds each file as this commit has it (not the working tree), and lands in the
+// repository's root folder, which main then opens with the zip selected.
+async function zipCommitFiles(hash, paths) {
+  showToast(`Zipping ${paths.length} file${paths.length === 1 ? '' : 's'}…`, 'info', 2000);
+  const r = await gs.zipCommitFiles(hash, paths);
+  if (!r.ok) { showToast(r.error || 'Could not create the zip', 'error', 6000); return; }
+  const name = r.data.path.split(/[\\/]/).pop();
+  const skipped = r.data.skipped.length
+    ? ` — ${r.data.skipped.length} deleted in this commit, left out` : '';
+  showToast(`Created ${name} (${r.data.count} file${r.data.count === 1 ? '' : 's'})${skipped}`,
+            'success', 5000);
 }
 
 function shortenPath(p) {
