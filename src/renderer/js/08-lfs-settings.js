@@ -389,6 +389,9 @@ function applyTheme(themeId) {
     if (themeId && themeId !== 'crusader') html.classList.add('theme-' + themeId);
   }
 
+  // A Marvel theme may be showing its comic page instead of its art (22-comic-print.js).
+  if (typeof refreshHeroComic === 'function') refreshHeroComic();
+
   // Recolor the commit graph to match the new theme, then redraw if it's loaded.
   if (typeof refreshThemeLaneColors === 'function') {
     refreshThemeLaneColors();
@@ -714,6 +717,15 @@ async function showSettingsDialog() {
             <span id="set-hero-backdrop-val" style="color:var(--muted-text);font-size:11px;min-width:34px">${appSettings.heroBackdrop ?? 75}%</span>
           </div>
         </div>
+        <div class="settings-row">
+          <div class="label">Backdrop<small>The theme's own suit art, or a comic page starring that character</small></div>
+          <div class="control">
+            <select id="set-hero-style">
+              ${[['art', 'Suit art'], ['comic', 'Comic page'], ['print', 'Comic page — newsprint']].map(([v, l]) =>
+                `<option value="${v}"${(appSettings.heroBackdropStyle || 'art') === v ? ' selected' : ''}>${l}</option>`).join('')}
+            </select>
+          </div>
+        </div>
         <input type="search" id="hero-search" class="commit-search" style="margin:0 0 10px;width:100%" placeholder="Search ${HERO_THEMES.length} heroes & villains (e.g. thor, venom, thanos)…" />
         <div class="hero-groups" id="hero-picker">
           ${HERO_GROUPS.map(([group, title]) => {
@@ -817,6 +829,15 @@ async function showSettingsDialog() {
         panel.querySelector('#set-hero-backdrop-val').textContent = v + '%';
         appChanges.heroBackdrop = v;
         applyHeroBackdrop(v);
+      };
+    }
+
+    // Marvel backdrop style — live preview, persisted on Save.
+    const hs = panel.querySelector('#set-hero-style');
+    if (hs) {
+      hs.onchange = () => {
+        appChanges.heroBackdropStyle = hs.value;
+        applyHeroStyle(hs.value);
       };
     }
 
@@ -1198,6 +1219,7 @@ async function showSettingsDialog() {
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
         applyHeroBackdrop(appSettings.heroBackdrop);
+        applyHeroStyle(appSettings.heroBackdropStyle);
         applyFonts(appSettings.monoFont, appSettings.uiFont);
         showToast('Preferences reset', 'success');
       }
@@ -1231,6 +1253,7 @@ async function showSettingsDialog() {
     applyTheme(appSettings.theme);
     applyFontScale(appSettings.fontScale);
     applyHeroBackdrop(appSettings.heroBackdrop);
+    applyHeroStyle(appSettings.heroBackdropStyle);
     applyFonts(appSettings.monoFont, appSettings.uiFont);
     modal.hide();
   };
@@ -1256,6 +1279,7 @@ async function showSettingsDialog() {
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
         applyHeroBackdrop(appSettings.heroBackdrop);
+        applyHeroStyle(appSettings.heroBackdropStyle);
         applyFonts(appSettings.monoFont, appSettings.uiFont);
       }
     }
@@ -1301,6 +1325,7 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   defaultSshKeyPath: '',
   fontScale: 1.0,
   heroBackdrop: 75,
+  heroBackdropStyle: 'art',
   monoFont: 'default',
   uiFont: 'default',
   llmAssistant: false,
@@ -1318,6 +1343,7 @@ async function applySavedAppSettings() {
       applyTheme(r.data.theme);
       applyFontScale(r.data.fontScale);
       applyHeroBackdrop(r.data.heroBackdrop);
+      applyHeroStyle(r.data.heroBackdropStyle);
       applyFonts(r.data.monoFont, r.data.uiFont);
       // Mirror a few into state for downstream code
       if (typeof state !== 'undefined') {

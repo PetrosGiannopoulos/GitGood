@@ -1,6 +1,6 @@
 {
   "name": "gitgood",
-  "version": "1.1.17",
+  "version": "1.1.18",
   "description": "GitGood - A medieval-themed Git GUI client forged in the fires of the crusade",
   "main": "src/main/main.js",
   "author": "GitGood",
@@ -9,6 +9,7 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "test": "node --test test/",
+    "comics": "electron tools/comic-pages/render.js",
     "build:win": "electron-builder --win nsis",
     "build:linux": "electron-builder --linux",
     "build:mac": "electron-builder --mac"

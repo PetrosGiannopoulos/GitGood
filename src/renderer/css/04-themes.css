@@ -298,6 +298,32 @@ html.theme-hero #welcome-screen {
   background: radial-gradient(ellipse at top, color-mix(in srgb, var(--accent) 12%, transparent) 0%, transparent 60%);
 }
 
+/* Comic-page backdrop (22-comic-print.js): Settings → Backdrop → Comic page / newsprint.
+   The page is a <canvas> in the art's own layer (z-index 1, under .screen), so it is a
+   backdrop like the suit art and never drawn over text; the suit art is switched off while
+   it shows. A comic page is bright where the art is dark, so panels trade their clear glass
+   for the frosted surfaces — the page shows in the gaps between them and faintly through. */
+#hero-comic-print {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  display: none;
+  opacity: var(--hero-strength, 0.75);
+}
+html.theme-hero.hero-comic #hero-comic-print { display: block; }
+html.theme-hero.theme-hero.hero-comic body::before,
+html.theme-hero.theme-hero.hero-comic body::after { content: none; }
+html.theme-hero.hero-comic .screen {
+  --panel-black: var(--hero-frost-panel);
+  --bg-panel: var(--hero-frost-panel);
+  --raised-black: var(--hero-frost-raised);
+  --bg-raised: var(--hero-frost-raised);
+  --shadow-black: var(--hero-frost-shadow);
+}
+
 /* ============================================
    SETTINGS DIALOG
    ============================================ */

@@ -3526,6 +3526,7 @@ const DEFAULT_APP_SETTINGS = {
   defaultSshKeyPath: '',              // pre-fill path for clone SSH key picker
   fontScale: 1.0,                     // UI font scale multiplier
   heroBackdrop: 75,                   // Marvel themes: strength of the backdrop art, 0–100 (%)
+  heroBackdropStyle: 'art',           // Marvel themes: 'art' (suit art) | 'comic' (comic page) | 'print' (comic page as newsprint)
   monoFont: 'default',                // monospace font family (Nerd Font name or 'default')
   uiFont: 'default',                  // interface font family (Nerd Font name or 'default')
   llmAssistant: false,                // local AI git assistant — OFF by default; needs Ollama + a pulled model
