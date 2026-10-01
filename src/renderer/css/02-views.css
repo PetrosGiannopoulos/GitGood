@@ -542,6 +542,15 @@
 .dsplit-side.del .dsplit-text { color: #e2a5a5; }
 .dsplit-side.empty { background: rgba(0,0,0,0.28); }
 .dsplit-side.empty .dsplit-num { background: rgba(0,0,0,0.18); }
+/* Select one side at a time (the mousedown handler in 04-diff.js sets the class). The
+   descendant selector is needed because 01-base.css gives every element user-select: text,
+   which would otherwise make the other side's text selectable again. */
+.dsplit.sel-left .dsplit-row > .dsplit-side:nth-child(2),
+.dsplit.sel-left .dsplit-row > .dsplit-side:nth-child(2) *,
+.dsplit.sel-right .dsplit-row > .dsplit-side:nth-child(1),
+.dsplit.sel-right .dsplit-row > .dsplit-side:nth-child(1) *,
+.dsplit.sel-left .dsplit-row.meta, .dsplit.sel-left .dsplit-row.meta *,
+.dsplit.sel-right .dsplit-row.meta, .dsplit.sel-right .dsplit-row.meta * { user-select: none; }
 
 .diff-line {
   display: grid;
@@ -1731,7 +1740,7 @@
   background: var(--bg-panel);
   border: 1px solid var(--crusader-red);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
-  z-index: 150;
+  z-index: 9700;   /* above the terminal (9600), modals and the diff popout (9650) */
   min-width: 180px;
   padding: 4px 0;
 }
@@ -1808,10 +1817,9 @@
   backdrop-filter: blur(2px);
 }
 .diff-popout-overlay.hidden { display: none; }
-/* The popout's file list has a context menu, and Copy/Show in Explorer report through
-   toasts — both normally sit far below the popout, so lift them while it is open. Items
+/* Copy/Show in Explorer in the popout's file-list menu report through toasts, which
+   normally sit far below the popout, so lift them while it is open. Items
    that open a modal close the popout first instead (see showCommitFileContextMenu). */
-body.diff-popout-open .context-menu { z-index: 9700; }
 body.diff-popout-open .toast-container { z-index: 9710; }
 
 .diff-popout-window {

@@ -10,6 +10,7 @@ const api = {
   clearRecentRepos: () => ipcRenderer.invoke('app:clearRecentRepos'),
   getHome: () => ipcRenderer.invoke('app:getHome'),
   copyText: (text) => ipcRenderer.invoke('app:copyText', text),
+  readClipboard: () => ipcRenderer.invoke('app:readClipboard'),
 
   // Repo lifecycle
   openRepo: (p) => ipcRenderer.invoke('repo:open', p),

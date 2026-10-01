@@ -358,6 +358,10 @@ ipcMain.handle('app:copyText', (_, text) => {
   return { ok: true };
 });
 
+// Read side of the same: the text context menu's Paste. navigator.clipboard.readText
+// needs a permission the renderer doesn't have, and a menu click isn't a paste gesture.
+ipcMain.handle('app:readClipboard', () => ({ ok: true, data: clipboard.readText() }));
+
 ipcMain.handle('repo:open', wrap(async (_, repoPath) => {
   if (!fs.existsSync(repoPath)) throw new Error('Path does not exist: ' + repoPath);
   const gitDir = path.join(repoPath, '.git');

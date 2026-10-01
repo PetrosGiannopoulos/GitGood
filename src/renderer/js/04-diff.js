@@ -960,6 +960,74 @@ function renderDiffSplit(diffText, opts) {
   return html;
 }
 
+// Text selection in the split view is one side at a time. Each row is a grid of two
+// cells, so a native drag down the left pane also sweeps every right cell between the
+// two ends. A left-button press in a side marks the .dsplit with that column, and the CSS
+// makes the other column (and the hunk headers) unselectable for the drag.
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || !e.target.closest) return;
+  const side = e.target.closest('.dsplit-side');
+  const dsplit = side && side.closest('.dsplit');
+  if (!dsplit) return;
+  const right = side.parentElement.children.length > 1 && side.parentElement.lastElementChild === side;
+  dsplit.classList.toggle('sel-left', !right);
+  dsplit.classList.toggle('sel-right', right);
+});
+
+// The text of a selection inside a diff, built from the code cells alone. Chromium copies
+// a selection that crosses grid rows with the line-number gutters in it, user-select: none
+// or not, so both views assemble the text themselves: one line per row, clipped at the
+// selection's ends, hunk headers skipped.
+//  - Split: one column only, and that side's blank filler cells skipped (it has no line
+//    there). The CSS above stops the other side being highlighted; this keeps it off the
+//    clipboard regardless of how Chromium serialises a grid.
+//  - Unified: the leading +/-/space marker is dropped, so what is copied is the code.
+// Returns null when the selection isn't wholly inside a diff, so callers fall back to the
+// ordinary selection text.
+function diffSelectionText(sel) {
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  const elOf = (n) => (n && n.nodeType === 1 ? n : n && n.parentElement);
+  const startEl = elOf(range.startContainer);
+  const endEl = elOf(range.endContainer);
+  if (!startEl || !endEl) return null;
+
+  let cells;
+  let stripMarker = false;
+  const dsplit = startEl.closest('.dsplit');
+  if (dsplit) {
+    let col = dsplit.classList.contains('sel-right') ? 2 : 1;
+    if (!dsplit.classList.contains('sel-left') && !dsplit.classList.contains('sel-right')) {
+      const side = startEl.closest('.dsplit-side');
+      if (side && side.parentElement.lastElementChild === side && side.parentElement.children.length > 1) col = 2;
+    }
+    cells = dsplit.querySelectorAll(
+      `.dsplit-row:not(.meta) > .dsplit-side:nth-child(${col}):not(.empty) > .dsplit-text`);
+  } else {
+    if (!startEl.closest('.diff-line') || !endEl.closest('.diff-line')) return null;
+    const common = elOf(range.commonAncestorContainer);
+    const single = common.closest('.diff-text');
+    cells = single ? [single] : common.querySelectorAll('.diff-line:not(.hunk) > .diff-text');
+    stripMarker = !(single && single.parentElement.classList.contains('hunk'));
+  }
+  const offsetIn = (cell, node, offset) => {
+    const r = document.createRange();
+    r.setStart(cell, 0);
+    r.setEnd(node, offset);
+    return r.toString().length;
+  };
+  const lines = [];
+  for (const cell of cells) {
+    if (!range.intersectsNode(cell)) continue;
+    const text = cell.textContent;
+    let from = cell.contains(range.startContainer) ? offsetIn(cell, range.startContainer, range.startOffset) : 0;
+    const to = cell.contains(range.endContainer) ? offsetIn(cell, range.endContainer, range.endOffset) : text.length;
+    if (stripMarker && from === 0) from = 1;
+    lines.push(text.slice(from, Math.max(from, to)));
+  }
+  return lines.length ? lines.join('\n') : null;
+}
+
 // ============================================
 // PARTIAL STAGING — interaction
 // ============================================

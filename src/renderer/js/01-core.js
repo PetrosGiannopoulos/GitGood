@@ -654,5 +654,104 @@ document.addEventListener('click', hideContextMenu);
 document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('[data-context]')) hideContextMenu();
 });
+// A click on a menu item must not take focus or the text selection with it: Paste and
+// Cut act on the field that was right-clicked, and Copy on what was highlighted.
+$('#context-menu').addEventListener('mousedown', (e) => e.preventDefault());
+
+// ============================================
+// TEXT CONTEXT MENU (Cut / Copy / Paste / Select all)
+// ============================================
+// The fallback for any right-click no other menu claimed. Every specific menu calls
+// preventDefault, so a right-click that arrives here un-prevented is on plain text or a
+// text field. Registered after the hide listener above so it runs after it.
+
+// The text a Copy should take. A diff selection is reduced to its code (diffSelectionText,
+// 04-diff.js): no line-number gutters, no +/- markers, and in the split view one side only.
+function selectedTextForCopy() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return '';
+  if (typeof diffSelectionText === 'function') {
+    const code = diffSelectionText(sel);
+    if (code != null) return code;
+  }
+  return sel.toString();
+}
+
+function isTextField(el) {
+  if (!el) return false;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName === 'INPUT') {
+    return /^(text|search|url|email|tel|number|password|)$/i.test(el.type || '');
+  }
+  return !!el.isContentEditable;
+}
+
+async function pasteInto(field) {
+  let text = '';
+  try {
+    const r = await gs.readClipboard();
+    if (r && r.ok) text = r.data || '';
+  } catch (e) { /* nothing to paste */ }
+  if (!text) return;
+  field.focus();
+  // insertText keeps the field's undo history and fires 'input' like a real paste.
+  if (!document.execCommand('insertText', false, text) && 'setRangeText' in field) {
+    field.setRangeText(text, field.selectionStart, field.selectionEnd, 'end');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+document.addEventListener('contextmenu', (e) => {
+  if (e.defaultPrevented) return;
+  const target = e.target;
+  const items = [];
+
+  const field = isTextField(target) ? target
+    : (target.closest && target.closest('input, textarea, [contenteditable="true"]'));
+  if (field && isTextField(field)) {
+    const editable = !field.readOnly && !field.disabled;
+    const isInput = 'selectionStart' in field && field.selectionStart != null;
+    const selected = isInput
+      ? field.value.slice(field.selectionStart, field.selectionEnd)
+      : (window.getSelection() || '').toString();
+    // A password field's contents never go to the clipboard from here.
+    const secret = field.type === 'password';
+    if (editable && selected && !secret) {
+      items.push({ label: 'Cut', icon: '✂', action: () => {
+        copyText(selected, null).then(() => { field.focus(); document.execCommand('delete'); });
+      } });
+    }
+    if (selected && !secret) items.push({ label: 'Copy', icon: '⎘', action: () => copyText(selected, null) });
+    if (editable) items.push({ label: 'Paste', icon: '📋', action: () => pasteInto(field) });
+    items.push({ label: 'Select all', icon: '▤', action: () => {
+      field.focus();
+      if (typeof field.select === 'function') field.select();
+      else document.execCommand('selectAll');
+    } });
+  } else {
+    const selected = selectedTextForCopy();
+    if (selected) items.push({ label: 'Copy', icon: '⎘', action: () => copyText(selected, null) });
+    // In the terminal's output, Paste means "into the command line".
+    const termOut = target.closest && target.closest('#terminal-output');
+    const termIn = termOut && document.getElementById('terminal-input');
+    if (termIn) {
+      items.push({ label: 'Paste', icon: '📋', action: () => pasteInto(termIn) });
+    }
+  }
+
+  if (!items.length) return;
+  e.preventDefault();
+  showContextMenu(items, e.pageX, e.pageY);
+});
+
+// Ctrl+C / the Edit menu go through the same narrowing as the context menu's Copy.
+document.addEventListener('copy', (e) => {
+  if (isTextField(document.activeElement)) return;
+  if (typeof diffSelectionText !== 'function') return;
+  const text = diffSelectionText(window.getSelection());
+  if (text == null) return;
+  e.clipboardData.setData('text/plain', text);
+  e.preventDefault();
+});
 
 // ============================================
