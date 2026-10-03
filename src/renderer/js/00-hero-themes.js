@@ -1775,6 +1775,13 @@
       SCENE.killmonger()),
   ];
 
-  if (typeof window !== 'undefined') window.HERO_THEMES = HERO_THEMES;
-  if (typeof module !== 'undefined' && module.exports) module.exports = { HERO_THEMES, derivePalette, M };
+  // The drawing kit, for 00-dc-themes.js: the DC roster is built from the same materials and
+  // palette rules and appended to HERO_THEMES, so everything downstream treats them alike.
+  const HERO_KIT = {
+    hexRgb, rgbHex, mix, rgba, luminance, svg, blur, f1, scatter, CORNERS, M, SIG, rng, lit, art, put, rg, layer, plus,
+    pts, jag, line, poly, starPts, spiral, warpF, cloudF, metalG, fadeMask, fireBody, sym, glowArt, nebula, starfield,
+    derivePalette, heroTheme, heroFrom,
+  };
+  if (typeof window !== 'undefined') { window.HERO_THEMES = HERO_THEMES; window.HERO_KIT = HERO_KIT; }
+  if (typeof module !== 'undefined' && module.exports) module.exports = { HERO_THEMES, HERO_KIT, derivePalette, M };
 })();

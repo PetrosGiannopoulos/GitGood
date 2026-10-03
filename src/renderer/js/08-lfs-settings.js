@@ -340,11 +340,14 @@ const ALACRITTY_THEMES = (typeof window !== 'undefined' && window.ALACRITTY_THEM
 const ALACRITTY_BY_ID = Object.create(null);
 for (const t of ALACRITTY_THEMES) ALACRITTY_BY_ID[t.id] = t;
 
-// Marvel hero themes (00-hero-themes.js): heroes, anti-heroes and villains. Same `vars` shape
-// as the Alacritty palettes, so they ride the same injection path in applyTheme — registered
-// in ALACRITTY_BY_ID for exactly that reason. Their auras are CSS vars too (see 04-themes.css).
+// Hero themes (00-hero-themes.js, 00-dc-themes.js): Marvel and DC heroes, anti-heroes and
+// villains. Same `vars` shape as the Alacritty palettes, so they ride the same injection path
+// in applyTheme — registered in ALACRITTY_BY_ID for exactly that reason. Their auras are CSS
+// vars too (see 04-themes.css). One list; `universe` only decides which picker shows a theme.
 const HERO_THEMES = (typeof window !== 'undefined' && window.HERO_THEMES) || [];
 for (const t of HERO_THEMES) ALACRITTY_BY_ID[t.id] = t;
+const MARVEL_THEMES = HERO_THEMES.filter(t => t.universe !== 'dc');
+const DC_THEMES = HERO_THEMES.filter(t => t.universe === 'dc');
 // The settings picker's sections, in order.
 const HERO_GROUPS = [['hero', 'Heroes'], ['antihero', 'Anti-heroes'], ['villain', 'Villains']];
 
@@ -708,10 +711,10 @@ async function showSettingsDialog() {
         </div>
       </div>
       <div class="settings-group">
-        <div class="settings-group-title">Marvel themes <span class="text-muted" style="font-weight:400">(${HERO_THEMES.length})</span></div>
+        <div class="settings-group-title">Marvel themes <span class="text-muted" style="font-weight:400">(${MARVEL_THEMES.length})</span></div>
         <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Heroes, anti-heroes and villains — each with its suit's palette and its own art, drawn behind the interface.</p>
         <div class="settings-row">
-          <div class="label">Backdrop strength<small>How strongly a Marvel theme's art shows through the panels</small></div>
+          <div class="label">Backdrop strength<small>How strongly a Marvel or DC theme's art shows through the panels</small></div>
           <div class="control">
             <input type="range" id="set-hero-backdrop" min="0" max="100" step="5" value="${appSettings.heroBackdrop ?? 75}" />
             <span id="set-hero-backdrop-val" style="color:var(--muted-text);font-size:11px;min-width:34px">${appSettings.heroBackdrop ?? 75}%</span>
@@ -726,16 +729,14 @@ async function showSettingsDialog() {
             </select>
           </div>
         </div>
-        <input type="search" id="hero-search" class="commit-search" style="margin:0 0 10px;width:100%" placeholder="Search ${HERO_THEMES.length} heroes & villains (e.g. thor, venom, thanos)…" />
-        <div class="hero-groups" id="hero-picker">
-          ${HERO_GROUPS.map(([group, title]) => {
-            const list = HERO_THEMES.filter(t => t.group === group);
-            return list.length ? `<div class="hero-group" data-group="${group}">
-              <div class="hero-group-title">${title}</div>
-              <div class="theme-picker">${list.map(t => heroCardHtml(t, appSettings.theme)).join('')}</div>
-            </div>` : '';
-          }).join('')}
-        </div>
+        <input type="search" id="hero-search" class="commit-search" style="margin:0 0 10px;width:100%" placeholder="Search ${MARVEL_THEMES.length} heroes & villains (e.g. thor, venom, thanos)…" />
+        <div class="hero-groups" id="hero-picker">${heroGroupsHtml(MARVEL_THEMES)}</div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">DC themes <span class="text-muted" style="font-weight:400">(${DC_THEMES.length})</span></div>
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">The DC universe — the Justice League, the Legion of Super-Heroes, Gotham's rogues and the rest. Backdrop strength and style above apply here too.</p>
+        <input type="search" id="dc-search" class="commit-search" style="margin:0 0 10px;width:100%" placeholder="Search ${DC_THEMES.length} heroes & villains (e.g. batman, joker, legion)…" />
+        <div class="hero-groups" id="dc-picker">${heroGroupsHtml(DC_THEMES)}</div>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">Typography</div>
@@ -803,15 +804,17 @@ async function showSettingsDialog() {
       search.onkeydown = (e) => { if (e.key === 'Escape') { search.value = ''; search.oninput(); } };
     }
 
-    // Marvel theme search: filters cards and hides a group left with none.
-    const heroSearch = panel.querySelector('#hero-search');
-    if (heroSearch) {
+    // Marvel and DC theme search: filters cards by name and tags (a team, an alias) and hides
+    // a group left with none.
+    [['#hero-search', '#hero-picker'], ['#dc-search', '#dc-picker']].forEach(([inputSel, pickerSel]) => {
+      const heroSearch = panel.querySelector(inputSel);
+      if (!heroSearch) return;
       heroSearch.oninput = () => {
         const q = heroSearch.value.trim().toLowerCase();
-        panel.querySelectorAll('#hero-picker .hero-group').forEach(g => {
+        panel.querySelectorAll(pickerSel + ' .hero-group').forEach(g => {
           let shown = 0;
           g.querySelectorAll('.theme-card').forEach(card => {
-            const hit = !q || (card.dataset.name || '').toLowerCase().includes(q);
+            const hit = !q || (card.dataset.search || card.dataset.name || '').toLowerCase().includes(q);
             card.style.display = hit ? '' : 'none';
             if (hit) shown++;
           });
@@ -819,7 +822,7 @@ async function showSettingsDialog() {
         });
       };
       heroSearch.onkeydown = (e) => { if (e.key === 'Escape') { heroSearch.value = ''; heroSearch.oninput(); } };
-    }
+    });
 
     // Marvel backdrop strength — live preview while dragging, persisted on Save.
     const hb = panel.querySelector('#set-hero-backdrop');
@@ -903,16 +906,27 @@ async function showSettingsDialog() {
     </button>`;
   }
 
-  // A Marvel theme card previews the theme itself: its own background with the accent and
+  // A hero theme card previews the theme itself: its own background with the accent and
   // secondary glowing in opposite corners, and its own text colour. The colours are passed as
   // custom properties so the rule in 04-themes.css stays one rule for all of them.
   function heroCardHtml(t, currentId) {
     const v = t.vars;
     const style = `--hc-bg:${v['--bg']};--hc-accent:${v['--accent']};--hc-gold:${v['--gold-accent']};--hc-text:${v['--text']};--hc-border:${v['--border']}`;
-    return `<button class="theme-card hero-card ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}" style="${style}">
+    return `<button class="theme-card hero-card ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}" data-search="${escapeHtml(t.name + ' ' + (t.tags || '')).replace(/"/g, '')}" style="${style}">
       <div class="theme-swatches">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
       <div class="theme-card-name">${escapeHtml(t.name)}</div>
     </button>`;
+  }
+
+  // A picker's body: one titled section per group (heroes, anti-heroes, villains).
+  function heroGroupsHtml(themes) {
+    return HERO_GROUPS.map(([group, title]) => {
+      const list = themes.filter(t => t.group === group);
+      return list.length ? `<div class="hero-group" data-group="${group}">
+              <div class="hero-group-title">${title}</div>
+              <div class="theme-picker">${list.map(t => heroCardHtml(t, appSettings.theme)).join('')}</div>
+            </div>` : '';
+    }).join('');
   }
 
   function renderGitIdentity() {

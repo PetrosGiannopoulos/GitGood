@@ -286,6 +286,28 @@ const SETTINGS = {
     for (let i = 0; i < 6; i++) { const x = r() * pw; b += `<polyline points="${pts(jag(x, floor, x + (r() - 0.5) * 200, ph, 5, 12, r))}" fill="none" stroke="${INK}" stroke-width="2"/>`; }
     return { svg: b, floor };
   },
+  // Themyscira: a white colonnade on a cliff above a bright sea.
+  island(pw, ph, r, { view = 'mid' } = {}) {
+    let b = sky(pw, ph, '#4aa0e0', '#f4e8c8');
+    b += `<circle cx="${f(pw * 0.78)}" cy="${f(ph * 0.22)}" r="${f(ph * 0.09)}" fill="#fff4c0"/>`;
+    b += clouds(pw, ph * 0.2, r, '#ffffff', 3, 0.7);
+    const horizon = ph * 0.6;
+    b += `<rect y="${f(horizon)}" width="${pw}" height="${f(ph)}" fill="#2a8ab8"/>`;
+    for (let k = 0; k < 4; k++) b += `<path d="M0 ${f(horizon + 14 + k * 18)} H${pw}" stroke="#bfe8f8" stroke-width="2" stroke-dasharray="${f(30 + r() * 40)} ${f(20 + r() * 50)}"/>`;
+    const base = ph * 0.86, ch = ph * 0.42, n = Math.max(3, Math.round(pw / 110));
+    b += `<rect x="-10" y="${f(base - ch - 30)}" width="${pw + 20}" height="26" fill="#efe6d4" stroke="${INK}" stroke-width="2.6"/>`;
+    b += `<polygon points="${pts([[-10, base - ch - 30], [pw / 2, base - ch - 30 - ph * 0.12], [pw + 10, base - ch - 30]])}" fill="#e6dcc8" stroke="${INK}" stroke-width="2.6"/>`;
+    for (let i = 0; i < n; i++) {
+      const x = (i + 0.5) * pw / n;
+      b += `<rect x="${f(x - 16)}" y="${f(base - ch - 4)}" width="32" height="${f(ch + 4)}" fill="#f4ecdc" stroke="${INK}" stroke-width="2.4"/>`;
+      b += `<path d="M${f(x - 7)} ${f(base - ch)} V${f(base)} M${f(x + 7)} ${f(base - ch)} V${f(base)}" stroke="#c8bca4" stroke-width="2"/>`;
+      b += `<rect x="${f(x - 22)}" y="${f(base - ch - 8)}" width="44" height="10" fill="#e6dcc8" stroke="${INK}" stroke-width="2"/>`;
+    }
+    const floor = ph * 0.88;
+    b += `<rect x="-10" y="${f(floor)}" width="${pw + 20}" height="300" fill="#e0d4bc" stroke="${INK}" stroke-width="3"/>`;
+    for (let x = r() * 40; x < pw; x += 90) b += `<path d="M${f(x)} ${f(floor)} l-30 300" stroke="#b8ac94" stroke-width="2"/>`;
+    return { svg: b, floor };
+  },
   temple(pw, ph, r, { view = 'mid' } = {}) {
     let b = sky(pw, ph, '#e0708a', '#fbe0c0');
     b += mountains(pw, ph * 0.7, r, '#a0708a', ph * 0.35, 5, false);

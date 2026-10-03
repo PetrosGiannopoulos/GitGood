@@ -8,6 +8,10 @@
 'use strict';
 const { INK, f, mix, dark, light, capsule, smooth, pts, starPts, rng, jag } = require('./lib');
 
+// The bat, in a 200×100 box (the same outline as the Batman theme's art in 00-dc-themes.js).
+const BAT_L = [[100, 30], [94, 30], [90, 12], [86, 32], [72, 36], [46, 30], [6, 16], [22, 40], [20, 56], [38, 52], [46, 70], [62, 60], [72, 80], [86, 64], [100, 90]];
+const BAT = BAT_L.concat(BAT_L.slice(1, -1).reverse().map(([x, y]) => [200 - x, y]));
+
 // ---------- poses ----------
 // Facing right (+x). `lean` is informational; the joints carry the pose.
 const POSES = {
@@ -83,6 +87,10 @@ function head(s, r, dir, clip = 'headclip') {
   const shape = [[0, -r * 1.12], [r * 0.92, -r * 0.55], [r * 0.9 * jaw, r * 0.35], [r * 0.45 * jaw + o * 0.3, r * 1.02], [o * 0.4, r * 1.14], [-r * 0.45 * jaw + o * 0.3, r * 1.02], [-r * 0.9 * jaw, r * 0.35], [-r * 0.92, -r * 0.55]];
   const face = smooth(shape);
   b += `<path d="${face}" fill="${H.type === 'cowl' ? skin : mask}" ${outline}/>`;
+  // Two faces in one: the far half of the face in another colour (Two-Face's scar,
+  // Deathstroke's mask), split down the line of the nose.
+  if (H.half) b += `<defs><clipPath id="${clip}hf"><rect x="${f(o * 0.4)}" y="${f(-r * 2)}" width="${f(r * 2)}" height="${f(r * 4)}"/></clipPath></defs>` +
+    `<path d="${face}" fill="${H.half}" clip-path="url(#${clip}hf)"/><path d="M${f(o * 0.4)} ${f(-r * 1.1)} V${f(r * 1.12)}" stroke="${INK}" stroke-width="${f(r * 0.06)}"/>`;
   if (H.type === 'cowl') b += `<path d="${smooth([[0, -r * 1.12], [r * 0.92, -r * 0.55], [r * 0.93, r * 0.12], [r * 0.3 + o, r * 0.06], [o, r * 0.15], [-r * 0.3 + o, r * 0.06], [-r * 0.93, r * 0.12], [-r * 0.92, -r * 0.55]])}" fill="${mask}" ${outline}/>`;
   if (H.type === 'skull') {
     b += [-1, 1].map(k => `<ellipse cx="${f(k * r * 0.36 + o)}" cy="${f(-r * 0.08)}" rx="${f(r * 0.28)}" ry="${f(r * 0.33)}" fill="${H.socket || INK}"/>`).join('');
@@ -151,6 +159,15 @@ function head(s, r, dir, clip = 'headclip') {
   if (H.bigHelm) b += `<path d="M${f(-r * 1.1)} ${f(r * 0.6)} L${f(-r * 1.3)} ${f(-r * 0.8)} L${f(-r * 2.1)} ${f(-r * 2.4)} L${f(-r * 0.6)} ${f(-r * 1.3)} L0 ${f(-r * 1.6)} L${f(r * 0.6)} ${f(-r * 1.3)} L${f(r * 2.1)} ${f(-r * 2.4)} L${f(r * 1.3)} ${f(-r * 0.8)} L${f(r * 1.1)} ${f(r * 0.6)} L${f(r * 0.7)} ${f(r * 0.1)} L${f(-r * 0.7)} ${f(r * 0.1)} Z" fill="${H.bigHelm}" ${outline}/>` +
     `<path d="M${f(-r * 0.25)} ${f(-r * 1.4)} L0 ${f(-r * 0.5)} L${f(r * 0.25)} ${f(-r * 1.4)}" fill="${H.bigHelmTrim || '#3f6ad2'}" stroke="${INK}" stroke-width="${f(r * 0.06)}"/>`;
   if (H.chin) b += `<path d="M${f(-r * 0.4 + o)} ${f(r * 0.55)} Q${f(o)} ${f(r * 0.75)} ${f(r * 0.4 + o)} ${f(r * 0.55)} M${f(-r * 0.35 + o)} ${f(r * 0.8)} Q${f(o)} ${f(r * 1.0)} ${f(r * 0.35 + o)} ${f(r * 0.8)}" fill="none" stroke="${INK}" stroke-width="${f(r * 0.06)}"/>`;
+  // Coluan intelligence: three discs set in the brow.
+  if (H.dots) b += [[-0.28, -0.62], [0, -0.8], [0.28, -0.62]].map(([x, y]) => `<circle cx="${f(o + x * r)}" cy="${f(y * r)}" r="${f(r * 0.1)}" fill="${H.dots}" stroke="${INK}" stroke-width="${f(r * 0.04)}"/>`).join('');
+  // Hats sit on top of everything: a stage top hat, or a bowler.
+  if (H.hat === 'top') b += `<rect x="${f(-r * 0.68)}" y="${f(-r * 2.35)}" width="${f(r * 1.36)}" height="${f(r * 1.5)}" fill="${H.hatColor || INK}" ${outline}/>` +
+    `<rect x="${f(-r * 0.68)}" y="${f(-r * 1.2)}" width="${f(r * 1.36)}" height="${f(r * 0.28)}" fill="${H.hatBand || '#c8302a'}" ${outline}/>` +
+    `<ellipse cy="${f(-r * 0.86)}" rx="${f(r * 1.2)}" ry="${f(r * 0.22)}" fill="${H.hatColor || INK}" ${outline}/>`;
+  if (H.hat === 'bowler') b += `<path d="M${f(-r * 0.78)} ${f(-r * 0.8)} C${f(-r * 0.8)} ${f(-r * 1.9)} ${f(r * 0.8)} ${f(-r * 1.9)} ${f(r * 0.78)} ${f(-r * 0.8)} Z" fill="${H.hatColor || INK}" ${outline}/>` +
+    `<ellipse cy="${f(-r * 0.8)}" rx="${f(r * 1.12)}" ry="${f(r * 0.2)}" fill="${H.hatColor || INK}" ${outline}/>` +
+    (H.hatBand ? `<path d="M${f(-r * 0.76)} ${f(-r * 0.98)} H${f(r * 0.76)}" stroke="${H.hatBand}" stroke-width="${f(r * 0.16)}"/>` : '');
   return b;
 }
 
@@ -239,6 +256,10 @@ function figure(spec, poseName, { size = 300, facing = 1, light: lightDir = -1 }
   if (s.sides) torso += [1, -1].map(k2 => `<path d="${smooth([along(0.05, k2 * halfSh * 0.98), along(0.3, k2 * halfSh * 0.95), along(0.66, k2 * waist), along(0.98, k2 * halfHip), along(0.95, k2 * halfHip * 0.62), along(0.6, k2 * waist * 0.55), along(0.3, k2 * halfSh * 0.62)], false)} Z" fill="${s.sides}" ${ink}/>`).join('');
   if (s.vest) torso += `<path d="${smooth([along(0.02, halfSh * 0.55), along(0.5, waist * 0.3), along(1.02, halfHip * 0.5), along(1.02, -halfHip * 0.5), along(0.5, -waist * 0.3), along(0.02, -halfSh * 0.55)])}" fill="${s.vest}" ${ink}/>`;
   if (s.web) torso += `<g clip-path="url(#${id}t)">${bodyWeb(up, axis, nx, ny, halfSh, s.webColor || INK, inkW)}</g>`;
+  // Straps crossed over the chest, shoulder to opposite hip (the Manhunter's harness).
+  if (s.xStraps) torso += `<g clip-path="url(#${id}t)">` + [1, -1].map(k2 => { const a = along(0.0, k2 * halfSh * 0.9), b2 = along(0.95, -k2 * halfHip * 0.9); return `<path d="M${f(a[0])} ${f(a[1])} L${f(b2[0])} ${f(b2[1])}" stroke="${INK}" stroke-width="${f(sc(12) + inkW)}"/><path d="M${f(a[0])} ${f(a[1])} L${f(b2[0])} ${f(b2[1])}" stroke="${s.xStraps}" stroke-width="${f(sc(12))}"/>`; }).join('') + '</g>';
+  // A big cat's coat: rosettes scattered over the torso.
+  if (s.spots) { const rr = rng(5); let sp = ''; for (let i = 0; i < 22; i++) { const p = along(rr() * 1.05 - 0.02, (rr() * 2 - 1) * halfSh); sp += `<ellipse cx="${f(p[0])}" cy="${f(p[1])}" rx="${f(sc(3 + rr() * 3))}" ry="${f(sc(2.4 + rr() * 2))}" fill="${s.spots}"/>`; } torso += `<g clip-path="url(#${id}t)">${sp}</g>`; }
   if (s.abs) torso += `<path d="M${f(along(0.42, 0)[0])} ${f(along(0.42, 0)[1])} L${f(along(0.95, 0)[0])} ${f(along(0.95, 0)[1])} M${f(along(0.35, halfSh * 0.5)[0])} ${f(along(0.35, halfSh * 0.5)[1])} Q${f(along(0.42, 0)[0])} ${f(along(0.42, 0)[1] + 6)} ${f(along(0.35, -halfSh * 0.5)[0])} ${f(along(0.35, -halfSh * 0.5)[1])} M${f(along(0.6, waist * 0.6)[0])} ${f(along(0.6, waist * 0.6)[1])} L${f(along(0.6, -waist * 0.6)[0])} ${f(along(0.6, -waist * 0.6)[1])} M${f(along(0.76, waist * 0.55)[0])} ${f(along(0.76, waist * 0.55)[1])} L${f(along(0.76, -waist * 0.55)[0])} ${f(along(0.76, -waist * 0.55)[1])}" fill="none" stroke="${INK}" stroke-width="${f(inkW * 0.7)}" stroke-opacity=".6"/>`;
   if (s.belt) { const a = along(0.92, halfHip * 1.02), b2 = along(0.92, -halfHip * 1.02), c = along(1.0, -halfHip * 1.05), d = along(1.0, halfHip * 1.05); torso += `<polygon points="${pts([a, b2, c, d])}" fill="${s.belt}" ${ink}/>`; }
   if (s.emblem) torso += emblem(s.emblem, along(0.24, 0), sc(15), s.emblemColor || '#ffffff', inkW, Math.atan2(axis[1], axis[0]) - Math.PI / 2);
@@ -328,6 +349,37 @@ function emblem(kind, [x, y], r, c, w, rot) {
     case 'diamond': return `<g ${t}><polygon points="${pts([[0, -r], [r * 0.7, 0], [0, r], [-r * 0.7, 0]])}" fill="${c}" ${ink}/></g>`;
     case 'gem': return `<g ${t}><circle r="${f(r * 0.45)}" fill="${c}" ${ink}/><circle r="${f(r * 1.2)}" fill="${c}" opacity=".3"/></g>`;
     case 'wasp': return `<g ${t}><ellipse rx="${f(r * 0.4)}" ry="${f(r * 0.9)}" fill="${c}" ${ink}/><path d="M${f(-r * 0.4)} ${f(-r * 0.2)} H${f(r * 0.4)} M${f(-r * 0.4)} ${f(r * 0.2)} H${f(r * 0.4)}" stroke="${INK}" stroke-width="${f(w * 0.6)}"/></g>`;
+    // ----- DC -----
+    case 'bat': return `<g ${t}><polygon points="${pts(BAT.map(([x, y]) => [(x - 100) / 100 * r * 1.5, (y - 52) / 100 * r * 1.5]))}" fill="${c}" ${ink}/></g>`;
+    case 'batoval': return `<g ${t}><ellipse rx="${f(r * 1.6)}" ry="${f(r * 0.95)}" fill="#f0c840" ${ink}/><polygon points="${pts(BAT.map(([x, y]) => [(x - 100) / 100 * r * 1.4, (y - 52) / 100 * r * 1.4]))}" fill="${c}"/></g>`;
+    case 'super': return `<g ${t}><polygon points="${pts([[-r * 0.7, -r * 0.9], [r * 0.7, -r * 0.9], [r * 1.0, -r * 0.5], [0, r * 1.0], [-r * 1.0, -r * 0.5]])}" fill="${c}" ${ink}/>` +
+      `<path d="M${f(r * 0.45)} ${f(-r * 0.62)} H${f(-r * 0.2)} C${f(-r * 0.55)} ${f(-r * 0.62)} ${f(-r * 0.55)} ${f(-r * 0.2)} ${f(-r * 0.2)} ${f(-r * 0.15)} L${f(r * 0.2)} ${f(-r * 0.05)} C${f(r * 0.5)} ${f(r * 0.05)} ${f(r * 0.4)} ${f(r * 0.42)} ${f(r * 0.05)} ${f(r * 0.42)} H${f(-r * 0.35)}" fill="none" stroke="#d8282e" stroke-width="${f(r * 0.24)}" stroke-linecap="round"/></g>`;
+    case 'ww': return `<g ${t}>` + [-0.3, 0.3].map(dx => `<polyline points="${pts([[-0.6, -0.5], [-0.3, 0.5], [0, -0.2], [0.3, 0.5], [0.6, -0.5]].map(([x, y]) => [(x + dx) * r, y * r]))}" fill="none" stroke="${INK}" stroke-width="${f(r * 0.32)}"/><polyline points="${pts([[-0.6, -0.5], [-0.3, 0.5], [0, -0.2], [0.3, 0.5], [0.6, -0.5]].map(([x, y]) => [(x + dx) * r, y * r]))}" fill="none" stroke="${c}" stroke-width="${f(r * 0.2)}"/>`).join('') + '</g>';
+    case 'flash': case 'rflash': {
+      const rev = kind === 'rflash';
+      return `<g ${t}><circle r="${f(r)}" fill="${rev ? INK : '#ffffff'}" stroke="${rev ? '#d8282e' : '#e8c030'}" stroke-width="${f(r * 0.16)}"/>` +
+        `<polygon points="${pts([[r * 0.3, -r * 0.95], [-r * 0.35, r * 0.05], [r * 0.02, r * 0.05], [-r * 0.3, r * 0.95], [r * 0.38, -r * 0.15], [r * 0.02, -r * 0.15], [r * 0.45, -r * 0.95]])}" fill="${rev ? '#d8282e' : '#f0c030'}" ${ink}/></g>`;
+    }
+    case 'lantern': case 'sinestro': {
+      let o = '';
+      if (kind === 'sinestro') for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2 + 0.39; o += `<polygon points="${pts([[Math.cos(a - 0.2) * r * 0.6, Math.sin(a - 0.2) * r * 0.6], [Math.cos(a) * r * 1.15, Math.sin(a) * r * 1.15], [Math.cos(a + 0.2) * r * 0.6, Math.sin(a + 0.2) * r * 0.6]])}" fill="${c}" ${ink}/>`; }
+      return `<g ${t}>${o}<circle r="${f(r * 0.55)}" fill="none" stroke="${INK}" stroke-width="${f(r * 0.32)}"/><circle r="${f(r * 0.55)}" fill="none" stroke="${c}" stroke-width="${f(r * 0.2)}"/>` +
+        [-1, 1].map(k => `<rect x="${f(-r * 1.0)}" y="${f(k > 0 ? r * 0.62 : -r * 0.82)}" width="${f(r * 2)}" height="${f(r * 0.2)}" fill="${c}" ${ink}/>`).join('') + '</g>';
+    }
+    case 'omega': return `<g ${t}><path d="M${f(-r * 0.9)} ${f(r * 0.8)} H${f(-r * 0.35)} V${f(r * 0.55)} C${f(-r * 0.9)} ${f(r * 0.3)} ${f(-r * 0.9)} ${f(-r * 0.85)} 0 ${f(-r * 0.85)} C${f(r * 0.9)} ${f(-r * 0.85)} ${f(r * 0.9)} ${f(r * 0.3)} ${f(r * 0.35)} ${f(r * 0.55)} V${f(r * 0.8)} H${f(r * 0.9)}" fill="none" stroke="${INK}" stroke-width="${f(r * 0.34)}" stroke-linejoin="round"/>` +
+      `<path d="M${f(-r * 0.9)} ${f(r * 0.8)} H${f(-r * 0.35)} V${f(r * 0.55)} C${f(-r * 0.9)} ${f(r * 0.3)} ${f(-r * 0.9)} ${f(-r * 0.85)} 0 ${f(-r * 0.85)} C${f(r * 0.9)} ${f(-r * 0.85)} ${f(r * 0.9)} ${f(r * 0.3)} ${f(r * 0.35)} ${f(r * 0.55)} V${f(r * 0.8)} H${f(r * 0.9)}" fill="none" stroke="${c}" stroke-width="${f(r * 0.2)}" stroke-linejoin="round"/></g>`;
+    case 'question': return `<g ${t}><text y="${f(r * 0.7)}" font-family="Georgia, serif" font-weight="700" font-size="${f(r * 2.2)}" fill="${c}" text-anchor="middle" stroke="${INK}" stroke-width="${f(w * 0.6)}">?</text></g>`;
+    case 'ha': return `<g ${t}><text y="${f(r * 0.4)}" font-family="Impact, sans-serif" font-size="${f(r * 1.2)}" fill="${c}" text-anchor="middle" stroke="${INK}" stroke-width="${f(w * 0.5)}">HA!</text></g>`;
+    case 'R': return `<g ${t}><circle r="${f(r)}" fill="${c}" ${ink}/><text y="${f(r * 0.5)}" font-family="Impact, sans-serif" font-size="${f(r * 1.45)}" fill="#d8282e" text-anchor="middle" stroke="${INK}" stroke-width="${f(w * 0.4)}">R</text></g>`;
+    case 'nightwing': return `<g ${t}><path d="M0 ${f(r * 0.5)} L${f(-r * 0.2)} ${f(r * 0.2)} L${f(-r * 1.7)} ${f(-r * 0.6)} L${f(-r * 0.1)} ${f(-r * 0.05)} L0 ${f(-r * 0.2)} L${f(r * 0.1)} ${f(-r * 0.05)} L${f(r * 1.7)} ${f(-r * 0.6)} L${f(r * 0.2)} ${f(r * 0.2)} Z" fill="${c}" ${ink}/></g>`;
+    case 'hawk': return `<g ${t}><path d="M0 ${f(r * 0.9)} L${f(-r * 0.3)} ${f(-r * 0.1)} L${f(-r * 1.4)} ${f(-r * 0.7)} L${f(-r * 0.9)} ${f(r * 0.1)} L${f(-r * 0.3)} ${f(r * 0.3)} Z M0 ${f(r * 0.9)} L${f(r * 0.3)} ${f(-r * 0.1)} L${f(r * 1.4)} ${f(-r * 0.7)} L${f(r * 0.9)} ${f(r * 0.1)} L${f(r * 0.3)} ${f(r * 0.3)} Z" fill="${c}" ${ink}/><circle cy="${f(-r * 0.35)}" r="${f(r * 0.25)}" fill="${c}" ${ink}/></g>`;
+    case 'scarab': return `<g ${t}><ellipse cy="${f(r * 0.15)}" rx="${f(r * 0.7)}" ry="${f(r * 0.9)}" fill="${c}" ${ink}/><path d="M0 ${f(-r * 0.75)} V${f(r * 1.05)}" stroke="${INK}" stroke-width="${f(w * 0.6)}"/><ellipse cy="${f(-r * 0.85)}" rx="${f(r * 0.35)}" ry="${f(r * 0.22)}" fill="${c}" ${ink}/></g>`;
+    case 'dove': return `<g ${t}><path d="M${f(-r)} ${f(r * 0.1)} C${f(-r * 0.4)} ${f(-r * 0.3)} ${f(r * 0.2)} ${f(-r * 0.2)} ${f(r * 0.5)} ${f(r * 0.1)} L${f(r * 1.1)} ${f(-r * 0.1)} L${f(r * 0.8)} ${f(r * 0.35)} C${f(r * 0.2)} ${f(r * 0.6)} ${f(-r * 0.5)} ${f(r * 0.5)} ${f(-r)} ${f(r * 0.1)} Z M${f(-r * 0.1)} ${f(-r * 0.1)} L${f(r * 0.3)} ${f(-r * 1.0)} L${f(r * 0.5)} ${f(0)} Z" fill="${c}" ${ink}/></g>`;
+    case 'legion': case 'lex': {
+      const ring = kind === 'legion' ? `<circle r="${f(r)}" fill="${INK}"/><circle r="${f(r * 0.82)}" fill="none" stroke="${c}" stroke-width="${f(r * 0.28)}"/>`
+        : `<polygon points="${pts([0, 1, 2, 3, 4, 5].map(i => [Math.cos(i * Math.PI / 3 + Math.PI / 6) * r, Math.sin(i * Math.PI / 3 + Math.PI / 6) * r]))}" fill="${INK}" stroke="${c}" stroke-width="${f(r * 0.14)}"/>`;
+      return `<g ${t}>${ring}<path d="M${f(-r * 0.25)} ${f(-r * 0.45)} V${f(r * 0.4)} H${f(r * 0.4)}" fill="none" stroke="${c}" stroke-width="${f(r * 0.22)}"/></g>`;
+    }
     default: return '';
   }
 }
@@ -435,6 +487,44 @@ function handProps(s, ha, hb, el, facing, w, sc) {
       return `<circle cx="${f(x)}" cy="${f(y)}" r="${f(sc(13))}" fill="#e2bd4c" ${ink}/>` + ['#e04848', '#4f7ae0', '#f0d040', '#5ad07a', '#b05ae0', '#ff9a3a'].map((c, i) => `<circle cx="${f(x - 8 + (i % 3) * 8)}" cy="${f(y - 5 + Math.floor(i / 3) * 10)}" r="3.2" fill="${c}" stroke="${INK}" stroke-width="1"/>`).join('');
     }
     case 'tophat': return '';
+    // ----- DC -----
+    case 'lasso': {
+      const [x, y] = ha;
+      const loops = [0, 1, 2].map(i => `<ellipse cx="${f(x + facing * 10)}" cy="${f(y + 26 + i * 6)}" rx="${f(26 - i * 4)}" ry="${f(12 - i * 2)}" fill="none" stroke="${INK}" stroke-width="${f(w + 4)}"/><ellipse cx="${f(x + facing * 10)}" cy="${f(y + 26 + i * 6)}" rx="${f(26 - i * 4)}" ry="${f(12 - i * 2)}" fill="none" stroke="#f0c850" stroke-width="3.5"/>`).join('');
+      return loops + `<path d="M${f(x)} ${f(y)} C${f(x + facing * 80)} ${f(y - 60)} ${f(x + facing * 160)} ${f(y + 20)} ${f(x + facing * 230)} ${f(y - 30)}" fill="none" stroke="${INK}" stroke-width="${f(w + 4)}"/><path d="M${f(x)} ${f(y)} C${f(x + facing * 80)} ${f(y - 60)} ${f(x + facing * 160)} ${f(y + 20)} ${f(x + facing * 230)} ${f(y - 30)}" fill="none" stroke="#ffe27a" stroke-width="3.5"/>`;
+    }
+    case 'mace': {
+      const e = at(80);
+      let spikes = '';
+      for (let i = 0; i < 8; i++) { const a2 = i / 8 * Math.PI * 2; spikes += `<path d="M${f(e[0])} ${f(e[1])} l${f(Math.cos(a2) * 30)} ${f(Math.sin(a2) * 30)}" stroke="${INK}" stroke-width="${f(w + 3)}" stroke-linecap="round"/>`; }
+      return `<path d="M${f(ha[0])} ${f(ha[1])} L${f(e[0])} ${f(e[1])}" stroke="${INK}" stroke-width="${f(w + 9)}" stroke-linecap="round"/><path d="M${f(ha[0])} ${f(ha[1])} L${f(e[0])} ${f(e[1])}" stroke="#8a6a3a" stroke-width="8" stroke-linecap="round"/>` +
+        spikes + `<circle cx="${f(e[0])}" cy="${f(e[1])}" r="20" fill="#d8b050" ${ink}/>`;
+    }
+    case 'escrima': {
+      const stick = (h, a2) => { const b = [h[0] - Math.cos(a2) * 8, h[1] - Math.sin(a2) * 8], e = [h[0] + Math.cos(a2) * 80, h[1] + Math.sin(a2) * 80]; return `<path d="M${f(b[0])} ${f(b[1])} L${f(e[0])} ${f(e[1])}" stroke="${INK}" stroke-width="${f(w + 8)}" stroke-linecap="round"/><path d="M${f(b[0])} ${f(b[1])} L${f(e[0])} ${f(e[1])}" stroke="#4aa0f0" stroke-width="7" stroke-linecap="round"/>`; };
+      return stick(ha, a) + stick(hb, Math.atan2(hb[1] - el[1], hb[0] - el[0]) - 0.6);
+    }
+    case 'wand': {
+      const e = at(60);
+      return `<path d="M${f(ha[0])} ${f(ha[1])} L${f(e[0])} ${f(e[1])}" stroke="${INK}" stroke-width="7" stroke-linecap="round"/><path d="M${f(at(48)[0])} ${f(at(48)[1])} L${f(e[0])} ${f(e[1])}" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>` +
+        `<polygon points="${starPts(e[0] + Math.cos(a) * 22, e[1] + Math.sin(a) * 22, 16, 4, 4)}" fill="#fff2a0" ${ink}/>`;
+    }
+    case 'whip': {
+      const [x, y] = ha;
+      const d = `M${f(x)} ${f(y)} C${f(x + facing * 90)} ${f(y + 60)} ${f(x + facing * 140)} ${f(y - 80)} ${f(x + facing * 240)} ${f(y - 20)} S${f(x + facing * 300)} ${f(y + 60)} ${f(x + facing * 340)} ${f(y + 30)}`;
+      return `<path d="${d}" fill="none" stroke="${INK}" stroke-width="${f(w + 5)}" stroke-linecap="round"/><path d="${d}" fill="none" stroke="#3a3048" stroke-width="4" stroke-linecap="round"/>`;
+    }
+    case 'umbrella': {
+      const b = at(-40), e = at(150), c1 = at(60, 18), c2 = at(60, -18);
+      return `<path d="M${f(b[0])} ${f(b[1])} L${f(e[0])} ${f(e[1])}" stroke="${INK}" stroke-width="${f(w + 7)}" stroke-linecap="round"/><path d="M${f(b[0])} ${f(b[1])} L${f(e[0])} ${f(e[1])}" stroke="#2a2a30" stroke-width="6" stroke-linecap="round"/>` +
+        `<polygon points="${pts([c1, at(140), c2])}" fill="#2a2a34" ${ink}/><path d="M${f(b[0])} ${f(b[1])} q${f(-facing * 18)} 14 ${f(-facing * 4)} 26" fill="none" stroke="${INK}" stroke-width="${f(w + 5)}"/>`;
+    }
+    case 'qcane': {
+      const b = at(-150), e = at(60);
+      const q = `M${f(e[0])} ${f(e[1])} c0 -40 ${f(facing * 46)} -40 ${f(facing * 46)} -76 c0 -30 ${f(-facing * 22)} -44 ${f(-facing * 40)} -44 c-18 0 ${f(-facing * 36)} 12 ${f(-facing * 36)} 30`;
+      return `<path d="M${f(b[0])} ${f(b[1])} L${f(e[0])} ${f(e[1])}" stroke="${INK}" stroke-width="${f(w + 8)}" stroke-linecap="round"/><path d="M${f(b[0])} ${f(b[1])} L${f(e[0])} ${f(e[1])}" stroke="#d8b040" stroke-width="7" stroke-linecap="round"/>` +
+        `<path d="${q}" fill="none" stroke="${INK}" stroke-width="${f(w + 9)}" stroke-linecap="round"/><path d="${q}" fill="none" stroke="#5ac04a" stroke-width="8" stroke-linecap="round"/>`;
+    }
     default: return o;
   }
 }

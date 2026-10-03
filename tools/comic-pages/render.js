@@ -17,7 +17,9 @@ const { app, BrowserWindow } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { page, W, H } = require('./compose');
-const { HEROES } = require('./heroes');
+const { HEROES: MARVEL } = require('./heroes');
+const { DC_HEROES } = require('./dc-heroes');
+const HEROES = MARVEL.concat(DC_HEROES);
 
 const at = process.argv.findIndex(a => path.resolve(a) === __filename);
 const argv = process.argv.slice(at + 1);

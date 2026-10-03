@@ -1,4 +1,4 @@
-// Comic-page backdrops for the Marvel themes.
+// Comic-page backdrops for the hero themes, Marvel and DC alike.
 //
 // Settings → Appearance → Marvel themes → Backdrop picks one of three for every hero theme:
 //   'art'   — the theme's own suit art (00-hero-themes.js), drawn by CSS as before;
