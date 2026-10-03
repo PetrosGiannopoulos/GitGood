@@ -11,6 +11,7 @@ const { partialPickMessage, applyFailureHelp, rewritePlan } = require('./lib/par
 const { parsePushPorcelain } = require('./lib/push-porcelain');
 const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
+const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -5007,44 +5008,135 @@ ipcMain.handle('repo:stopWatching', wrap(async () => {
 const IMAGE_MIME = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   bmp: 'image/bmp', webp: 'image/webp', ico: 'image/x-icon', svg: 'image/svg+xml',
-  avif: 'image/avif'
+  avif: 'image/avif',
+  // Audio and video share the same before/after viewer (smart diff in 04-diff.js).
+  wav: 'audio/wav', mp3: 'audio/mpeg', ogg: 'audio/ogg', oga: 'audio/ogg', flac: 'audio/flac',
+  m4a: 'audio/mp4', aac: 'audio/aac', opus: 'audio/ogg',
+  mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime'
 };
 
 // Cap what we're willing to inline. A data URI is ~33% larger than the bytes, and this
 // crosses the IPC boundary as a string, so a huge asset would stall the renderer.
 const MAX_BLOB_BYTES = 12 * 1024 * 1024;
+// Unity YAML is parsed in main and only the summary crosses IPC, so it can afford more.
+const MAX_UNITY_BYTES = 48 * 1024 * 1024;
+
+// Where git-lfs keeps object contents: <common git dir>/lfs/objects/aa/bb/<oid>. The common
+// dir, not .git — in a linked worktree .git is a file and the store is the main repository's.
+const _lfsStoreFor = new Map();
+async function lfsObjectPath(oid) {
+  if (!_lfsStoreFor.has(currentRepoPath)) {
+    let dir = null;
+    try { dir = path.resolve(currentRepoPath, (await ensureGit().raw(['rev-parse', '--git-common-dir'])).trim(), 'lfs', 'objects'); } catch (e) {}
+    _lfsStoreFor.set(currentRepoPath, dir);
+  }
+  const store = _lfsStoreFor.get(currentRepoPath);
+  return store ? path.join(store, oid.slice(0, 2), oid.slice(2, 4), oid) : null;
+}
+
+// One version of a file, as its real bytes: `rev` is WORKTREE (or empty), INDEX, or any
+// revision. Returns { exists, bytes, buf?, tooLarge?, lfs?, lfsMissing? }.
+//
+// An LFS-tracked file is stored in git as a ~130-byte pointer, so `git show` on a commit
+// hands back the pointer, not the image. The pointer names the object by sha256 and git-lfs
+// keeps the contents in a local store, so it is read from there — no smudge process and no
+// network. An object that was never downloaded is reported as such (`lfsMissing`) rather
+// than fetched: a diff pane is no place to start a download of unknown size.
+async function readRevBytes(rev, filePath, maxBytes) {
+  let buf = null, size = 0;
+  if (!rev || rev === 'WORKTREE') {
+    const abs = path.join(currentRepoPath, filePath);
+    if (!fs.existsSync(abs)) return { exists: false };
+    size = fs.statSync(abs).size;
+    if (size <= 1024 || size <= maxBytes) buf = fs.readFileSync(abs);
+  } else {
+    const spec = (rev === 'INDEX' ? '' : rev) + ':' + filePath;
+    try { size = Number((await ensureGit().raw(['cat-file', '-s', spec])).trim()); } catch (e) { return { exists: false }; }
+    if (!Number.isFinite(size)) return { exists: false };
+    // Small enough to be a pointer, or small enough to want: read it. Otherwise the size is
+    // all anyone gets — a 2 GB asset must never be pulled into memory to say it is too big.
+    if (size <= 1024 || size <= maxBytes) {
+      try { buf = await gitCatBlob(spec); } catch (e) { return { exists: false }; }
+    }
+  }
+
+  const lfs = buf && buf.length <= 1024 ? parseLfsPointer(buf.toString('utf8')) : null;
+  if (lfs) {
+    const obj = await lfsObjectPath(lfs.oid);
+    if (!obj || !fs.existsSync(obj)) return { exists: true, bytes: lfs.size, lfs, lfsMissing: true };
+    if (lfs.size > maxBytes) return { exists: true, bytes: lfs.size, lfs, tooLarge: true };
+    return { exists: true, bytes: lfs.size, lfs, buf: fs.readFileSync(obj) };
+  }
+  if (size > maxBytes) return { exists: true, bytes: size, tooLarge: true };
+  return { exists: true, bytes: size, buf };
+}
 
 ipcMain.handle('repo:fileBlob', wrap(async (_, { rev, path: filePath }) => {
-  const g = ensureGit();
+  ensureGit();
   if (!filePath) throw new Error('A file path is required');
   const ext = (filePath.split('.').pop() || '').toLowerCase();
   const mime = IMAGE_MIME[ext] || 'application/octet-stream';
 
-  let buf = null;
-  if (!rev || rev === 'WORKTREE') {
-    const abs = path.join(currentRepoPath, filePath);
-    if (!fs.existsSync(abs)) return { exists: false };
-    const stat = fs.statSync(abs);
-    if (stat.size > MAX_BLOB_BYTES) return { exists: true, tooLarge: true, bytes: stat.size, mime };
-    buf = fs.readFileSync(abs);
-  } else {
-    // `git show <rev>:<path>` writes raw bytes; simple-git hands back a string, so go
-    // through a binary-safe spawn instead of letting it decode as UTF-8 and corrupt them.
-    try {
-      buf = await gitShowBinary(rev, filePath);
-    } catch (e) {
-      return { exists: false };   // the file didn't exist at that revision
-    }
-    if (!buf) return { exists: false };
-    if (buf.length > MAX_BLOB_BYTES) return { exists: true, tooLarge: true, bytes: buf.length, mime };
-  }
+  const r = await readRevBytes(rev, filePath, MAX_BLOB_BYTES);
+  if (!r.exists) return { exists: false };
+  const meta = { exists: true, mime, bytes: r.bytes, lfs: r.lfs || null };
+  if (r.lfsMissing) return Object.assign(meta, { lfsMissing: true });
+  if (r.tooLarge) return Object.assign(meta, { tooLarge: true });
+  return Object.assign(meta, { dataUri: `data:${mime};base64,${r.buf.toString('base64')}` });
+}));
 
-  return {
-    exists: true,
-    mime,
-    bytes: buf.length,
-    dataUri: `data:${mime};base64,${buf.toString('base64')}`
+// Asset paths for GUIDs, read from the .meta files in the working tree. One `git grep` for
+// the whole batch; cached per repository, because GUIDs are stable for an asset's lifetime.
+const _guidPaths = new Map();
+async function resolveGuids(guids) {
+  if (!_guidPaths.has(currentRepoPath)) _guidPaths.set(currentRepoPath, new Map());
+  const cache = _guidPaths.get(currentRepoPath);
+  const want = guids.filter(g => !cache.has(g)).slice(0, 300);
+  if (want.length) {
+    let out = '';
+    // git grep exits 1 on no match without writing stderr, which simple-git resolves — so
+    // "nothing found" arrives as empty output, not a throw.
+    try { out = await ensureGit().raw(['grep', '-F', '--no-color', ...want.flatMap(g => ['-e', 'guid: ' + g]), '--', '*.meta']); } catch (e) {}
+    for (const line of out.split('\n')) {
+      const m = /^(.*?\.meta):guid: ([0-9a-f]{32})\s*$/.exec(line);
+      if (m) cache.set(m[2], m[1].replace(/\.meta$/, ''));
+    }
+    for (const g of want) if (!cache.has(g)) cache.set(g, null);
+  }
+  const res = {};
+  for (const g of guids) if (cache.get(g)) res[g] = cache.get(g);
+  return res;
+}
+
+// The structured half of the smart diff (the renderer draws images, audio and video itself
+// from repo:fileBlob). For a Unity YAML asset: which objects were added, removed or changed,
+// property by property. For anything else: the size and LFS facts of each side, which is
+// all an unknown binary can honestly say.
+ipcMain.handle('repo:smartDiff', wrap(async (_, { path: filePath, oldRev, newRev }) => {
+  ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+  const kind = smartKind(filePath) === 'unity' ? 'unity' : 'binary';
+  const limit = kind === 'unity' ? MAX_UNITY_BYTES : 0;
+  const [a, b] = await Promise.all([readRevBytes(oldRev, filePath, limit), readRevBytes(newRev, filePath, limit)]);
+  const side = (r) => ({ exists: !!r.exists, bytes: r.bytes || 0, lfs: r.lfs || null, lfsMissing: !!r.lfsMissing, tooLarge: !!(r.tooLarge && limit) });
+  const out = { kind, before: side(a), after: side(b) };
+  if (kind !== 'unity') return out;
+
+  // Text only. A NUL in the first 8000 bytes is git's own rule for "binary", and here it
+  // means Asset Serialization is set to Binary or Mixed — there is no YAML to read.
+  const text = (r) => {
+    if (!r.exists) return '';
+    if (!r.buf) return null;
+    const head = r.buf.subarray(0, 8000);
+    if (head.includes(0)) { out.unityBinary = true; return null; }
+    return r.buf.toString('utf8');
   };
+  const ta = text(a), tb = text(b);
+  if (ta === null || tb === null) return out;
+  const before = parseUnityYaml(ta), after = parseUnityYaml(tb);
+  const guidPaths = await resolveGuids(referencedGuids(before, after));
+  out.unity = diffUnity(before, after, { guidPaths });
+  return out;
 }));
 
 // ============================================
@@ -5380,6 +5472,23 @@ ipcMain.handle('repo:deleteRemoteTag', wrap(async (_, opts) => {
     emitOpProgress({ active: false, done: true });
   }
 }));
+
+// A blob's raw bytes by object name (`<rev>:<path>`, or `:<path>` for the index). Like
+// gitShowBinary below, a direct spawn: simple-git would decode the bytes as UTF-8.
+function gitCatBlob(spec) {
+  return new Promise((resolve, reject) => {
+    const proc = require('child_process').spawn('git', ['cat-file', 'blob', spec], {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_LITERAL_PATHSPECS: '1' })
+    });
+    const chunks = [];
+    let err = '';
+    proc.stdout.on('data', d => chunks.push(d));
+    proc.stderr.on('data', d => { err += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(err.trim() || `git cat-file exited ${code}`)));
+  });
+}
 
 // Read a blob at a revision as raw bytes. simple-git decodes stdout as text, which
 // mangles binary content, so this spawns git directly and collects Buffers.

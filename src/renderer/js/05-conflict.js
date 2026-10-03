@@ -1234,7 +1234,12 @@ async function selectFile(path, staged) {
   const canStage = !state.diffIgnoreWhitespace;
   $('#diff-content').innerHTML =
     (state.diffIgnoreWhitespace ? whitespaceNoticeHtml() : '') +
-    renderDiff(result.data, { stageable: canStage, filePath: path, staged });
+    renderDiff(result.data, {
+      stageable: canStage, filePath: path, staged,
+      // The smart views (images, Unity assets, binaries) compare the same two sides as the
+      // diff itself: a staged diff is HEAD → index, an unstaged one index → working tree.
+      imageRevs: staged ? { oldRev: 'HEAD', newRev: 'INDEX' } : { oldRev: 'INDEX', newRev: 'WORKTREE' }
+    });
   if (canStage) updatePartialBar();
   hydrateImageDiffs($('#diff-content'));
 }

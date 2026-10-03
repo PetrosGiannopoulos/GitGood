@@ -1577,7 +1577,11 @@ function buildPopoutModel() {
           into.innerHTML = '<div class="empty-state"><p>No textual differences (binary or empty).</p></div>';
           return;
         }
-        into.innerHTML = renderDiff(result.data);
+        into.innerHTML = renderDiff(result.data, {
+          filePath: file.path,
+          imageRevs: file.staged ? { oldRev: 'HEAD', newRev: 'INDEX' } : { oldRev: 'INDEX', newRev: 'WORKTREE' }
+        });
+        hydrateImageDiffs(into);
       }
     };
   }
@@ -1595,7 +1599,13 @@ function buildPopoutModel() {
       label: opts.hash ? `Commit ${String(opts.hash).slice(0,7)}` : 'Commit changes',
       files: owner._cfiles.map(f => ({ path: f.path, status: f.status, _diff: f.diff })),
       render: (file, into) => {
-        try { into.innerHTML = renderDiff(file._diff, opts); }
+        try {
+          into.innerHTML = renderDiff(file._diff, Object.assign({}, opts, {
+            filePath: file.path,
+            imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined
+          }));
+          hydrateImageDiffs(into);
+        }
         catch (e) { into.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(e.message||String(e))}</p></div>`; }
       }
     };

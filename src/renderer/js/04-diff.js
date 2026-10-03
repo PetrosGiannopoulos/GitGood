@@ -727,6 +727,15 @@ function renderDiffUnified(diffText, opts) {
       out.push(`<div class="diff-file-header">⚔ ${escapeHtml(file.path)}</div>`);
       emitted++;
     }
+    // Images, media, Unity assets and other binaries get a smart view. When git also
+    // produced text (a Unity YAML diff, an LFS pointer) the ordinary rows are still emitted,
+    // inside the wrapper's Raw pane, so the toggle loses nothing — partial staging included.
+    const smart = smartDiffKind(file, opts);
+    if (smart) {
+      const hasRaw = !file.binary && file.hunks.length > 0;
+      out.push(smartDiffOpenHtml(file, smart, opts.imageRevs, hasRaw));
+      if (!hasRaw) { out.push(SMART_DIFF_CLOSE); continue; }
+    }
     if (file.binary) {
       // Images get a real comparison instead of a "binary files differ" dead end.
       out.push(isImagePath(file.path)
@@ -816,6 +825,7 @@ function renderDiffUnified(diffText, opts) {
         if (!delRun.length && !addRun.length) i++;
       }
     });
+    if (smart) out.push(SMART_DIFF_CLOSE);
   }
 
   let html = out.join('');
@@ -856,6 +866,12 @@ function renderDiffSplit(diffText, opts) {
     if (!file.headerless) {
       parts.push(`<div class="dsplit-row meta"><div class="dsplit-file">⚔ ${escapeHtml(file.path)}</div></div>`);
       emitted++;
+    }
+    const smart = smartDiffKind(file, opts);
+    if (smart) {
+      const hasRaw = !file.binary && file.hunks.length > 0;
+      parts.push(smartDiffOpenHtml(file, smart, opts.imageRevs, hasRaw));
+      if (!hasRaw) { parts.push(SMART_DIFF_CLOSE); continue; }
     }
     if (file.binary) {
       parts.push(isImagePath(file.path)
@@ -947,6 +963,7 @@ function renderDiffSplit(diffText, opts) {
         newLine += addRun.length;
       }
     });
+    if (smart) parts.push(SMART_DIFF_CLOSE);
   }
 
   let html = (stageable ? partialBarHtml(!!opts.staged) : '') + `<div class="dsplit">${parts.join('')}</div>`;
@@ -1290,7 +1307,10 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
     try {
       diffEl.innerHTML = renderDiff(f.diff, Object.assign({}, opts, {
         // A commit's image is compared against its first parent.
-        imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined
+        imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
+        // The chunk has lost its "diff --git" line, and a binary has no +++/--- lines to
+        // recover the name from — so the list's own path is the only one there is.
+        filePath: f.path
       }));
       hydrateImageDiffs(diffEl);
     } catch (err) {
@@ -1533,7 +1553,8 @@ function rerenderActiveCommitFile(panelEl) {
   try {
     const rrOpts = panelEl._cfileOpts || {};
     diffEl.innerHTML = renderDiff(f.diff, Object.assign({}, rrOpts, {
-      imageRevs: rrOpts.hash ? { oldRev: rrOpts.hash + '^', newRev: rrOpts.hash } : undefined
+      imageRevs: rrOpts.hash ? { oldRev: rrOpts.hash + '^', newRev: rrOpts.hash } : undefined,
+      filePath: f.path
     }));
     hydrateImageDiffs(diffEl);
   } catch (err) {
@@ -1611,6 +1632,8 @@ function imageDiffPlaceholderHtml(filePath, revs) {
 // after any innerHTML assignment; containers already loaded are skipped.
 async function hydrateImageDiffs(root) {
   if (!root) return;
+  // Every diff pane calls this after rendering, so it is also where smart views start.
+  hydrateSmartDiffs(root);
   const nodes = Array.from(root.querySelectorAll('.imgdiff[data-imgdiff="1"]:not(.loaded)'));
   for (const node of nodes) {
     node.classList.add('loaded');   // claim it before awaiting, so a re-entrant call skips it
@@ -1660,8 +1683,12 @@ function renderImageDiff(node, data) {
   const single = !before || !after;
   const kind = !before ? 'added' : (!after ? 'deleted' : 'changed');
 
-  const beforeImg = before ? `<img class="imgdiff-img" src="${before.dataUri}" alt="before" />` : '';
-  const afterImg = after ? `<img class="imgdiff-img" src="${after.dataUri}" alt="after" />` : '';
+  // An LFS image whose object was never downloaded exists, but has no pixels to show.
+  const imgOf = (s, alt) => !s ? '' : s.lfsMissing
+    ? `<div class="imgdiff-absent">LFS object not downloaded — <code>git lfs fetch</code> gets it</div>`
+    : `<img class="imgdiff-img" src="${s.dataUri}" alt="${alt}" />`;
+  const beforeImg = imgOf(before, 'before');
+  const afterImg = imgOf(after, 'after');
 
   const modeBar = single ? '' : `
     <div class="imgdiff-modes">
@@ -1750,6 +1777,253 @@ function renderImageDiff(node, data) {
   });
   if (slider) slider.oninput = applySlider;
   applyMode('side');
+}
+
+// ============================================
+// SMART DIFF (binary, LFS, media, Unity assets)
+// ============================================
+// What to show for a file whose line diff says nothing a person can use:
+//   - an LFS-tracked file, whose diff is the pointer (version / oid / size);
+//   - a binary, whose diff is "Binary files … differ";
+//   - a Unity YAML asset (scene, prefab, material…), whose diff is real text but reads as
+//     thousands of lines of reshuffled fileIDs.
+// Images keep their before/after viewer (now fed the real LFS content by repo:fileBlob);
+// audio and video get players; Unity assets get an object-by-object summary built in main
+// (lib/smart-diff.js); anything else gets the honest facts — sizes and LFS state.
+//
+// The extension lists mirror smartKind in src/main/lib/smart-diff.js.
+const SMART_AUDIO_EXT = new Set(['wav', 'mp3', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus']);
+const SMART_VIDEO_EXT = new Set(['mp4', 'webm', 'ogv', 'mov', 'm4v']);
+const SMART_UNITY_EXT = new Set(['unity', 'prefab', 'asset', 'mat', 'anim', 'controller', 'overridecontroller',
+  'physicmaterial', 'physicsmaterial2d', 'mask', 'flare', 'rendertexture', 'lighting', 'mixer', 'playable', 'signal',
+  'spriteatlas', 'spriteatlasv2', 'terrainlayer', 'brush', 'guiskin', 'fontsettings', 'preset', 'shadervariants',
+  'cubemap', 'giparams', 'lightingdata']);
+const SMART_DIFF_CLOSE = '</div></div>';
+
+function fileExt(p) {
+  const base = String(p || '').split('/').pop();
+  const dot = base.lastIndexOf('.');
+  return dot < 0 ? '' : base.slice(dot + 1).toLowerCase();
+}
+
+// A diff whose every changed line is LFS pointer text: the file's content lives in LFS.
+function isLfsPointerDiff(file) {
+  let n = 0;
+  for (const h of file.hunks) for (const l of h.lines) {
+    if (!/^(version https:\/\/git-lfs\.github\.com\/spec\/v1|oid sha256:[0-9a-f]{64}|size \d+)\s*$/.test(l.text)) return false;
+    n++;
+  }
+  return n > 0;
+}
+
+// 'image' | 'audio' | 'video' | 'unity' | 'binary' | null (render the line diff as usual).
+function smartDiffKind(file, opts) {
+  if (opts && opts.noSmart) return null;
+  // A headerless binary chunk carries no path of its own; the caller's is the right one.
+  if (!file.path && opts && opts.filePath) file.path = opts.filePath;
+  if (!file.path) return null;
+  const ext = fileExt(file.path);
+  if (SMART_UNITY_EXT.has(ext)) return 'unity';
+  if (!file.binary && !isLfsPointerDiff(file)) return null;
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
+  if (SMART_AUDIO_EXT.has(ext)) return 'audio';
+  if (SMART_VIDEO_EXT.has(ext)) return 'video';
+  return 'binary';
+}
+
+// Which pane the toggle last showed. Kept for the session, so stepping through a commit's
+// files does not flip back to the smart view each time someone wanted the raw text.
+let _smartShowRaw = false;
+
+function smartDiffOpenHtml(file, kind, revs, hasRaw) {
+  const oldRev = (revs && revs.oldRev) || 'HEAD';
+  const newRev = (revs && revs.newRev) || 'WORKTREE';
+  const raw = hasRaw && _smartShowRaw;
+  const rawLabel = isLfsPointerDiff(file) ? '≡ LFS pointer' : '≡ Raw diff';
+  const bar = hasRaw
+    ? `<div class="smartdiff-bar">` +
+        `<button class="smartdiff-tab${raw ? '' : ' active'}" type="button" data-smart-view="smart">◈ Smart view</button>` +
+        `<button class="smartdiff-tab${raw ? ' active' : ''}" type="button" data-smart-view="raw">${rawLabel}</button>` +
+      `</div>`
+    : '';
+  const body = kind === 'image'
+    ? imageDiffPlaceholderHtml(file.path, revs)
+    : `<div class="smartdiff-load" data-smartload="1"><span class="loading"></span> Reading both versions…</div>`;
+  return `<div class="smartdiff" data-smart="${kind}" data-path="${escapeHtml(file.path)}"` +
+      ` data-oldrev="${escapeHtml(oldRev)}" data-newrev="${escapeHtml(newRev)}">` + bar +
+    `<div class="smartdiff-body"${raw ? ' hidden' : ''}>${body}</div>` +
+    `<div class="smartdiff-raw"${hasRaw && !raw ? ' hidden' : ''}>`;
+}
+
+// Wire the toggles and load every smart view under `root`. Called from hydrateImageDiffs,
+// which every diff pane already calls after rendering, so no call site needs to know.
+function hydrateSmartDiffs(root) {
+  if (!root) return;
+  root.querySelectorAll('.smartdiff:not(.wired)').forEach(node => {
+    node.classList.add('wired');
+    node.querySelectorAll('.smartdiff-tab').forEach(btn => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const raw = btn.dataset.smartView === 'raw';
+        _smartShowRaw = raw;
+        node.querySelectorAll('.smartdiff-tab').forEach(b => b.classList.toggle('active', b === btn));
+        node.querySelector('.smartdiff-body').hidden = raw;
+        node.querySelector('.smartdiff-raw').hidden = !raw;
+      };
+    });
+    const load = node.querySelector('.smartdiff-load[data-smartload="1"]');
+    if (load) loadSmartDiff(node, load);
+  });
+}
+
+async function loadSmartDiff(node, target) {
+  const kind = node.dataset.smart;
+  const filePath = node.dataset.path, oldRev = node.dataset.oldrev, newRev = node.dataset.newrev;
+  // The loading box becomes the view's frame once there is something to put in it.
+  const done = () => { target.className = 'smartdiff-loaded'; };
+  try {
+    if (kind === 'audio' || kind === 'video') {
+      const [b, a] = await Promise.all([gs.fileBlob({ rev: oldRev, path: filePath }), gs.fileBlob({ rev: newRev, path: filePath })]);
+      done();
+      renderMediaDiff(target, kind, filePath, b && b.ok ? b.data : null, a && a.ok ? a.data : null);
+      return;
+    }
+    const r = await gs.smartDiff({ path: filePath, oldRev, newRev });
+    if (!r.ok) { target.innerHTML = `<div class="imgdiff-error">${escapeHtml(r.error || 'Could not read this file')}</div>`; return; }
+    done();
+    if (r.data.kind === 'unity') renderUnityDiff(target, filePath, r.data);
+    else target.innerHTML = smartBinaryCardHtml(filePath, r.data);
+  } catch (err) {
+    target.innerHTML = `<div class="imgdiff-error">Could not read this file: ${escapeHtml(err.message || String(err))}</div>`;
+  }
+}
+
+// added / deleted / changed, from which sides exist.
+const smartChangeKind = (b, a) => (!b || !b.exists) ? 'added' : ((!a || !a.exists) ? 'deleted' : 'changed');
+
+function smartSideText(s) {
+  if (!s || !s.exists) return '<span class="sdiff-absent">absent</span>';
+  let t = escapeHtml(formatBytes(s.bytes));
+  if (s.lfs) t += ` <span class="sdiff-lfs" title="sha256 ${escapeHtml(s.lfs.oid)}">LFS ${escapeHtml(s.lfs.oid.slice(0, 10))}${s.lfsMissing ? ' · not downloaded' : ''}</span>`;
+  return t;
+}
+
+// The facts card: what the file is, how big each side is, and where its content lives.
+function smartBinaryCardHtml(filePath, d, note) {
+  const kind = smartChangeKind(d.before, d.after);
+  const ext = fileExt(filePath);
+  let delta = '';
+  if (d.before.exists && d.after.exists) {
+    const diff = d.after.bytes - d.before.bytes;
+    const pct = d.before.bytes ? Math.round(diff / d.before.bytes * 1000) / 10 : null;
+    delta = diff === 0 ? 'same size' : `${diff > 0 ? '+' : '−'}${formatBytes(Math.abs(diff))}${pct !== null ? ` (${diff > 0 ? '+' : ''}${pct}%)` : ''}`;
+  }
+  const missing = (d.before.lfsMissing || d.after.lfsMissing)
+    ? `<div class="sdiff-note">An LFS object isn't in the local store, so its content can't be read. <code>git lfs fetch</code> (or a pull) downloads it.</div>` : '';
+  return `<div class="sdiff-card">` +
+      `<div class="imgdiff-head"><span class="imgdiff-kind ${kind}">${kind}</span>` +
+        `<span class="imgdiff-name">${escapeHtml(filePath)}</span>` +
+        `<span class="imgdiff-meta">${ext ? escapeHtml(ext.toUpperCase()) + ' · ' : ''}binary${d.before.lfs || d.after.lfs ? ' · Git LFS' : ''}</span></div>` +
+      `<div class="sdiff-sides">` +
+        `<div class="sdiff-side before"><div class="imgdiff-pane-label">before</div><div class="sdiff-val">${smartSideText(d.before)}</div></div>` +
+        `<div class="sdiff-side after"><div class="imgdiff-pane-label">after</div><div class="sdiff-val">${smartSideText(d.after)}</div></div>` +
+        (delta ? `<div class="sdiff-side delta"><div class="imgdiff-pane-label">change</div><div class="sdiff-val">${escapeHtml(delta)}</div></div>` : '') +
+      `</div>` + missing +
+      `<div class="sdiff-note">${note || 'Git stores this file as opaque bytes, so there are no lines to compare — only the two versions.'}</div>` +
+    `</div>`;
+}
+
+// Audio and video: a player for each side.
+function renderMediaDiff(node, kind, filePath, before, after) {
+  const pane = (s, label) => {
+    let inner;
+    if (!s || !s.exists) inner = `<div class="imgdiff-absent">${label === 'before' ? 'did not exist' : 'deleted'}</div>`;
+    else if (s.lfsMissing) inner = `<div class="imgdiff-absent">LFS object not downloaded</div>`;
+    else if (s.tooLarge) inner = `<div class="imgdiff-absent">too large to preview (${escapeHtml(formatBytes(s.bytes))})</div>`;
+    else inner = kind === 'video'
+      ? `<video class="sdiff-media" controls preload="metadata" src="${s.dataUri}"></video>`
+      : `<audio class="sdiff-media" controls preload="metadata" src="${s.dataUri}"></audio>`;
+    return `<div class="imgdiff-pane ${label}"><div class="imgdiff-pane-label">${label} · ${s && s.exists ? escapeHtml(formatBytes(s.bytes)) : 'absent'}</div><div class="sdiff-media-frame">${inner}</div></div>`;
+  };
+  const k = smartChangeKind(before, after);
+  node.innerHTML = `<div class="imgdiff-head"><span class="imgdiff-kind ${k}">${k}</span><span class="imgdiff-name">${escapeHtml(filePath)}</span>` +
+      `<span class="imgdiff-meta">${kind}</span></div>` +
+    `<div class="imgdiff-stage mode-side">${pane(before, 'before')}${pane(after, 'after')}</div>`;
+}
+
+// m_LocalPosition → Local Position; nested paths joined with ›.
+function prettyUnityProp(p) {
+  const word = (s) => s.replace(/^m_/, '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase());
+  const ov = /^override (\S+)(?: @(-?\d+))?$/.exec(p);
+  if (ov) return 'Override › ' + ov[1].split('.').map(word).join(' › ');
+  return p.split('.').map(seg => seg.replace(/^([^[]+)/, (m) => word(m))).join(' › ');
+}
+function prettyUnityValue(v) {
+  if (v === null || v === undefined) return '<span class="sdiff-absent">—</span>';
+  if (/^\{fileID: 0\}$/.test(v)) return '<span class="sdiff-absent">None</span>';
+  const ref = /^\{fileID: (-?\d+)(?:, guid: ([0-9a-f]{32}), type: \d+)?\}$/.exec(v);
+  if (ref) return `<span class="sdu-ref">${ref[2] ? 'asset ' + ref[2].slice(0, 8) + '…' : 'object #' + ref[1]}</span>`;
+  const s = String(v);
+  return s.length > 240 ? `<span title="${escapeHtml(s)}">${escapeHtml(s.slice(0, 240))}…</span>` : escapeHtml(s);
+}
+
+const SDU_MARK = { added: '+', removed: '−', modified: '~' };
+
+// A Unity scene/prefab/asset as objects: one block per GameObject (or free-standing object),
+// the components that changed inside it, and each changed property before → after.
+function renderUnityDiff(node, filePath, d) {
+  const k = smartChangeKind(d.before, d.after);
+  const head = `<div class="imgdiff-head"><span class="imgdiff-kind ${k}">${k}</span><span class="imgdiff-name">${escapeHtml(filePath)}</span>` +
+    `<span class="imgdiff-meta">Unity asset · ${smartSideText(d.before)} → ${smartSideText(d.after)}</span></div>`;
+  if (!d.unity) {
+    let why;
+    if (d.unityBinary) why = 'This asset is serialized as <b>binary</b>, so there are no objects to compare. Set <i>Project Settings → Editor → Asset Serialization</i> to <b>Force Text</b> to get object-level diffs.';
+    else if (d.before.lfsMissing || d.after.lfsMissing) why = 'This asset is stored in Git LFS and the object isn\'t in the local store. <code>git lfs fetch</code> (or a pull) downloads it.';
+    else if (d.before.tooLarge || d.after.tooLarge) why = 'This asset is too large to compare here.';
+    else why = 'This asset could not be read as Unity YAML.';
+    node.innerHTML = smartBinaryCardHtml(filePath, d, why);
+    return;
+  }
+  const u = d.unity;
+  if (!u.groups.length) {
+    node.innerHTML = head + `<div class="sdiff-note">No object in this asset changed — only formatting or bookkeeping (component and child order).</div>`;
+    return;
+  }
+  const chip = (n, label, cls) => n ? `<span class="sdu-chip ${cls}">${n} ${label}</span>` : '';
+  const groups = u.groups.map((g, gi) => {
+    const comps = g.components.map(c => {
+      const rows = c.changes.map(ch =>
+        `<tr><td class="sdu-prop" title="${escapeHtml(ch.prop)}">${escapeHtml(prettyUnityProp(ch.prop))}</td>` +
+        (c.status === 'modified'
+          ? `<td class="sdu-before">${prettyUnityValue(ch.before)}</td><td class="sdu-arrow">→</td><td class="sdu-after">${prettyUnityValue(ch.after)}</td>`
+          : `<td class="sdu-${c.status === 'added' ? 'after' : 'before'}" colspan="3">${prettyUnityValue(c.status === 'added' ? ch.after : ch.before)}</td>`) +
+        `</tr>`).join('');
+      const more = c.totalChanges > c.changes.length ? `<div class="sdu-more">…and ${c.totalChanges - c.changes.length} more</div>` : '';
+      const n = c.status === 'modified' ? `${c.totalChanges} change${c.totalChanges === 1 ? '' : 's'}` : `${c.totalChanges} propert${c.totalChanges === 1 ? 'y' : 'ies'}`;
+      return `<details class="sdu-comp ${c.status}"${c.status === 'modified' ? ' open' : ''}>` +
+        `<summary><span class="sdu-mark ${c.status}">${SDU_MARK[c.status]}</span><span class="sdu-ctype">${escapeHtml(c.type)}</span><span class="sdu-count">${n}</span></summary>` +
+        (rows ? `<table class="sdu-props">${rows}</table>` : '') + more + `</details>`;
+    }).join('');
+    const search = [g.name, g.path, g.kind, ...g.components.map(c => c.type + ' ' + c.changes.map(x => x.prop).join(' '))].join(' ').toLowerCase();
+    return `<details class="sdu-group ${g.status}"${gi < 25 ? ' open' : ''} data-search="${escapeHtml(search)}">` +
+      `<summary><span class="sdu-mark ${g.status}">${SDU_MARK[g.status]}</span>` +
+        `<span class="sdu-title">${g.path ? `<span class="sdu-path">${escapeHtml(g.path)}/</span>` : ''}<span class="sdu-name">${escapeHtml(g.name)}</span></span>` +
+        `<span class="sdu-kind">${escapeHtml(g.kind || '')}</span></summary>` +
+      `<div class="sdu-comps">${comps}</div></details>`;
+  }).join('');
+  node.innerHTML = head +
+    `<div class="sdu-summary">${chip(u.counts.added, 'added', 'added')}${chip(u.counts.removed, 'removed', 'removed')}${chip(u.counts.modified, 'modified', 'modified')}` +
+      `<input type="search" class="sdu-filter commit-search" placeholder="Filter objects, components, properties…" /></div>` +
+    `<div class="sdu-groups">${groups}</div>` +
+    (u.truncated ? `<div class="sdiff-note">Showing the first ${u.groups.length} of ${u.counts.objects} changed objects.</div>` : '');
+  const filter = node.querySelector('.sdu-filter');
+  if (filter) filter.oninput = () => {
+    const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    node.querySelectorAll('.sdu-group').forEach(el => {
+      el.style.display = terms.every(t => el.dataset.search.includes(t)) ? '' : 'none';
+    });
+  };
 }
 
 // The diff parser and the partial-staging patch synthesizer are pure, and the `reverse`

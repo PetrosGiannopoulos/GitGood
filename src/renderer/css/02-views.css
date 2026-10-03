@@ -2070,3 +2070,124 @@ body.diff-popout-open .toast-container { z-index: 9710; }
 @media (max-width: 900px) {
   .imgdiff-stage.mode-side { grid-template-columns: 1fr; }
 }
+
+/* ============================================
+   SMART DIFF — binaries, LFS, media, Unity assets (04-diff.js)
+   ============================================ */
+/* Inside the split view this sits in .dsplit, a flex column painted with a centre
+   channel; the wrapper is opaque, and its raw pane is a column of ordinary split rows. */
+.smartdiff { background: var(--bg); white-space: normal; }
+.smartdiff-raw { display: flex; flex-direction: column; }
+.smartdiff-raw[hidden], .smartdiff-body[hidden] { display: none; }
+.smartdiff-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 0;
+  border-top: 1px solid var(--border);
+}
+.smartdiff-tab {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.smartdiff-tab:hover { color: var(--gold-accent); border-color: var(--accent); }
+.smartdiff-tab.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 26%, var(--bg-panel));
+  border-color: var(--accent);
+}
+.smartdiff-body > .smartdiff-load,
+.smartdiff-body > .sdiff-card,
+.smartdiff-body > .imgdiff { border-left: 3px solid var(--accent); }
+.smartdiff-load {
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted-text);
+}
+.smartdiff-loaded { padding: 12px; border-left: 3px solid var(--accent); }
+.smartdiff-loaded > .sdiff-card { padding: 0; }
+
+.sdiff-card { padding: 12px; }
+.sdiff-sides { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.sdiff-side {
+  flex: 1 1 160px;
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+.sdiff-side.before .imgdiff-pane-label { color: color-mix(in srgb, var(--crusader-red) 70%, var(--muted-text)); }
+.sdiff-side.after  .imgdiff-pane-label { color: color-mix(in srgb, var(--added) 70%, var(--muted-text)); }
+.sdiff-val { font-family: var(--font-mono); font-size: 13px; color: var(--text); }
+.sdiff-lfs {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  color: var(--gold-accent);
+  border: 1px solid color-mix(in srgb, var(--gold-accent) 50%, transparent);
+  border-radius: 2px;
+}
+.sdiff-absent { color: var(--muted-text); font-style: italic; }
+.sdiff-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; line-height: 1.5; }
+.sdiff-note code, .imgdiff-absent code { font-family: var(--font-mono); color: var(--gold-accent); }
+.sdiff-media-frame { padding: 10px; background: var(--bg-panel); border: 1px solid var(--border); }
+.sdiff-media { width: 100%; max-height: 48vh; display: block; }
+
+/* Unity asset: objects → components → properties. */
+.sdu-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.sdu-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+.sdu-chip.added    { color: var(--added); border-color: var(--added); }
+.sdu-chip.removed  { color: var(--crusader-red-bright); border-color: var(--crusader-red); }
+.sdu-chip.modified { color: var(--gold-accent); border-color: var(--gold-accent); }
+.sdu-filter { margin: 0 0 0 auto; width: 260px; max-width: 100%; }
+.sdu-groups { display: flex; flex-direction: column; gap: 4px; }
+.sdu-group { border: 1px solid var(--border); background: var(--bg-panel); }
+.sdu-group > summary, .sdu-comp > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.sdu-group > summary::-webkit-details-marker, .sdu-comp > summary::-webkit-details-marker { display: none; }
+.sdu-group > summary::before, .sdu-comp > summary::before { content: '▸'; color: var(--muted-text); font-size: 10px; }
+.sdu-group[open] > summary::before, .sdu-comp[open] > summary::before { content: '▾'; }
+.sdu-group > summary:hover { background: var(--bg-raised); }
+.sdu-mark { font-weight: 700; width: 10px; text-align: center; }
+.sdu-mark.added { color: var(--added); }
+.sdu-mark.removed { color: var(--crusader-red-bright); }
+.sdu-mark.modified { color: var(--gold-accent); }
+.sdu-name { color: var(--text); font-weight: 600; }
+.sdu-group.removed > summary .sdu-name { text-decoration: line-through; text-decoration-color: var(--crusader-red); }
+.sdu-path { color: var(--muted-text); }
+.sdu-kind, .sdu-count { color: var(--muted-text); font-size: 10px; margin-left: auto; }
+.sdu-comps { padding: 0 10px 8px 26px; }
+.sdu-comp { border-left: 2px solid var(--border); margin-top: 4px; }
+.sdu-comp.added { border-left-color: var(--added); }
+.sdu-comp.removed { border-left-color: var(--crusader-red); }
+.sdu-comp.modified { border-left-color: var(--gold-accent); }
+.sdu-comp > summary { padding: 4px 8px; font-size: 11px; }
+.sdu-ctype { color: var(--text); }
+.sdu-props { width: 100%; border-collapse: collapse; margin: 2px 0 4px 10px; font-family: var(--font-mono); font-size: 11px; }
+.sdu-props td { padding: 2px 8px 2px 0; vertical-align: top; word-break: break-word; }
+.sdu-prop { color: var(--text-dim); white-space: nowrap; width: 1%; }
+.sdu-before { color: color-mix(in srgb, var(--removed) 85%, var(--text)); }
+.sdu-after { color: color-mix(in srgb, var(--added) 85%, var(--text)); }
+.sdu-arrow { color: var(--muted-text); width: 1%; }
+.sdu-ref { color: var(--gold-accent); }
+.sdu-more { font-size: 11px; color: var(--muted-text); padding: 0 0 4px 18px; font-style: italic; }
