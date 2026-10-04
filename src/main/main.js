@@ -12,6 +12,7 @@ const { parsePushPorcelain } = require('./lib/push-porcelain');
 const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
+const { mergeUnityYaml } = require('./lib/unity-merge');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -1066,13 +1067,15 @@ ipcMain.handle('repo:merge', wrap(async (_, opts) => {
   const g = ensureGit();
   // opts can be a string (branch name, legacy) or an object: { branch, strategy, message }
   // strategy: 'auto' | 'ff-only' | 'no-ff' | 'squash'
-  let branch, strategy = 'auto', message;
+  // smartUnity: after git merges, re-merge conflicted Unity YAML assets object by object.
+  let branch, strategy = 'auto', message, smartUnity = false;
   if (typeof opts === 'string') {
     branch = opts;
   } else {
     branch = opts.branch;
     strategy = opts.strategy || 'auto';
     message = opts.message;
+    smartUnity = !!opts.smartUnity;
   }
   if (!branch) throw new Error('Branch name required');
 
@@ -1088,36 +1091,64 @@ ipcMain.handle('repo:merge', wrap(async (_, opts) => {
   args.push(branch);
 
   try {
-    const result = await g.raw(args);
+    let result;
+    try { result = await g.raw(args); } catch (e) {
+      // simple-git rejects instead when git also wrote to stderr — which a conflicted merge
+      // of LFS files does (verified). If the merge did stop on conflicts, carry on as for
+      // any other conflict, so the smart merge below still gets its turn.
+      let st = null;
+      try { st = await g.status(); } catch (_) {}
+      if (!st || !(st.conflicted || []).length) throw e;
+      result = e.message || String(e);
+    }
 
     // simple-git's raw() does NOT throw when `git merge` exits non-zero on conflicts —
     // it returns the output text. The most reliable, locale-independent signal is the
     // working tree itself: if any files are unmerged, the merge conflicted.
-    const postStatus = await g.status();
+    let postStatus = await g.status();
+    let smart = null;
+    if (smartUnity && (postStatus.conflicted || []).length) {
+      smart = await smartResolveUnityConflicts(postStatus.conflicted);
+      if (smart.resolved.length) postStatus = await g.status();
+    }
+    const smartNote = smart && smart.resolved.length
+      ? `Smart merge resolved ${smart.resolved.length} Unity file(s) object by object.` : '';
     if ((postStatus.conflicted || []).length > 0) {
       const conflicted = postStatus.conflicted;
       const e = new Error(`Merge conflict — ${conflicted.length} file(s) need resolution:\n${conflicted.join('\n')}`);
       e.conflicted = conflicted;
       e.isConflict = true;
+      e.smartNote = smartNote;
       throw e;
     }
-    // Also catch the text signal in case a conflict left the tree in an odd state.
-    if (/^CONFLICT|CONFLICT \(|Automatic merge failed|fix conflicts/im.test(result || '')) {
+    // Also catch the text signal in case a conflict left the tree in an odd state. Not after
+    // a smart merge: git's output still says CONFLICT for the files it went on to resolve.
+    if (!smart && /^CONFLICT|CONFLICT \(|Automatic merge failed|fix conflicts/im.test(result || '')) {
       const e = new Error('Merge conflict — resolve the conflicts, stage the files, then commit.');
       e.conflicted = [];
       e.isConflict = true;
       throw e;
     }
 
+    // Every conflict was resolved object by object, so finish the merge the way git would
+    // have if it had merged cleanly. (Squash commits below, as it always does.)
+    if (smart && strategy !== 'squash') {
+      try { await g.raw(['commit', '--no-edit']); } catch (e) {
+        // Worded without "conflict": the catch below would re-read it as one.
+        throw new Error(`${smartNote} Every file is resolved and staged, but the merge commit failed — the merge is still in progress; commit it from the Changes tab.\n\n${e.message || e}`);
+      }
+    }
+    const smartSummary = smart ? { resolved: smart.resolved, partial: smart.partial, skipped: smart.skipped } : null;
+
     // For squash, the merge stages changes but doesn't commit — we auto-commit with the squash message
     if (strategy === 'squash') {
       const commitMsg = message || `Squashed merge of '${branch}'`;
       try { await g.commit(commitMsg); } catch (e) {
         // Nothing to commit (empty squash) or other — surface it
-        return { output: result, note: 'Squash staged but commit failed: ' + (e.message || e) };
+        return { output: result, smart: smartSummary, note: 'Squash staged but commit failed: ' + (e.message || e) };
       }
     }
-    return { output: result };
+    return { output: result, smart: smartSummary };
   } catch (err) {
     // Provide structured conflict info if applicable
     const msg = err.message || String(err);
@@ -1127,7 +1158,8 @@ ipcMain.handle('repo:merge', wrap(async (_, opts) => {
       if (!conflicted || !conflicted.length) {
         try { conflicted = (await g.status()).conflicted || []; } catch (e) { conflicted = conflicted || []; }
       }
-      const e = new Error(`Merge conflict — ${conflicted.length} file(s) need resolution:\n${conflicted.join('\n')}\n\nResolve the conflicts, stage the files, then commit. Or abort to cancel.`);
+      const note = err.smartNote ? `\n\n${err.smartNote}` : '';
+      const e = new Error(`Merge conflict — ${conflicted.length} file(s) need resolution:\n${conflicted.join('\n')}${note}\n\nResolve the conflicts, stage the files, then commit. Or abort to cancel.`);
       e.conflicted = conflicted;
       throw e;
     }
@@ -1154,18 +1186,20 @@ ipcMain.handle('repo:mergePreview', wrap(async (_, branch) => {
     ahead = a || 0; behind = b || 0;
   } catch (e) {}
 
-  // Can we fast-forward? (HEAD is ancestor of branch)
-  let canFastForward = false;
-  try {
-    await g.raw(['merge-base', '--is-ancestor', 'HEAD', branch]);
-    canFastForward = true;
-  } catch (e) { canFastForward = false; }
-
   // Find merge base for visualization
   let mergeBase = '';
   try {
     mergeBase = (await g.raw(['merge-base', 'HEAD', branch])).trim();
   } catch (e) {}
+
+  // Can we fast-forward? (HEAD is ancestor of branch, i.e. HEAD is the merge base.) Not via
+  // `merge-base --is-ancestor`: its whole answer is the exit code, which simple-git resolves
+  // rather than rejects, so it read as "yes" for every branch.
+  let canFastForward = false;
+  try {
+    const head = (await g.raw(['rev-parse', 'HEAD'])).trim();
+    canFastForward = !!mergeBase && mergeBase === head;
+  } catch (e) { canFastForward = false; }
 
   // Subjects of commits that would be merged in
   let incoming = [];
@@ -1177,8 +1211,185 @@ ipcMain.handle('repo:mergePreview', wrap(async (_, branch) => {
     });
   } catch (e) {}
 
-  return { ahead, behind, canFastForward, mergeBase, incoming };
+  // Which files both sides changed, which of those git would leave conflicted, and what a
+  // smart Unity merge would make of each. Only a real merge can conflict.
+  let analysis = null;
+  if (mergeBase && !canFastForward && behind > 0) {
+    try { analysis = await analyzeMergeFiles(mergeBase, branch); } catch (e) { analysis = { error: e.message || String(e) }; }
+  }
+
+  return { ahead, behind, canFastForward, mergeBase, incoming, analysis };
 }));
+
+// ============================================
+// SMART UNITY MERGE — scenes and prefabs merged object by object
+// ============================================
+// Git merges a Unity asset as lines, which fails exactly where a shared scene needs it to
+// work: two people adding objects (both append at the end), adding children to one parent,
+// or editing neighbouring properties all touch the same lines. An LFS-tracked asset is worse
+// — git merges the *pointer*, whose oid line both sides changed, so it always conflicts.
+// lib/unity-merge.js merges by fileID and property instead; this half finds the three
+// versions (LFS content from the local store, or through git-lfs while merging) and writes
+// the result back through the index.
+
+// How many Unity files the preview merges in memory. Each costs three blob reads and a
+// parse; past this the rows still show what git thinks, just without a verdict.
+const SMART_MERGE_PREVIEW_MAX = 40;
+const utf8Strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+// One LFS object's content via git-lfs itself: `git lfs smudge` reads a pointer on stdin,
+// downloads the object into the local store if needed, and writes the content. Only used
+// while merging — the preview reports a missing object rather than starting a download.
+function lfsSmudgeBytes(pointer, filePath) {
+  return new Promise((resolve, reject) => {
+    const proc = require('child_process').spawn('git', ['lfs', 'smudge', '--', filePath], {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0' })
+    });
+    const chunks = [];
+    let err = '';
+    const timer = setTimeout(() => proc.kill(), 10 * 60 * 1000);
+    proc.stdout.on('data', d => chunks.push(d));
+    proc.stderr.on('data', d => { if (err.length < 4096) err += String(d); });
+    proc.on('error', e => { clearTimeout(timer); reject(e); });
+    proc.on('close', code => {
+      clearTimeout(timer);
+      code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(err.trim() || `git lfs smudge exited ${code}`));
+    });
+    proc.stdin.end(pointer);
+  });
+}
+
+// One side of a Unity merge as text: { text, lfs } | { absent, lfs } | { status, lfs }, where
+// status says why it cannot be merged as YAML: lfsMissing | tooLarge | binary | encoding.
+async function unityMergeSide(rev, filePath, download) {
+  const r = await readRevBytes(rev, filePath, MAX_UNITY_BYTES);
+  const lfs = !!r.lfs;
+  if (!r.exists) return { absent: true, lfs };
+  let buf = r.buf;
+  if (r.lfsMissing) {
+    if (!download) return { status: 'lfsMissing', lfs };
+    if (r.lfs.size > MAX_UNITY_BYTES) return { status: 'tooLarge', lfs };
+    buf = await lfsSmudgeBytes(`${LFS_POINTER_PREFIX}\noid sha256:${r.lfs.oid}\nsize ${r.lfs.size}\n`, filePath);
+    // A git-lfs that could not fetch (or was told to skip smudging) hands the pointer back.
+    if (parseLfsPointer(buf.subarray(0, 1024).toString('utf8'))) return { status: 'lfsMissing', lfs };
+  } else if (r.tooLarge) return { status: 'tooLarge', lfs };
+  // Asset Serialization set to Binary/Mixed: git's own rule, a NUL in the first 8000 bytes.
+  if (buf.subarray(0, 8000).includes(0)) return { status: 'binary', lfs };
+  // Strict, so a file that is not valid UTF-8 is refused rather than rewritten with U+FFFD.
+  try { return { text: utf8Strict.decode(buf), lfs }; } catch (e) { return { status: 'encoding', lfs }; }
+}
+
+// Merge one asset three ways; revs are readRevBytes revisions ({ base, ours, theirs }).
+// → { status: clean | conflict | deleted | unsupported | <side status>, lfs, text?, conflicts?, stats? }
+async function smartMergeUnityFile(filePath, revs, download) {
+  const b = await unityMergeSide(revs.base, filePath, download);
+  const o = await unityMergeSide(revs.ours, filePath, download);
+  const t = await unityMergeSide(revs.theirs, filePath, download);
+  const lfs = b.lfs || o.lfs || t.lfs;
+  for (const side of [o, t, b]) if (side.status) return { status: side.status, lfs };
+  // Deleted on one side: a keep-or-delete choice, which the conflict panel already offers.
+  if (o.absent || t.absent) return { status: 'deleted', lfs };
+  const r = mergeUnityYaml(b.absent ? '' : b.text, o.text, t.text);
+  if (!r.ok) return { status: 'unsupported', lfs, reason: r.reason };
+  return {
+    status: r.clean ? 'clean' : 'conflict', lfs, text: r.text, stats: r.stats,
+    conflicts: r.conflicts.slice(0, 50), conflictCount: r.conflicts.length,
+  };
+}
+
+// The preview's per-file table. `theirs` is the branch being merged in.
+async function analyzeMergeFiles(base, theirs) {
+  const numstat = async (to) => {
+    const r = await gitRun(['diff', '--numstat', '--no-renames', '-z', base, to]);
+    if (r.code !== 0) throw new Error(r.err.trim() || 'git diff failed');
+    const changed = new Map();   // path → binary?
+    for (const rec of r.out.split('\0')) {
+      const m = /^(-|\d+)\t(-|\d+)\t([\s\S]+)$/.exec(rec);
+      if (m) changed.set(m[3], m[1] === '-');
+    }
+    return changed;
+  };
+  const [mine, incoming] = await Promise.all([numstat('HEAD'), numstat(theirs)]);
+
+  // What git itself would leave conflicted: merge-tree runs the real merge in memory
+  // (git 2.38+) without touching the index or working tree. Exit 1 = conflicts, and the
+  // output is then the tree id followed by the conflicted paths (verified). Older git
+  // rejects the flags, and null means "unknown" rather than "clean".
+  let conflicted = null;
+  const mt = await gitRun(['merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', 'HEAD', theirs], null, 120000);
+  if (mt.code === 0 || mt.code === 1) {
+    conflicted = new Set(mt.code === 1 ? mt.out.split('\0').filter(Boolean).slice(1) : []);
+  }
+
+  const both = [...incoming.keys()].filter(p => mine.has(p));
+  const paths = [...new Set([...both, ...(conflicted || [])])].sort();
+  const lfsPaths = new Set();
+  if (paths.length) {
+    // Over stdin, so a long list never meets the command-line cap.
+    const ca = await gitRun(['check-attr', '--stdin', '-z', 'filter'], null, 30000, paths.join('\0') + '\0');
+    const f = ca.out.split('\0');
+    for (let i = 0; i + 2 < f.length; i += 3) if (f[i + 2] === 'lfs') lfsPaths.add(f[i]);
+  }
+
+  const files = paths.slice(0, 300).map(p => ({
+    path: p,
+    kind: smartKind(p) === 'unity' ? 'unity' : (lfsPaths.has(p) || incoming.get(p) || mine.get(p)) ? 'binary' : 'text',
+    lfs: lfsPaths.has(p),
+    gitConflict: conflicted ? conflicted.has(p) : null,
+  }));
+
+  let analysed = 0;
+  for (const f of files) {
+    if (f.kind !== 'unity' || f.gitConflict === false) continue;
+    if (analysed++ >= SMART_MERGE_PREVIEW_MAX) { f.smart = { status: 'skipped' }; continue; }
+    try {
+      const r = await smartMergeUnityFile(f.path, { base, ours: 'HEAD', theirs }, false);
+      delete r.text;   // the verdict crosses IPC, not the merged scene
+      f.smart = r;
+      if (r.lfs) f.lfs = true;
+    } catch (e) { f.smart = { status: 'error', error: e.message || String(e) }; }
+  }
+  return { files, total: paths.length, truncated: paths.length > files.length, mergeTree: conflicted !== null };
+}
+
+// After `git merge` stopped on conflicts: re-merge each conflicted Unity asset from its
+// index stages (:1 base, :2 ours, :3 theirs).
+//  - fully merged → written, staged, and re-checked-out from the index, so line endings
+//    (core.autocrlf) and an LFS file's smudged form come out exactly as a checkout writes
+//    them (`git add` runs the LFS clean filter, so a pointer is what gets staged);
+//  - real conflicts left → the merged text is written with markers only around the
+//    disputed properties, and the file stays unmerged for the hunk editor. Only under the
+//    editor's size cap: past it the editor cannot open the file, and leaving git's own
+//    result keeps the side-picker working.
+async function smartResolveUnityConflicts(paths) {
+  const resolved = [], partial = [], skipped = [];
+  for (const p of paths) {
+    if (smartKind(p) !== 'unity') continue;
+    let r;
+    try { r = await smartMergeUnityFile(p, { base: ':1', ours: ':2', theirs: ':3' }, true); }
+    catch (e) { skipped.push({ path: p, status: 'error', error: e.message || String(e) }); continue; }
+    const abs = path.join(currentRepoPath, p);
+    try {
+      if (r.status === 'clean') {
+        fs.writeFileSync(abs, r.text, 'utf8');
+        await gitWithEnv(['add', '--', p], { GIT_LITERAL_PATHSPECS: '1' });
+        // Unlinked first: checkout-index -f skips a file whose stat already matches the
+        // fresh index entry (verified), which would leave the LF text just written; -u
+        // refreshes the entry's stat data, without which status reports the file modified.
+        fs.unlinkSync(abs);
+        await gitWithEnv(['checkout-index', '-f', '-u', '--', p]);
+        resolved.push({ path: p, stats: r.stats, lfs: r.lfs });
+      } else if (r.status === 'conflict' && Buffer.byteLength(r.text, 'utf8') <= CONFLICT_TEXT_MAX_BYTES) {
+        fs.writeFileSync(abs, r.text, 'utf8');
+        partial.push({ path: p, stats: r.stats, lfs: r.lfs, conflicts: r.conflicts, conflictCount: r.conflictCount });
+      } else {
+        skipped.push({ path: p, status: r.status, lfs: r.lfs, conflictCount: r.conflictCount || 0 });
+      }
+    } catch (e) { skipped.push({ path: p, status: 'error', error: e.message || String(e) }); }
+  }
+  return { resolved, partial, skipped };
+}
 
 ipcMain.handle('repo:cherryPick', wrap(async (_, hash) => {
   const g = ensureGit();

@@ -2088,6 +2088,87 @@ async function runRewriteCommitPaths(opts) {
 // ============================================
 // SMART MERGE MODAL
 // ============================================
+
+// The "contested files" table: every file both sides changed since the merge base, with what
+// git's line merge will do (from `merge-tree`, run in memory by repo:mergePreview) and, for
+// Unity assets git cannot merge, what the object-level merge would make of it.
+// → { html, smartRelevant } — smartRelevant: a Unity asset is among git's conflicts (or git
+// is too old to say), so the smart-merge option is worth offering.
+function mergeContestedHtml(analysis) {
+  if (!analysis) return { html: '', smartRelevant: false };
+  if (analysis.error) {
+    return { html: `<p class="merge-contested-summary">Could not analyse contested files: ${escapeHtml(analysis.error)}</p>`, smartRelevant: false };
+  }
+  const files = analysis.files || [];
+  if (!files.length) {
+    return { html: `<p class="merge-contested-summary">✓ No file was changed on both sides — nothing can conflict.</p>`, smartRelevant: false };
+  }
+
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const where = (c) => [c.object, c.type, c.property].filter(Boolean).join(' › ') || 'an object';
+  const verdict = (f) => {
+    if (f.gitConflict === false) return ['ok', '✓ Git merges it line by line — the changes do not overlap'];
+    if (f.kind === 'unity') {
+      const s = f.smart || {};
+      const st = s.stats || {};
+      const parts = [];
+      if (st.fromTheirs) parts.push(`${st.fromTheirs} from them`);
+      if (st.fromOurs) parts.push(`${st.fromOurs} from you`);
+      if (st.merged) parts.push(`${st.merged} merged property by property`);
+      const objs = parts.length ? ` (objects: ${parts.join(', ')})` : '';
+      switch (s.status) {
+        case 'clean': return ['smart', `⚜ Smart merge resolves it${objs}${f.lfs ? ' — git alone would conflict on the LFS pointer' : ''}`];
+        case 'conflict': return ['warn', `⚔ ${s.conflictCount || 0} ${s.conflictCount === 1 ? 'property' : 'properties'} changed on both sides; smart merge settles the rest${objs}`];
+        case 'lfsMissing': return ['', 'LFS content not downloaded yet — smart merge will fetch it while merging, then decide'];
+        case 'binary': return ['warn', 'Saved with Binary serialization — set Asset Serialization to Force Text to merge it; you will pick one side'];
+        case 'tooLarge': return ['warn', 'Too large to merge in memory — you will pick one side'];
+        case 'encoding': return ['warn', 'Not valid UTF-8 — left to git'];
+        case 'deleted': return ['warn', 'Deleted on one side and changed on the other — you will choose keep or delete'];
+        case 'unsupported': return ['warn', 'Not readable as Unity YAML — left to git'];
+        case 'skipped': return ['', 'Not analysed (preview limit reached) — smart merge still runs on it'];
+        case 'error': return ['warn', `Could not analyse: ${s.error || 'unknown error'}`];
+        default: return ['', f.gitConflict ? 'Git will conflict' : 'Changed on both sides'];
+      }
+    }
+    if (f.kind === 'binary') {
+      return ['warn', f.gitConflict === null ? 'Binary changed on both sides — if they differ, you will pick one version' : 'Binary changed on both sides — you will pick one version'];
+    }
+    return f.gitConflict === null ? ['', 'Changed on both sides — git will try a line merge'] : ['warn', '⚔ Conflict — the hunk editor will open'];
+  };
+
+  let gitConflicts = 0, smartClean = 0, smartConflict = 0;
+  const rows = files.map(f => {
+    if (f.gitConflict) gitConflicts++;
+    const st = f.smart && f.smart.status;
+    if (st === 'clean') smartClean++;
+    if (st === 'conflict') smartConflict++;
+    const [cls, text] = verdict(f);
+    const props = st === 'conflict' && f.smart.conflicts && f.smart.conflicts.length
+      ? `<div class="merge-contested-props">${f.smart.conflicts.slice(0, 5).map(c => `• ${escapeHtml(where(c))}${c.kind && c.kind !== 'property' ? ` <span class="text-muted">(${escapeHtml(c.kind === 'added-both' ? 'added on both sides' : 'deleted on one side, changed on the other')})</span>` : ''}`).join('<br>')}${f.smart.conflictCount > 5 ? `<br>…and ${f.smart.conflictCount - 5} more` : ''}</div>`
+      : '';
+    const tags = [f.kind === 'unity' ? 'Unity' : f.kind === 'binary' ? 'binary' : '', f.lfs ? 'LFS' : '']
+      .filter(Boolean).map(t => `<span class="tag">${t}</span>`).join('');
+    return `<div class="merge-contested-row">
+      <div class="merge-contested-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}${tags}</div>
+      <div class="merge-contested-verdict ${cls}">${escapeHtml(text)}</div>${props}
+    </div>`;
+  }).join('');
+
+  const summary = [plural(analysis.total || files.length, 'file') + ' changed on both sides'];
+  if (analysis.mergeTree) summary.push(gitConflicts ? `${plural(gitConflicts, "conflict")} for git` : 'git merges them all');
+  else summary.push('git too old to predict conflicts (needs 2.38+)');
+  if (smartClean) summary.push(`${smartClean} resolved by smart merge`);
+  if (smartConflict) summary.push(`${smartConflict} with property conflicts`);
+
+  const smartRelevant = files.some(f => f.kind === 'unity' && f.gitConflict !== false);
+  return {
+    smartRelevant,
+    html: `<label class="branches-label" style="display:block;margin-bottom:6px">⚔ Contested Files</label>
+      <p class="merge-contested-summary">${escapeHtml(summary.join(' · '))}${analysis.truncated ? ' · first 300 shown' : ''}</p>
+      <div class="merge-contested">${rows}</div>`,
+  };
+}
+
 async function showSmartMergeDialog(branch) {
   if (!branch) return;
   // Fetch a preview from main
@@ -2098,6 +2179,7 @@ async function showSmartMergeDialog(branch) {
   }
   const preview = previewResult.data;
   const current = (state.branches.local && state.branches.local.current) || 'current branch';
+  const contested = mergeContestedHtml(preview.analysis);
 
   const incomingHtml = (preview.incoming || []).slice(0, 30).map(c => `
     <div class="merge-incoming-row">
@@ -2133,6 +2215,8 @@ async function showSmartMergeDialog(branch) {
          <div class="merge-incoming">${incomingHtml}${preview.incoming.length > 30 ? `<div class="merge-incoming-row text-muted" style="grid-template-columns:1fr"><span>…and ${(preview.behind || 0) - 30} more</span></div>` : ''}</div>`
       : ''}
 
+    ${contested.html}
+
     <label class="branches-label" style="display:block;margin-bottom:6px">⚜ Strategy</label>
     <div class="merge-strategies" id="merge-strategy-cards">
       <label class="merge-strategy${!preview.canFastForward ? ' disabled' : ''}">
@@ -2164,6 +2248,15 @@ async function showSmartMergeDialog(branch) {
         </div>
       </label>
     </div>
+
+    ${contested.smartRelevant ? `
+    <label class="merge-smart-toggle">
+      <input type="checkbox" id="merge-smart-unity" checked />
+      <div class="merge-strategy-body">
+        <div class="merge-strategy-title">⚜ Smart-merge Unity scenes &amp; prefabs</div>
+        <div class="merge-strategy-desc">After git merges, conflicted Unity YAML assets (LFS-tracked ones too) are merged again object by object and property by property, so edits to different objects or properties all survive. Files that merge fully are staged; a file with real conflicts keeps markers only around the disputed properties.</div>
+      </div>
+    </label>` : ''}
 
     <div class="modal-field" id="merge-msg-field" style="display:none">
       <label>Merge Commit Message</label>
@@ -2203,8 +2296,9 @@ async function showSmartMergeDialog(branch) {
     const strategy = body.querySelector('input[name="merge-strategy"]:checked').value;
     const messageInput = body.querySelector('#merge-msg');
     const message = (messageInput && messageInput.value.trim()) || undefined;
+    const smartBox = body.querySelector('#merge-smart-unity');
     modal.hide();
-    await runMerge(branch, strategy, message);
+    await runMerge(branch, strategy, message, { smartUnity: !!(smartBox && smartBox.checked) });
   };
   modal.show({ title: 'Smart Merge', body, footer: [cancelBtn, okBtn] });
 }
@@ -2236,7 +2330,7 @@ function openMergeResolution(branch) {
 
 // Run a merge, handling (a) genuine conflicts → resolver, and (b) a dirty working tree
 // that blocks the merge (uncommitted or untracked changes) → offer to stash & retry.
-async function runMerge(branch, strategy, message) {
+async function runMerge(branch, strategy, message, opts = {}) {
   // The branch being merged may have uncommitted work that the app auto-stashed when you
   // last left it. Git merges only COMMITTED history, so that stashed work will NOT be
   // included — warn instead of silently producing an "Already up to date" no-op.
@@ -2267,9 +2361,13 @@ async function runMerge(branch, strategy, message) {
     }
   } catch (e) { /* non-fatal — proceed with the merge */ }
 
-  const r = await withLoading(`Merging ${branch}`, () => gs.merge({ branch, strategy, message }));
+  const smartUnity = !!opts.smartUnity;
+  const r = await withLoading(smartUnity ? `Merging ${branch} (smart Unity merge)` : `Merging ${branch}`,
+    () => gs.merge({ branch, strategy, message, smartUnity }));
   if (r.ok) {
-    showToast(`Merged ${branch}`, 'success');
+    const smart = r.data && r.data.smart;
+    const n = smart && smart.resolved ? smart.resolved.length : 0;
+    showToast(n ? `Merged ${branch} — smart merge resolved ${n} Unity file${n === 1 ? '' : 's'} that git could not` : `Merged ${branch}`, 'success', n ? 8000 : undefined);
     await refreshAll();
     return;
   }
@@ -2279,6 +2377,9 @@ async function runMerge(branch, strategy, message) {
   // Genuine merge conflict → open the resolver immediately.
   if (/conflict/i.test(err) || /CONFLICT/.test(err)) {
     await refreshAll();
+    // repo:merge reports what the smart merge already settled inside the conflict message.
+    const settled = /Smart merge resolved (\d+) Unity file/.exec(err);
+    if (settled) showToast(`Smart merge resolved ${settled[1]} Unity file(s); the rest need you.`, 'info', 8000);
     openMergeResolution(branch);
     return;
   }
@@ -2294,10 +2395,10 @@ async function runMerge(branch, strategy, message) {
     cancel.onclick = () => modal.hide();
     const auto = document.createElement('button');
     auto.className = 'btn-medieval'; auto.textContent = 'Use Default (auto)';
-    auto.onclick = async () => { modal.hide(); await runMerge(branch, 'auto', message); };
+    auto.onclick = async () => { modal.hide(); await runMerge(branch, 'auto', message, opts); };
     const noff = document.createElement('button');
     noff.className = 'btn-medieval primary'; noff.innerHTML = '<span class="btn-icon">⚒</span> Create Merge Commit';
-    noff.onclick = async () => { modal.hide(); await runMerge(branch, 'no-ff', message || `Merge ${branch}`); };
+    noff.onclick = async () => { modal.hide(); await runMerge(branch, 'no-ff', message || `Merge ${branch}`, opts); };
     modal.show({
       title: 'Fast-forward Not Possible',
       body: `<p class="modal-text">Your branch and <strong>${escapeHtml(branch)}</strong> have diverged — both have new commits — so git can't fast-forward.</p>
@@ -2315,7 +2416,7 @@ async function runMerge(branch, strategy, message) {
     // Parse the exact blocking files from git's message (tab-indented lines).
     const blocking = err.split('\n').map(l => l.trim()).filter(l =>
       l && !/would be overwritten|please|aborting|commit your changes|move or remove|error:|^merge|^updating/i.test(l));
-    await showPreMergeFilesDialog(branch, strategy, message, blocking);
+    await showPreMergeFilesDialog(branch, strategy, message, blocking, opts);
     return;
   }
 
@@ -2326,7 +2427,7 @@ async function runMerge(branch, strategy, message) {
 // Pre-merge dialog: lists the uncommitted files that block the merge, with a scrollable
 // multi-select list (+ select-all). The user commits or stashes the SELECTED files, then
 // the merge is retried automatically. If unhandled blocking files remain, it reappears.
-async function showPreMergeFilesDialog(branch, strategy, message, blockingFiles) {
+async function showPreMergeFilesDialog(branch, strategy, message, blockingFiles, opts = {}) {
   // Build the candidate file list. Prefer git's reported blocking files; fall back to the
   // full set of working-tree changes from status.
   let files = (blockingFiles || []).filter(Boolean);
@@ -2400,7 +2501,7 @@ async function showPreMergeFilesDialog(branch, strategy, message, blockingFiles)
       gs.stash({ paths, includeUntracked: true, message: `[GitGood] before merging ${branch}` }));
     if (!sr.ok) { showToast('Stash failed: ' + sr.error, 'error', 7000); return; }
     await refreshAll();
-    await runMerge(branch, strategy, message);
+    await runMerge(branch, strategy, message, opts);
   };
 
   const commitBtn = document.createElement('button');
@@ -2415,7 +2516,7 @@ async function showPreMergeFilesDialog(branch, strategy, message, blockingFiles)
     const cr = await withLoading('Committing selected', () => gs.commitPaths({ message: msg, paths }));
     if (!cr.ok) { showToast('Commit failed: ' + cr.error, 'error', 7000); return; }
     await refreshAll();
-    await runMerge(branch, strategy, message);
+    await runMerge(branch, strategy, message, opts);
   };
 
   modal.show({ title: 'Resolve Uncommitted Changes', body, footer: [cancel, stashBtn, commitBtn] });

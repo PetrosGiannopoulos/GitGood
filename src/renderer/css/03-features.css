@@ -512,6 +512,65 @@
 }
 .merge-strategy.disabled:hover { border-color: var(--border); background: var(--bg); }
 
+/* Contested files: what both sides changed, and what each merge would make of it. */
+.merge-contested {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}
+.merge-contested-row {
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.4);
+  font-size: 11px;
+}
+.merge-contested-row:last-child { border-bottom: none; }
+.merge-contested-path {
+  font-family: var(--font-mono);
+  color: var(--bone-white);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.merge-contested-path .tag {
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 0 4px;
+  margin-left: 6px;
+}
+.merge-contested-verdict { font-family: var(--font-body); color: var(--text-dim); margin-top: 2px; line-height: 1.4; }
+.merge-contested-verdict.ok { color: var(--added); }
+.merge-contested-verdict.smart { color: var(--gold-accent); }
+.merge-contested-verdict.warn { color: var(--crusader-red-bright); }
+.merge-contested-props {
+  margin: 3px 0 0 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.merge-contested-summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: -2px 0 8px;
+}
+.merge-smart-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  background: var(--bg);
+  border: 1px solid var(--gold-accent);
+  cursor: pointer;
+}
+.merge-smart-toggle input[type="checkbox"] { margin-top: 3px; accent-color: var(--crusader-red); flex-shrink: 0; }
+
 /* ============================================
    GRAPH SVG NODES
    ============================================ */
