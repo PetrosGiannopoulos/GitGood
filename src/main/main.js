@@ -13,6 +13,7 @@ const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
 const { mergeUnityYaml } = require('./lib/unity-merge');
+const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -4387,6 +4388,109 @@ ipcMain.handle('llm:cancel', wrap(async () => {
   return { canceled: true };
 }));
 
+// ---- Commit message suggestions --------------------------------------------------------
+// The Changes tab's ✦ button. Shows the model what the next commit would contain — the
+// staged diff, or for an amend the previous commit plus whatever is staged on top — and
+// reads back a summary and description. The prompt and the parsing are in
+// lib/commit-suggest.js; this half only gathers.
+
+// Like gitRun, but stops reading (and kills git) once `maxBytes` have arrived. A staged
+// Unity scene or a non-LFS binary can make a diff of hundreds of megabytes, and the prompt
+// will use a few kilobytes of it — collecting the rest would only risk the main process.
+function gitRunCapped(args, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const proc = spawn('git', args, {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' })
+    });
+    const bufs = [];
+    let got = 0;
+    let truncated = false;
+    proc.stdout.on('data', d => {
+      if (truncated) return;
+      bufs.push(d);
+      got += d.length;
+      if (got >= maxBytes) { truncated = true; proc.kill(); }
+    });
+    proc.stderr.on('data', () => {});
+    proc.on('error', reject);
+    proc.on('close', () => resolve({ out: Buffer.concat(bufs).toString('utf8').slice(0, maxBytes), truncated }));
+  });
+}
+
+ipcMain.handle('llm:suggestCommit', wrap(async (_, opts) => {
+  const { model, amend } = opts || {};
+  const g = ensureGit();
+  // Reset here, not at the stream: Stop can be pressed while the diff is still being read.
+  llmCanceled = false;
+  // --no-textconv: git-lfs installs a textconv driver, and its output describes the pointer
+  // file as prose rather than showing what changed. --no-ext-diff for the same reason.
+  const diffFlags = ['--no-color', '--no-ext-diff', '--no-textconv', '-U2'];
+
+  let base = [];
+  let previousMessage = '';
+  if (amend) {
+    previousMessage = (await g.raw(['log', '-1', '--format=%B'])).trim();
+    // rev-parse --verify --quiet exits non-zero with no stderr for a root commit, which
+    // simple-git resolves rather than rejects — so an empty answer is the "no parent" case.
+    let parent = '';
+    try { parent = (await g.raw(['rev-parse', '--verify', '--quiet', 'HEAD^'])).trim(); } catch (e) { parent = ''; }
+    if (!parent) {
+      const r = await gitRun(['hash-object', '-t', 'tree', '--stdin'], null, 10000, '');
+      parent = r.out.trim();
+    }
+    base = [parent];
+  }
+
+  let source = 'staged';
+  let stat = (await g.raw(['diff', '--cached', '--stat=100', ...base])).trim();
+  let diffArgs = ['diff', '--cached', ...diffFlags, ...base];
+  if (!stat && !amend) {
+    // Nothing staged: describe the working tree instead, so the button is still useful
+    // before staging. The renderer says which one it was.
+    source = 'unstaged';
+    stat = (await g.raw(['diff', '--stat=100'])).trim();
+    diffArgs = ['diff', ...diffFlags];
+    const untracked = (await g.raw(['ls-files', '--others', '--exclude-standard'])).trim();
+    if (untracked) {
+      const names = untracked.split('\n');
+      stat += `${stat ? '\n' : ''}New untracked files: ${names.slice(0, 40).join(', ')}${names.length > 40 ? `, … (${names.length} total)` : ''}`;
+    }
+  }
+  if (!stat) throw new Error('There are no changes to describe.');
+
+  const raw = await gitRunCapped(diffArgs, 256 * 1024);
+  let recentSubjects = '';
+  try { recentSubjects = (await g.raw(['log', '-n', '8', '--format=%s'])).trim(); } catch (e) { /* no commits yet */ }
+
+  const prompt = buildCommitSuggestPrompt({
+    stat, diff: trimDiffForPrompt(raw.out), amend: !!amend, previousMessage, recentSubjects, source
+  });
+
+  if (llmCanceled) return { canceled: true };
+
+  let answer = '';
+  let streamErr = null;
+  try {
+    await ollamaStream('/api/generate', {
+      model: model || LLM_DEFAULT_MODEL,
+      prompt, stream: true, format: 'json',
+      options: { temperature: 0.2, num_ctx: 8192 }
+    }, (chunk) => {
+      if (chunk.error) { streamErr = chunk.error; return; }
+      if (chunk.response) answer += chunk.response;
+    }, { register: (req) => { llmActiveReq = req; } });
+  } catch (e) {
+    if (!llmCanceled) throw e;
+  } finally {
+    llmActiveReq = null;
+  }
+  if (streamErr) throw new Error(streamErr);
+  if (llmCanceled) return { canceled: true };
+  return Object.assign(parseCommitSuggestion(answer), { source });
+}));
+
 // Status of the retrieval index for the current repo.
 ipcMain.handle('llm:indexStatus', wrap(async () => {
   if (!currentRepoPath) return { exists: false };
@@ -6852,6 +6956,17 @@ ipcMain.handle('forge:info', wrap(async (_, opts) => {
   } catch (e) { /* non-fatal: the dialog falls back to the local HEAD */ }
 
   return out;
+}));
+
+// forge:info without the network: is there a stored token for this repository's forge?
+// The Changes tab asks this on every repository open to decide whether to show its
+// "new issue" button, and the rate-limit rule (nothing reaches the forge until the Forge tab
+// is opened) still holds. A stored token was validated when it was saved; one revoked since
+// is caught by forge:info's 401, which the renderer feeds back to hide the button.
+ipcMain.handle('forge:tokenStatus', wrap(async () => {
+  let ctx;
+  try { ctx = await forgeRepoContext(); } catch (e) { return { supported: false, hasToken: false }; }
+  return { supported: !!ctx.provider, provider: ctx.provider, host: ctx.host, hasToken: !!(ctx.provider && readForgeToken(ctx.host)) };
 }));
 
 // Validate before storing: a token that does not work should fail here, in a dialog with a

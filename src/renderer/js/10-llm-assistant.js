@@ -35,9 +35,12 @@ function getRetrieval() {
 
 // Reflect enabled state on the toolbar button (hidden when off).
 function updateAssistantButton() {
+  const on = !!(state && state.llmEnabled);
   const btn = document.getElementById('btn-assistant');
-  if (!btn) return;
-  btn.classList.toggle('hidden', !(state && state.llmEnabled));
+  if (btn) btn.classList.toggle('hidden', !on);
+  // The commit panel's ✦ Suggest belongs to the same switch.
+  const sug = document.getElementById('commit-ai-suggest');
+  if (sug) sug.classList.toggle('hidden', !on);
 }
 
 // Modal shown when Ollama isn't reachable, with a link to install it.
@@ -315,8 +318,97 @@ async function showAssistantChat() {
   setTimeout(() => qEl.focus(), 50);
 }
 
-// Wire the toolbar button.
+// ---- Commit message suggestion -------------------------------------------------------
+// The ✦ Suggest button beside "Amend last commit". The model sees what the commit would
+// contain (main decides: staged, else the working tree; for an amend, the previous commit
+// plus anything staged). While it thinks, the button is its own Stop.
+//
+// Empty fields are filled straight away. Anything already typed — including the old
+// message an amend loads in — is never overwritten silently: the suggestion is offered in
+// an editable dialog with Replace, so a stray click cannot cost the user their text.
+let _suggestBusy = false;
+
+async function suggestCommitMessage() {
+  const btn = document.getElementById('commit-ai-suggest');
+  if (_suggestBusy) { gs.llmCancel(); return; }
+  if (!(state.repo && state.repo.path)) { showToast('Open a repository first', 'error'); return; }
+
+  const model = getLlmModel();
+  const infoR = await gs.llmInfo(model);
+  const info = (infoR && infoR.ok) ? infoR.data : { available: false };
+  if (!info.available) { showOllamaMissing(); return; }
+  if (!info.hasModel) {
+    const proceed = await modal.confirm({
+      title: 'Model missing',
+      message: `The model "${model}" isn't downloaded. Download it now (one-time, ~2 GB)?`,
+      confirmText: 'Download'
+    });
+    if (!proceed || !(await pullModelWithProgress(model))) return;
+  }
+
+  const amend = typeof isAmendMode === 'function' && isAmendMode();
+  _suggestBusy = true;
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = '■ Stop'; btn.classList.add('busy'); btn.title = 'Stop generating'; }
+  setStatus('Reading the changes…');
+  let r;
+  try {
+    r = await gs.llmSuggestCommit({ model, amend });
+  } finally {
+    _suggestBusy = false;
+    if (btn) { btn.textContent = label; btn.classList.remove('busy'); btn.title = 'Suggest a summary and description from the changes (local AI assistant)'; }
+    setStatus('Ready');
+  }
+  if (!r || !r.ok) { showToast('Suggestion failed: ' + ((r && r.error) || 'no answer'), 'error', 8000); return; }
+  const d = r.data || {};
+  if (d.canceled) return;
+  if (d.source === 'unstaged') showToast('Nothing is staged — suggested from the working-tree changes.', 'info', 5000);
+
+  const summaryEl = $('#commit-summary');
+  const descEl = $('#commit-description');
+  if (!summaryEl.value.trim() && !descEl.value.trim()) {
+    summaryEl.value = d.summary || '';
+    descEl.value = d.description || '';
+    summaryEl.focus();
+    return;
+  }
+  showCommitSuggestion(d);
+}
+
+function showCommitSuggestion(d) {
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text text-muted">The commit box already has text. Edit the suggestion if you like, then Replace — or Cancel to keep what you wrote.</p>
+    <div class="modal-field">
+      <label>Summary</label>
+      <input class="modal-input" id="sug-summary" maxlength="80" />
+    </div>
+    <div class="modal-field">
+      <label>Description</label>
+      <textarea class="modal-input text-mono" id="sug-desc" rows="8"></textarea>
+    </div>`;
+  body.querySelector('#sug-summary').value = d.summary || '';
+  body.querySelector('#sug-desc').value = d.description || '';
+
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+  cancel.onclick = () => modal.hide();
+  const use = document.createElement('button');
+  use.className = 'btn-medieval primary';
+  use.innerHTML = '<span class="btn-icon">✦</span> Replace';
+  use.onclick = () => {
+    $('#commit-summary').value = body.querySelector('#sug-summary').value.trim();
+    $('#commit-description').value = body.querySelector('#sug-desc').value.trim();
+    modal.hide();
+    $('#commit-summary').focus();
+  };
+  modal.show({ title: '✦ Suggested Commit Message', body, footer: [cancel, use] });
+}
+
+// Wire the toolbar button and the commit panel's suggest button.
 (() => {
   const btn = document.getElementById('btn-assistant');
   if (btn) btn.onclick = () => showAssistantChat();
+  const sug = document.getElementById('commit-ai-suggest');
+  if (sug) sug.onclick = () => suggestCommitMessage();
 })();

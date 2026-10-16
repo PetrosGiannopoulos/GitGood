@@ -602,10 +602,16 @@
                 <div class="commit-header">⚜ Inscribe Thy Deed ⚜</div>
                 <input type="text" id="commit-summary" class="commit-input" placeholder="Summary (required)" maxlength="80" />
                 <textarea id="commit-description" class="commit-textarea" placeholder="Description (optional)"></textarea>
-                <label class="commit-amend" id="commit-amend-row" title="Rewrite the previous commit instead of creating a new one">
-                  <input type="checkbox" id="commit-amend" />
-                  <span>Amend last commit</span>
-                </label>
+                <div class="commit-tools-row">
+                  <label class="commit-amend" id="commit-amend-row" title="Rewrite the previous commit instead of creating a new one">
+                    <input type="checkbox" id="commit-amend" />
+                    <span>Amend last commit</span>
+                  </label>
+                  <div class="commit-tools">
+                    <button class="commit-tool-btn hidden" id="commit-ai-suggest" type="button" title="Suggest a summary and description from the changes (local AI assistant)">✦ Suggest</button>
+                    <button class="commit-tool-btn hidden" id="commit-new-issue" type="button" title="Open an issue on the forge">☰ Issue</button>
+                  </div>
+                </div>
                 <div class="commit-amend-note" id="commit-amend-note"></div>
                 <label class="commit-amend hidden" id="commit-sign-row" title="Sign this commit with your configured key">
                   <input type="checkbox" id="commit-sign" />

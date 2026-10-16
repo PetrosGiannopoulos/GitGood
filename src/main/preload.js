@@ -86,6 +86,7 @@ const api = {
   soulSaveRelic: (opts) => ipcRenderer.invoke('soul:saveRelic', opts),
 
   forgeInfo: (opts) => ipcRenderer.invoke('forge:info', opts),
+  forgeTokenStatus: () => ipcRenderer.invoke('forge:tokenStatus'),
   forgeSetToken: (opts) => ipcRenderer.invoke('forge:setToken', opts),
   forgeClearToken: (opts) => ipcRenderer.invoke('forge:clearToken', opts),
   forgePullRequests: (opts) => ipcRenderer.invoke('forge:pullRequests', opts),
@@ -309,6 +310,7 @@ const api = {
   llmInfo: (model) => ipcRenderer.invoke('llm:info', model),
   llmPull: (model) => ipcRenderer.invoke('llm:pull', model),
   llmAsk: (opts) => ipcRenderer.invoke('llm:ask', opts),
+  llmSuggestCommit: (opts) => ipcRenderer.invoke('llm:suggestCommit', opts),
   llmCancel: () => ipcRenderer.invoke('llm:cancel'),
   llmIndexStatus: () => ipcRenderer.invoke('llm:indexStatus'),
   llmBuildIndex: (opts) => ipcRenderer.invoke('llm:buildIndex', opts),

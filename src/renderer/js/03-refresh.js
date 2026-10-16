@@ -1,6 +1,9 @@
 // MAIN APP — REFRESH PIPELINE
 // ============================================
 function updateRepoInfo() {
+  // Called on every way a repository becomes current (open, clone, init, tab, reload), which
+  // is exactly when the commit panel's forge button has to ask again.
+  if (typeof updateCommitIssueButton === 'function') updateCommitIssueButton();
   if (!state.repo) {
     $('#repo-info').innerHTML = '<span class="repo-label">No realm</span>';
     hideRepoPathTip();

@@ -64,6 +64,29 @@ function forgeReset() {
   forgeClearFilters();
   const badge = document.getElementById('forge-tab-badge');
   if (badge) badge.style.display = 'none';
+  updateCommitIssueButton();
+}
+
+// The Changes tab's "☰ Issue" button, shown only when this repository's forge has a token.
+// forge:tokenStatus is local (settings + remote URL), so asking on every repository switch
+// costs no request against the forge. A forge:info already fetched for the same host can
+// still veto it, being the only answer that knows a stored token has since been revoked.
+// (Matched by host, not trusted outright: not every way of opening a repository resets
+// forgeState, and the token is per host anyway.)
+let _commitIssueSeq = 0;
+async function updateCommitIssueButton() {
+  const btn = document.getElementById('commit-new-issue');
+  if (!btn) return;
+  const seq = ++_commitIssueSeq;
+  if (!state.repo) { btn.classList.add('hidden'); return; }
+  const r = await gs.forgeTokenStatus();
+  const st = r && r.ok && r.data;
+  const info = forgeState.info;
+  const revoked = !!(st && info && info.host === st.host && info.tokenInvalid);
+  const show = !!(st && st.supported && st.hasToken && !revoked);
+  // A repository switch while that was in flight has already asked again.
+  if (seq !== _commitIssueSeq) return;
+  btn.classList.toggle('hidden', !show);
 }
 
 // Entry point from the tab strip.
@@ -217,6 +240,7 @@ function updateForgeToolbar() {
   if (newPr) newPr.style.display = forgeState.view === 'prs' ? '' : 'none';
   if (newIssue) newIssue.style.display = forgeState.view === 'issues' ? '' : 'none';
   if (boardSel) boardSel.style.display = boardView ? '' : 'none';
+  updateCommitIssueButton();
 
   // The filter bar belongs to the request and issue lists. A board is drawn from one
   // payload the forge composed itself, and filtering it here would hide cards from columns
@@ -2196,7 +2220,10 @@ async function showCreatePrDialog() {
 
 // An issue has no git side at all — no branch, no push, nothing to check against the working
 // tree — so this is the whole of it: a title, a description, and the labels to open it with.
-async function showCreateIssueDialog() {
+// `opts.stay` is the commit panel's button: the user is mid-commit, so the new issue is
+// announced rather than opened in the Forge tab, which would take them away from it.
+async function showCreateIssueDialog(opts) {
+  const stay = !!(opts && opts.stay);
   if (!state.repo) return;
   const info = forgeState.info || ((await gs.forgeInfo({})).data);
   if (!info || !info.supported) { showToast('This repository has no recognised forge remote.', 'error', 6000); return; }
@@ -2282,6 +2309,11 @@ async function showCreateIssueDialog() {
     const r = await withLoading('Opening the issue', () => gs.forgeCreateIssue(opts));
     if (!handleResult(r)) return;
     showToast(`Opened #${r.data.number}`, 'success');
+    if (stay) {
+      // Whatever the Forge tab loaded is now one issue short; let it fetch again on open.
+      forgeState.loadedFor = null;
+      return;
+    }
     // Into the reader, the same as a new request: the issue has a home in the app now.
     goToTab('forge');
     setForgeView('issues');
@@ -2355,6 +2387,9 @@ async function hydrateChecksBadge(hostEl, sha) {
 
   const newIssue = document.getElementById('forge-new-issue');
   if (newIssue) newIssue.onclick = () => showCreateIssueDialog();
+
+  const commitIssue = document.getElementById('commit-new-issue');
+  if (commitIssue) commitIssue.onclick = () => showCreateIssueDialog({ stay: true });
 
   const stateSel = document.getElementById('forge-state');
   if (stateSel) stateSel.onchange = () => refreshForge();
