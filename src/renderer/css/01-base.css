@@ -830,6 +830,15 @@ body.sidebar-is-collapsed .sidebar-toggle-icon {
 
 .sidebar-item.stash-item::before { content: '⚿'; }
 .sidebar-item.remote-item::before { content: '⟁'; }
+.sidebar-item.recent-branch-item::before { content: '⇡'; }
+.recent-branch-name { flex: 1; min-width: 0; }
+.recent-branch-when {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  word-break: normal;
+  white-space: nowrap;
+}
 
 .sidebar-item:hover {
   background: color-mix(in srgb, var(--accent) 8%, transparent);

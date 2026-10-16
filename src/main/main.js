@@ -14,6 +14,7 @@ const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
 const { mergeUnityYaml } = require('./lib/unity-merge');
 const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
+const { lastPushFromReflog, recentPushedBranches } = require('./lib/recent-pushes');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -544,8 +545,57 @@ ipcMain.handle('repo:branches', wrap(async () => {
   try {
     remotes = await g.branch(['-r']);
   } catch (e) { /* no remotes */ }
-  return { local, remotes };
+  let recent = [];
+  try { recent = await recentPushes(g, local.all || []); } catch (e) { /* no reflogs — the section just stays empty */ }
+  return { local, remotes, recent };
 }));
+
+// Local branches by when they were last pushed — see lib/recent-pushes.js for why this is
+// read from the remote-tracking reflogs. Runs on every branch refresh, so it is bounded:
+// only the RECENT_PUSH_SCAN most recently modified reflog files are opened (a push touches
+// its file's mtime, so the newest pushes are always among them), and only their last 16 KB.
+// Located with --git-path, not by joining .git: in a linked worktree the logs live in the
+// main repository.
+const RECENT_PUSH_SCAN = 60;
+async function recentPushes(g, locals) {
+  const dir = path.resolve(currentRepoPath, (await g.raw(['rev-parse', '--git-path', 'logs/refs/remotes'])).trim());
+  if (!fs.existsSync(dir)) return [];
+  const files = [];
+  const walk = (d) => {
+    for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else if (ent.isFile()) files.push({ p, mtime: fs.statSync(p).mtimeMs });
+    }
+  };
+  walk(dir);
+  files.sort((a, b) => b.mtime - a.mtime);
+
+  const pushes = [];
+  for (const f of files.slice(0, RECENT_PUSH_SCAN)) {
+    const fd = fs.openSync(f.p, 'r');
+    let text;
+    try {
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, 16 * 1024);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+    const hit = lastPushFromReflog(text);
+    if (hit) pushes.push(Object.assign({ ref: 'refs/remotes/' + path.relative(dir, f.p).split(path.sep).join('/') }, hit));
+  }
+  if (!pushes.length) return [];
+
+  const upstreams = {};
+  const raw = await g.raw(['for-each-ref', '--format=%(refname:short)%00%(upstream)', 'refs/heads']);
+  for (const line of raw.split('\n')) {
+    const [name, up] = line.split('\0');
+    if (name && up) upstreams[up] = name;
+  }
+  const remoteNames = (await g.raw(['remote'])).split('\n').map(s => s.trim()).filter(Boolean);
+  return recentPushedBranches({ pushes, upstreams, locals, remotes: remoteNames });
+}
 
 ipcMain.handle('repo:log', wrap(async (_, opts) => {
   const g = ensureGit();

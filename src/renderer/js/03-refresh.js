@@ -474,6 +474,39 @@ function renderBranches() {
       remoteList.appendChild(li);
     });
   }
+
+  renderRecentBranches(current);
+}
+
+// Local branches, newest push first. Main reads the push times from the remote-tracking
+// reflogs (lib/recent-pushes.js), so a branch only appears once it has been pushed from
+// this clone — and a branch pushed elsewhere, or before the reflog was expired, does not.
+function renderRecentBranches(current) {
+  const list = $('#recent-branches');
+  if (!list) return;
+  list.innerHTML = '';
+  const recent = (state.branches && state.branches.recent) || [];
+  $('#recent-count').textContent = recent.length;
+  if (!recent.length) {
+    list.innerHTML = '<li class="sidebar-empty">No branches pushed from here yet</li>';
+    return;
+  }
+  recent.forEach(r => {
+    const li = document.createElement('li');
+    li.className = 'sidebar-item recent-branch-item' + (r.branch === current ? ' active' : '');
+    li.title = `Pushed to ${r.remoteRef} ${new Date(r.time).toLocaleString()} (${r.hash.slice(0, 7)})`;
+    li.innerHTML = `<span class="recent-branch-name">${escapeHtml(r.branch)}</span><span class="recent-branch-when">${escapeHtml(relativeTime(r.time))}</span>`;
+    li.dataset.context = 'branch';
+    li.onclick = () => { if (r.branch !== current) checkoutBranch(r.branch); };
+    li.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const items = [{ label: 'Checkout', icon: '⑂', action: () => checkoutBranch(r.branch) }];
+      if (r.branch !== current) items.push({ label: 'Merge into current', icon: '⚒', action: () => mergeBranch(r.branch) });
+      showContextMenu(items, e.pageX, e.pageY);
+    };
+    list.appendChild(li);
+  });
 }
 
 // The branch a stash was made on, as parsed from its subject by repo:stashList.
