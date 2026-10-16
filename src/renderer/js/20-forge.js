@@ -2222,6 +2222,7 @@ async function showCreatePrDialog() {
 // tree — so this is the whole of it: a title, a description, and the labels to open it with.
 // `opts.stay` is the commit panel's button: the user is mid-commit, so the new issue is
 // announced rather than opened in the Forge tab, which would take them away from it.
+// `opts.title`/`opts.body` prefill the fields — that button passes the commit box's text.
 async function showCreateIssueDialog(opts) {
   const stay = !!(opts && opts.stay);
   if (!state.repo) return;
@@ -2276,6 +2277,9 @@ async function showCreateIssueDialog(opts) {
     </div>` : ''}
     ${f.confidential ? `
     <label class="modal-checkbox"><input type="checkbox" id="issue-confidential" /> Confidential — visible only to project members</label>` : ''}`;
+  // Set as values, not interpolated into the markup: this is free text the user typed.
+  body.querySelector('#issue-title').value = (opts && opts.title) || '';
+  body.querySelector('#issue-body').value = (opts && opts.body) || '';
   forgeWireLabelPicker(body);
   forgeWirePicker(body, 'issue-assignee-filter', '#issue-assignee-list .forge-user-row');
 
@@ -2389,7 +2393,11 @@ async function hydrateChecksBadge(hostEl, sha) {
   if (newIssue) newIssue.onclick = () => showCreateIssueDialog();
 
   const commitIssue = document.getElementById('commit-new-issue');
-  if (commitIssue) commitIssue.onclick = () => showCreateIssueDialog({ stay: true });
+  if (commitIssue) commitIssue.onclick = () => showCreateIssueDialog({
+    stay: true,
+    title: ($('#commit-summary').value || '').trim(),
+    body: ($('#commit-description').value || '').trim()
+  });
 
   const stateSel = document.getElementById('forge-state');
   if (stateSel) stateSel.onchange = () => refreshForge();
