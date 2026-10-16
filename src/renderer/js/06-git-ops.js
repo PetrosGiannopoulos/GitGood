@@ -896,12 +896,6 @@ $('#btn-refresh').onclick = async () => {
 
 $('#btn-terminal').onclick = () => openTerminal();
 
-$('#btn-branch').onclick = () => {
-  // Switch to the Branches tab
-  const tab = document.querySelector('.tab[data-tab="branches"]');
-  if (tab) tab.click();
-};
-$('#btn-stash').onclick = () => showStashMenu();
 if ($('#btn-squash')) $('#btn-squash').onclick = () => showSquashDialog();
 
 // ============================================
