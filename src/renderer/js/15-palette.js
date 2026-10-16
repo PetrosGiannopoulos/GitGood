@@ -403,6 +403,12 @@ function runPaletteItem(index) {
   }
 }
 
+// Toolbar button beside Sync, for anyone who doesn't know the shortcut.
+(() => {
+  const btn = document.getElementById('btn-palette');
+  if (btn) btn.onclick = () => openCommandPalette();
+})();
+
 // ============================================
 // GLOBAL SHORTCUT
 // ============================================
