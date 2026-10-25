@@ -1213,6 +1213,13 @@ async function showSettingsDialog() {
           <div class="control"><div class="settings-path">${escapeHtml(settingsFile)}</div></div>
         </div>
         <div class="settings-row">
+          <div class="label">Update GitGood<small>Updates to the latest version on the main branch of github.com/PetrosGiannopoulos/GitGood.</small></div>
+          <div class="control" style="flex-direction:column;align-items:flex-start;gap:6px">
+            <button class="btn-medieval primary" id="set-update" type="button">⟳ Check for updates</button>
+            <div class="text-muted" id="set-update-status" style="font-size:11px;white-space:pre-line;max-width:320px"></div>
+          </div>
+        </div>
+        <div class="settings-row">
           <div class="label">Reset preferences</div>
           <div class="control">
             <button class="btn-medieval danger" id="set-reset-app" type="button">⟲ Reset App Preferences</button>
@@ -1229,6 +1236,7 @@ async function showSettingsDialog() {
         </p>
       </div>
     `;
+    wireUpdateButton(panel.querySelector('#set-update'), panel.querySelector('#set-update-status'));
     panel.querySelector('#set-reset-app').onclick = async () => {
       const ok = await modal.confirm({
         title: 'Reset App Preferences',
@@ -1361,6 +1369,64 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   llmRetrieval: true,
   llmIndexMaxCommits: 300
 };
+
+// Settings → About → Update GitGood. One button with three states: check, then (if main
+// is ahead) install, or open the releases page where this build can't update itself.
+// Installing quits the app (installer) or relaunches it (source checkout) from main.
+function wireUpdateButton(btn, status) {
+  if (!btn || !status) return;
+  const fmtMB = (n) => (n / 1048576).toFixed(0) + ' MB';
+  let info = null;
+
+  const check = async () => {
+    btn.disabled = true;
+    status.textContent = 'Asking GitHub…';
+    const r = await gs.updateCheck();
+    btn.disabled = false;
+    if (!r || !r.ok) { status.textContent = ''; showToast('Update check failed: ' + (r && r.error), 'error', 6000); return; }
+    info = r.data;
+    const ver = info.mode === 'source'
+      ? `Source checkout at ${info.headShort}; main is at ${info.remoteShort} (v${info.latest}).`
+      : `You have v${info.current}; main is at v${info.latest}.`;
+    if (!info.updateAvailable) {
+      status.textContent = ver + '\nGitGood is up to date.';
+      return;
+    }
+    if (info.blocked) {
+      status.textContent = ver + '\n' + info.blocked;
+      return;
+    }
+    if (info.mode === 'installer') {
+      status.textContent = ver + `\nDownloads ${info.asset.name} (${fmtMB(info.asset.size)}), starts the installer and closes GitGood.`;
+      btn.textContent = `⬇ Install v${info.latest}`;
+      btn.onclick = install;
+    } else if (info.mode === 'source') {
+      status.textContent = ver + '\nFast-forwards this checkout from main and restarts GitGood.';
+      btn.textContent = '⬇ Update and restart';
+      btn.onclick = install;
+    } else {
+      status.textContent = ver + '\nThis build cannot update itself — download the new version from the releases page.';
+      btn.textContent = '↗ Open releases page';
+      btn.onclick = () => gs.openExternal(info.page);
+    }
+  };
+
+  const install = async () => {
+    btn.disabled = true;
+    try {
+      const r = await withLoading('Updating GitGood', () => gs.updateInstall());
+      if (!r || !r.ok) { btn.disabled = false; showToast('Update failed: ' + (r && r.error), 'error', 8000); return; }
+      status.textContent = r.data.mode === 'installer'
+        ? `The v${r.data.version} installer has started. GitGood is closing so it can replace the app.`
+        : `Updated to v${r.data.version}. Restarting…`;
+    } catch (e) {
+      btn.disabled = false;
+      showToast('Update failed: ' + (e.message || e), 'error', 8000);
+    }
+  };
+
+  btn.onclick = check;
+}
 
 // Apply saved app settings (theme + font) at startup
 async function applySavedAppSettings() {
