@@ -53,4 +53,17 @@ function recentPushedBranches({ pushes, upstreams, locals, remotes, limit = 8 })
   return [...best.values()].sort((a, b) => b.time - a.time).slice(0, limit);
 }
 
-module.exports = { lastPushFromReflog, recentPushedBranches };
+// Whether a pushed branch has since been merged into some other branch, so it can leave
+// the list. `containing` is every ref whose history includes the branch's tip
+// (`for-each-ref --contains`). The branch's own refs don't count — itself, its upstream,
+// the ref it was pushed to and its namesake on any remote — and neither does a remote's
+// HEAD, which is only an alias for another ref already in the list.
+function mergedElsewhere({ branch, upstream, pushedRef, remotes, containing }) {
+  const own = new Set(['refs/heads/' + branch]);
+  if (upstream) own.add(upstream);
+  if (pushedRef) own.add('refs/remotes/' + pushedRef);
+  for (const r of remotes || []) own.add(`refs/remotes/${r}/${branch}`);
+  return (containing || []).some(ref => ref && !own.has(ref) && !/^refs\/remotes\/.+\/HEAD$/.test(ref));
+}
+
+module.exports = { lastPushFromReflog, recentPushedBranches, mergedElsewhere };

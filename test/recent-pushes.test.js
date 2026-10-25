@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { lastPushFromReflog, recentPushedBranches } = require('../src/main/lib/recent-pushes');
+const { lastPushFromReflog, recentPushedBranches, mergedElsewhere } = require('../src/main/lib/recent-pushes');
 
 const Z = '0'.repeat(40);
 const A = 'a'.repeat(40);
@@ -67,4 +67,35 @@ test('recentPushedBranches: respects the limit', () => {
   const locals = pushes.map((_, i) => `b${i}`);
   const r = recentPushedBranches({ pushes, upstreams: {}, locals, remotes: ['origin'], limit: 5 });
   assert.deepStrictEqual(r.map(x => x.branch), ['b19', 'b18', 'b17', 'b16', 'b15']);
+});
+
+test('mergedElsewhere: the branch\'s own refs and remote HEADs do not count as a merge', () => {
+  assert.strictEqual(mergedElsewhere({
+    branch: 'feature/x',
+    upstream: 'refs/remotes/origin/feature/x',
+    pushedRef: 'origin/feature/x',
+    remotes: ['origin', 'backup'],
+    containing: [
+      'refs/heads/feature/x',
+      'refs/remotes/origin/feature/x',
+      'refs/remotes/backup/feature/x',
+      'refs/remotes/origin/HEAD'
+    ]
+  }), false);
+});
+
+test('mergedElsewhere: any other branch, local or remote, holding the tip is a merge', () => {
+  const base = { branch: 'feature/x', upstream: 'refs/remotes/origin/feature/x', pushedRef: 'origin/feature/x', remotes: ['origin'] };
+  assert.strictEqual(mergedElsewhere({ ...base, containing: ['refs/heads/feature/x', 'refs/heads/devel'] }), true);
+  assert.strictEqual(mergedElsewhere({ ...base, containing: ['refs/remotes/origin/feature/x', 'refs/remotes/origin/main'] }), true);
+});
+
+test('mergedElsewhere: pushed under another name, that remote ref is still its own', () => {
+  assert.strictEqual(mergedElsewhere({
+    branch: 'local-name',
+    upstream: 'refs/remotes/origin/renamed-upstream',
+    pushedRef: 'origin/renamed-upstream',
+    remotes: ['origin'],
+    containing: ['refs/heads/local-name', 'refs/remotes/origin/renamed-upstream']
+  }), false);
 });

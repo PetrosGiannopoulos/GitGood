@@ -14,7 +14,7 @@ const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
 const { mergeUnityYaml } = require('./lib/unity-merge');
 const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
-const { lastPushFromReflog, recentPushedBranches } = require('./lib/recent-pushes');
+const { lastPushFromReflog, recentPushedBranches, mergedElsewhere } = require('./lib/recent-pushes');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -587,15 +587,47 @@ async function recentPushes(g, locals) {
   }
   if (!pushes.length) return [];
 
+  // One pass over every branch ref: upstreams for the mapping, tips for the merge check,
+  // and the whole output doubles as the cache key — if no ref moved, no answer changed.
   const upstreams = {};
-  const raw = await g.raw(['for-each-ref', '--format=%(refname:short)%00%(upstream)', 'refs/heads']);
+  const tips = {};
+  const branchUpstream = {};
+  const raw = await g.raw(['for-each-ref', '--format=%(refname)%00%(objectname)%00%(upstream)', 'refs/heads', 'refs/remotes']);
   for (const line of raw.split('\n')) {
-    const [name, up] = line.split('\0');
-    if (name && up) upstreams[up] = name;
+    const [ref, hash, up] = line.split('\0');
+    if (!ref || !ref.startsWith('refs/heads/')) continue;
+    const name = ref.slice('refs/heads/'.length);
+    tips[name] = hash;
+    if (up) { upstreams[up] = name; branchUpstream[name] = up; }
   }
   const remoteNames = (await g.raw(['remote'])).split('\n').map(s => s.trim()).filter(Boolean);
-  return recentPushedBranches({ pushes, upstreams, locals, remotes: remoteNames });
+  const candidates = recentPushedBranches({ pushes, upstreams, locals, remotes: remoteNames, limit: Infinity });
+
+  // A branch merged into another branch leaves the list. Filtered before the limit, so a
+  // merged branch makes room for the next unmerged one rather than shortening the list.
+  const sig = currentRepoPath + '\n' + raw;
+  if (_recentMergedCache.sig !== sig) _recentMergedCache = { sig, merged: new Map() };
+  const out = [];
+  for (const c of candidates) {
+    if (out.length >= RECENT_PUSH_LIMIT) break;
+    const tip = tips[c.branch];
+    if (!tip) continue;
+    let merged = _recentMergedCache.merged.get(c.branch);
+    if (merged === undefined) {
+      const containing = (await g.raw(['for-each-ref', '--contains', tip, '--format=%(refname)', 'refs/heads', 'refs/remotes']))
+        .split('\n').map(s => s.trim()).filter(Boolean);
+      merged = mergedElsewhere({ branch: c.branch, upstream: branchUpstream[c.branch], pushedRef: c.remoteRef, remotes: remoteNames, containing });
+      _recentMergedCache.merged.set(c.branch, merged);
+    }
+    if (!merged) out.push(c);
+  }
+  return out;
 }
+const RECENT_PUSH_LIMIT = 8;
+// Merge verdicts for the last ref state seen; any ref moving (a merge, a push, a fetch)
+// changes the key and drops them all. Without it every branch refresh would run one
+// `--contains` walk per candidate.
+let _recentMergedCache = { sig: null, merged: new Map() };
 
 ipcMain.handle('repo:log', wrap(async (_, opts) => {
   const g = ensureGit();
