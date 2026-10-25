@@ -1551,6 +1551,23 @@
 
 .modal-overlay.hidden { display: none; }
 
+/* Long error text (showErrorDetails) — above every other overlay, including the
+   diff pop-out, since the action that failed may have been started from any of them. */
+.error-details-overlay { z-index: 9800; }
+.error-details { width: min(820px, 94vw); }
+.error-details .modal-body { padding: 0; }
+.error-details-text {
+  margin: 0;
+  padding: 16px 20px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bone-white);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
 .modal {
   background: var(--bg-panel);
   border: 1px solid var(--crusader-red);

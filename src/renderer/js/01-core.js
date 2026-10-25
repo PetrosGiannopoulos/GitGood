@@ -281,7 +281,18 @@ function commitMatchesFilter(commit, query, mode) {
   return terms.every(t => msgHay.includes(t) || fileHay.includes(t));
 }
 
+// An error past either limit is unreadable as a toast (git's hook output, a rejected
+// push listing every ref), so it opens in its own scrollable dialog instead.
+const TOAST_ERROR_MAX_CHARS = 300;
+const TOAST_ERROR_MAX_LINES = 6;
+
 function showToast(message, type = 'info', timeout = 3500) {
+  const text = String(message == null ? '' : message);
+  if (type === 'error' &&
+      (text.length > TOAST_ERROR_MAX_CHARS || text.split('\n').length > TOAST_ERROR_MAX_LINES)) {
+    showErrorDetails(text);
+    return;
+  }
   const icons = { info: 'ℹ', success: '✓', error: '✗' };
   const container = $('#toast-container');
   const toast = document.createElement('div');
@@ -292,6 +303,49 @@ function showToast(message, type = 'info', timeout = 3500) {
     toast.classList.add('fadeout');
     setTimeout(() => toast.remove(), 300);
   }, timeout);
+}
+
+// Its own overlay, not the shared #modal-overlay: errors usually come from an action
+// started inside a dialog, and modal.show() would replace that dialog's contents.
+// Esc is caught in the capture phase for the same reason — the global handler would
+// otherwise close the dialog underneath too. A second long error replaces the text.
+function showErrorDetails(text) {
+  let overlay = document.getElementById('error-details-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'error-details-overlay';
+    overlay.className = 'modal-overlay error-details-overlay';
+    overlay.innerHTML = `
+      <div class="modal error-details">
+        <div class="modal-header"><span>Error</span><button class="modal-close" data-act="close">✕</button></div>
+        <div class="modal-body"><pre class="error-details-text"></pre></div>
+        <div class="modal-footer">
+          <button class="btn-medieval" data-act="copy">Copy</button>
+          <button class="btn-medieval primary" data-act="close">Close</button>
+        </div>
+      </div>`;
+    const close = () => {
+      overlay.classList.add('hidden');
+      window.removeEventListener('keydown', overlay._onKey, true);
+    };
+    overlay._onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    };
+    overlay.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-act]');
+      if (!act) return;
+      if (act.dataset.act === 'close') close();
+      else if (act.dataset.act === 'copy') copyText(overlay.querySelector('.error-details-text').textContent, 'Error copied');
+    });
+    document.body.appendChild(overlay);
+  }
+  const pre = overlay.querySelector('.error-details-text');
+  pre.textContent = text;
+  pre.parentElement.scrollTop = 0;
+  overlay.classList.remove('hidden');
+  window.removeEventListener('keydown', overlay._onKey, true);
+  window.addEventListener('keydown', overlay._onKey, true);
+  overlay.querySelector('.btn-medieval.primary').focus();
 }
 
 // Join a git (repo-relative, '/'-separated) path onto the open repository's root, using
