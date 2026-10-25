@@ -331,12 +331,13 @@ async function copyText(text, successMsg = 'Copied') {
 // is upgraded to a real percentage when git emits transfer progress (op:progress).
 const opProgress = {
   _box: null, _label: null, _fill: null, _pct: null, _hideTimer: null,
-  // How many overlapping operations are active (so nested withLoading calls don't
-  // hide the bar prematurely).
-  _active: 0,
-  // True once a real percentage has arrived for the current operation, so the
-  // indeterminate animation doesn't fight the real value.
-  _hasReal: false,
+  // Overlapping operations, oldest first. Each remembers what the bar last showed
+  // for it ({ message, label, pct }; pct null = indeterminate), so when the newest
+  // one ends — a discard started mid-push — the bar goes back to the one still
+  // running instead of keeping the finished one's label.
+  _ops: [],
+  // Streamed progress that arrived with no begin() around it.
+  _loose: null,
 
   _els() {
     this._box = document.getElementById('op-progress');
@@ -345,53 +346,72 @@ const opProgress = {
     this._pct = document.getElementById('op-progress-pct');
   },
 
-  // Begin an indeterminate operation with a label.
-  begin(label) {
-    this._els();
-    if (!this._box) return;
-    this._active++;
-    this._hasReal = false;
-    clearTimeout(this._hideTimer);
-    this._box.classList.remove('hidden');
-    if (this._label) this._label.textContent = (label || 'Working').replace(/\.\.\.$/, '');
-    if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
-    if (this._pct) this._pct.textContent = '…';
+  // The newest active operation — the one the bar shows.
+  current() {
+    return this._ops[this._ops.length - 1] || null;
   },
 
-  // Show an indeterminate bar + label WITHOUT changing the active-operation count.
-  // Used by streamed progress events (op:progress) that arrive during a withLoading
-  // operation, so they don't unbalance begin()/end().
-  indeterminate(label) {
+  _render(op) {
     this._els();
-    if (!this._box) return;
-    if (this._hasReal) return; // a real % already showing; don't downgrade
+    if (!this._box || !op) return;
     clearTimeout(this._hideTimer);
     this._box.classList.remove('hidden');
-    if (label && this._label) this._label.textContent = label;
-    if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
-    if (this._pct) this._pct.textContent = '…';
+    if (this._label) this._label.textContent = op.label;
+    if (op.pct == null) {
+      if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
+      if (this._pct) this._pct.textContent = '…';
+    } else {
+      if (this._fill) { this._fill.classList.remove('indeterminate'); this._fill.style.width = op.pct + '%'; }
+      if (this._pct) this._pct.textContent = op.pct + '%';
+    }
+  },
+
+  // Begin an indeterminate operation with a label. Returns a handle for end().
+  begin(label) {
+    const message = label || 'Working';
+    const op = { message, label: message.replace(/\.\.\.$/, ''), pct: null };
+    this._ops.push(op);
+    this._loose = null;
+    this._render(op);
+    return op;
+  },
+
+  // Streamed progress (op:progress) carries no operation id. It belongs to the
+  // oldest active operation: transfers (push/pull/fetch/clone) are the long ones
+  // that quick actions get started on top of.
+  _streamTarget() {
+    return this._ops[0] || (this._loose = this._loose || { label: 'Working', pct: null });
+  },
+
+  _streamed(op) {
+    if (!this._ops.length || op === this.current()) this._render(op);
+  },
+
+  // Indeterminate update from a streamed event; never downgrades a real %.
+  indeterminate(label) {
+    const op = this._streamTarget();
+    if (op.pct != null) return;
+    if (label) op.label = label;
+    this._streamed(op);
   },
 
   // Update with a real percentage (0-100) and optional label.
   setPercent(v, label) {
-    this._els();
-    if (!this._box) return;
-    this._hasReal = true;
-    this._box.classList.remove('hidden');
-    clearTimeout(this._hideTimer);
-    const pct = Math.max(0, Math.min(100, Math.round(v)));
-    if (this._fill) { this._fill.classList.remove('indeterminate'); this._fill.style.width = pct + '%'; }
-    if (this._pct) this._pct.textContent = pct + '%';
-    if (label && this._label) this._label.textContent = label;
+    const op = this._streamTarget();
+    op.pct = Math.max(0, Math.min(100, Math.round(v)));
+    if (label) op.label = label;
+    this._streamed(op);
   },
 
-  // Finish one operation. When the last active operation ends, show 100% briefly,
-  // then hide.
-  end(failed) {
+  // Finish one operation. While others are still running the bar returns to the
+  // newest of them; when the last one ends, show 100% briefly, then hide.
+  end(op, failed) {
     this._els();
+    const i = this._ops.lastIndexOf(op);
+    if (i >= 0) this._ops.splice(i, 1);
+    this._loose = null;
     if (!this._box) return;
-    this._active = Math.max(0, this._active - 1);
-    if (this._active > 0) return; // other operations still running
+    if (this._ops.length) { this._render(this.current()); return; }
     if (this._fill) {
       this._fill.classList.remove('indeterminate');
       this._fill.style.width = '100%';
@@ -399,7 +419,7 @@ const opProgress = {
     if (this._pct) this._pct.textContent = failed ? '—' : '100%';
     clearTimeout(this._hideTimer);
     this._hideTimer = setTimeout(() => {
-      if (this._active === 0 && this._box) this._box.classList.add('hidden');
+      if (!this._ops.length && this._box) this._box.classList.add('hidden');
     }, 500);
   }
 };
@@ -411,15 +431,20 @@ function setStatus(message) {
 
 async function withLoading(message, fn) {
   setStatus(message + '...');
-  opProgress.begin(message);
+  const op = opProgress.begin(message);
+  // An operation still running underneath (a push, while a discard finishes)
+  // gets its message back rather than "Ready".
+  const settle = (fallback, failed) => {
+    opProgress.end(op, failed);
+    const still = opProgress.current();
+    setStatus(still ? still.message + '...' : fallback);
+  };
   try {
     const result = await fn();
-    setStatus('Ready');
-    opProgress.end(false);
+    settle('Ready', false);
     return result;
   } catch (err) {
-    setStatus('Failed');
-    opProgress.end(true);
+    settle('Failed', true);
     throw err;
   }
 }
