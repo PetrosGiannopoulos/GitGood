@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { lastPushFromReflog, recentPushedBranches, mergedElsewhere } = require('../src/main/lib/recent-pushes');
+const { lastPushFromReflog, recentPushedBranches, parseMergeTargets, mergedIntoTarget } = require('../src/main/lib/recent-pushes');
 
 const Z = '0'.repeat(40);
 const A = 'a'.repeat(40);
@@ -69,33 +69,36 @@ test('recentPushedBranches: respects the limit', () => {
   assert.deepStrictEqual(r.map(x => x.branch), ['b19', 'b18', 'b17', 'b16', 'b15']);
 });
 
-test('mergedElsewhere: the branch\'s own refs and remote HEADs do not count as a merge', () => {
-  assert.strictEqual(mergedElsewhere({
+test('mergedIntoTarget: only a merge target counts, local or on any remote', () => {
+  const base = { branch: 'feature/x', targets: ['main', 'devel'], remotes: ['origin', 'team/backup'] };
+  assert.strictEqual(mergedIntoTarget({ ...base, containing: ['refs/heads/feature/x', 'refs/heads/devel'] }), true);
+  assert.strictEqual(mergedIntoTarget({ ...base, containing: ['refs/remotes/origin/feature/x', 'refs/remotes/team/backup/main'] }), true);
+});
+
+test('mergedIntoTarget: other branches holding the tip, its own refs and remote HEADs do not count', () => {
+  assert.strictEqual(mergedIntoTarget({
     branch: 'feature/x',
-    upstream: 'refs/remotes/origin/feature/x',
-    pushedRef: 'origin/feature/x',
-    remotes: ['origin', 'backup'],
+    targets: ['main', 'devel'],
+    remotes: ['origin'],
     containing: [
       'refs/heads/feature/x',
       'refs/remotes/origin/feature/x',
-      'refs/remotes/backup/feature/x',
-      'refs/remotes/origin/HEAD'
+      'refs/heads/feature/y',          // started from feature/x — not a merge
+      'refs/remotes/origin/HEAD',
+      'refs/heads/main-old'            // a prefix of a target is not the target
     ]
   }), false);
 });
 
-test('mergedElsewhere: any other branch, local or remote, holding the tip is a merge', () => {
-  const base = { branch: 'feature/x', upstream: 'refs/remotes/origin/feature/x', pushedRef: 'origin/feature/x', remotes: ['origin'] };
-  assert.strictEqual(mergedElsewhere({ ...base, containing: ['refs/heads/feature/x', 'refs/heads/devel'] }), true);
-  assert.strictEqual(mergedElsewhere({ ...base, containing: ['refs/remotes/origin/feature/x', 'refs/remotes/origin/main'] }), true);
+test('mergedIntoTarget: a target is never hidden, even inside another target', () => {
+  assert.strictEqual(mergedIntoTarget({
+    branch: 'main', targets: 'main, devel', remotes: ['origin'],
+    containing: ['refs/heads/main', 'refs/heads/devel']
+  }), false);
 });
 
-test('mergedElsewhere: pushed under another name, that remote ref is still its own', () => {
-  assert.strictEqual(mergedElsewhere({
-    branch: 'local-name',
-    upstream: 'refs/remotes/origin/renamed-upstream',
-    pushedRef: 'origin/renamed-upstream',
-    remotes: ['origin'],
-    containing: ['refs/heads/local-name', 'refs/remotes/origin/renamed-upstream']
-  }), false);
+test('parseMergeTargets: commas or spaces, blanks and duplicates dropped', () => {
+  assert.deepStrictEqual(parseMergeTargets(' main,devel ,, release/2.0 main'), ['main', 'devel', 'release/2.0']);
+  assert.deepStrictEqual(parseMergeTargets(['main', ' ', 'devel']), ['main', 'devel']);
+  assert.deepStrictEqual(parseMergeTargets(''), []);
 });

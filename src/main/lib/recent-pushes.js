@@ -53,17 +53,26 @@ function recentPushedBranches({ pushes, upstreams, locals, remotes, limit = 8 })
   return [...best.values()].sort((a, b) => b.time - a.time).slice(0, limit);
 }
 
-// Whether a pushed branch has since been merged into some other branch, so it can leave
-// the list. `containing` is every ref whose history includes the branch's tip
-// (`for-each-ref --contains`). The branch's own refs don't count — itself, its upstream,
-// the ref it was pushed to and its namesake on any remote — and neither does a remote's
-// HEAD, which is only an alias for another ref already in the list.
-function mergedElsewhere({ branch, upstream, pushedRef, remotes, containing }) {
-  const own = new Set(['refs/heads/' + branch]);
-  if (upstream) own.add(upstream);
-  if (pushedRef) own.add('refs/remotes/' + pushedRef);
-  for (const r of remotes || []) own.add(`refs/remotes/${r}/${branch}`);
-  return (containing || []).some(ref => ref && !own.has(ref) && !/^refs\/remotes\/.+\/HEAD$/.test(ref));
+// The merge targets setting ("main, devel") as a list of branch names.
+function parseMergeTargets(value) {
+  const list = Array.isArray(value) ? value : String(value || '').split(/[\s,]+/);
+  return [...new Set(list.map(s => String(s).trim()).filter(Boolean))];
 }
 
-module.exports = { lastPushFromReflog, recentPushedBranches, mergedElsewhere };
+// Whether a pushed branch has been merged into one of the merge targets, so it can leave
+// the list. `containing` is every ref whose history includes the branch's tip
+// (`for-each-ref --contains`); only a target — local, or on any remote — counts. Any
+// other branch holding the tip was most likely just started from it, which ancestry
+// alone can't tell apart from a merge. A target itself is never hidden.
+function mergedIntoTarget({ branch, targets, remotes, containing }) {
+  const names = parseMergeTargets(targets);
+  if (names.includes(branch)) return false;
+  const hits = new Set();
+  for (const t of names) {
+    hits.add('refs/heads/' + t);
+    for (const r of remotes || []) hits.add(`refs/remotes/${r}/${t}`);
+  }
+  return (containing || []).some(ref => hits.has(ref));
+}
+
+module.exports = { lastPushFromReflog, recentPushedBranches, parseMergeTargets, mergedIntoTarget };

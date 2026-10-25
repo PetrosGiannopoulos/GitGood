@@ -14,7 +14,7 @@ const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
 const { mergeUnityYaml } = require('./lib/unity-merge');
 const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
-const { lastPushFromReflog, recentPushedBranches, mergedElsewhere } = require('./lib/recent-pushes');
+const { lastPushFromReflog, recentPushedBranches, parseMergeTargets, mergedIntoTarget } = require('./lib/recent-pushes');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -591,21 +591,23 @@ async function recentPushes(g, locals) {
   // and the whole output doubles as the cache key — if no ref moved, no answer changed.
   const upstreams = {};
   const tips = {};
-  const branchUpstream = {};
   const raw = await g.raw(['for-each-ref', '--format=%(refname)%00%(objectname)%00%(upstream)', 'refs/heads', 'refs/remotes']);
   for (const line of raw.split('\n')) {
     const [ref, hash, up] = line.split('\0');
     if (!ref || !ref.startsWith('refs/heads/')) continue;
     const name = ref.slice('refs/heads/'.length);
     tips[name] = hash;
-    if (up) { upstreams[up] = name; branchUpstream[name] = up; }
+    if (up) upstreams[up] = name;
   }
   const remoteNames = (await g.raw(['remote'])).split('\n').map(s => s.trim()).filter(Boolean);
   const candidates = recentPushedBranches({ pushes, upstreams, locals, remotes: remoteNames, limit: Infinity });
 
-  // A branch merged into another branch leaves the list. Filtered before the limit, so a
-  // merged branch makes room for the next unmerged one rather than shortening the list.
-  const sig = currentRepoPath + '\n' + raw;
+  // A branch merged into one of the merge targets (Settings → General) leaves the list.
+  // Filtered before the limit, so a merged branch makes room for the next unmerged one
+  // rather than shortening the list.
+  const targets = parseMergeTargets(getAppSettings().recentMergeTargets);
+  if (!targets.length) return candidates.slice(0, RECENT_PUSH_LIMIT);
+  const sig = currentRepoPath + '\n' + targets.join('\n') + '\n' + raw;
   if (_recentMergedCache.sig !== sig) _recentMergedCache = { sig, merged: new Map() };
   const out = [];
   for (const c of candidates) {
@@ -616,7 +618,7 @@ async function recentPushes(g, locals) {
     if (merged === undefined) {
       const containing = (await g.raw(['for-each-ref', '--contains', tip, '--format=%(refname)', 'refs/heads', 'refs/remotes']))
         .split('\n').map(s => s.trim()).filter(Boolean);
-      merged = mergedElsewhere({ branch: c.branch, upstream: branchUpstream[c.branch], pushedRef: c.remoteRef, remotes: remoteNames, containing });
+      merged = mergedIntoTarget({ branch: c.branch, targets, remotes: remoteNames, containing });
       _recentMergedCache.merged.set(c.branch, merged);
     }
     if (!merged) out.push(c);
@@ -3812,7 +3814,8 @@ ipcMain.handle('repo:deleteBranches', wrap(async (_, opts) => {
 const DEFAULT_APP_SETTINGS = {
   theme: 'crusader',                  // crusader|molecular|biohazard|sweet|monastery|racing
   defaultBranchName: 'main',          // default branch when initializing a new repo
-  graphLimit: 300,                    // default commits to load in graph
+  recentMergeTargets: 'main, devel',  // Recent Branches hides a branch once merged into one of these
+  graphLimit: 300,                   // default commits to load in graph
   graphHideLocal: false,              // hide local-branch ref pills in the graph
   graphStripRemotePrefix: false,      // show remote branches without their "<remote>/" prefix
   graphHideLocalCommits: false,       // hide commits not reachable from any remote (unpushed)

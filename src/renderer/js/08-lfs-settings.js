@@ -652,6 +652,13 @@ async function showSettingsDialog() {
           </div>
         </div>
         <div class="settings-row">
+          <div class="label">Recent Branches merge targets<small>A pushed branch leaves Recent Branches once it is merged into one of these (local or on a remote). Separate names with commas; leave empty to never hide one.</small></div>
+          <div class="control">
+            <input type="text" class="modal-input" id="set-recent-targets" style="width:200px"
+                   placeholder="main, devel" />
+          </div>
+        </div>
+        <div class="settings-row">
           <div class="label">Reopen repositories on launch<small>Put back the tabs that were open when you last quit, instead of the welcome screen.</small></div>
           <div class="control">
             <label class="medieval-toggle">
@@ -677,6 +684,9 @@ async function showSettingsDialog() {
       const n = parseInt(e.target.value, 10);
       appChanges.autoFetchMinutes = isNaN(n) ? 0 : Math.max(0, Math.min(180, n));
     };
+    const targetsInput = panel.querySelector('#set-recent-targets');
+    targetsInput.value = 'recentMergeTargets' in appChanges ? appChanges.recentMergeTargets : (appSettings.recentMergeTargets || '');
+    targetsInput.oninput = (e) => { appChanges.recentMergeTargets = e.target.value.trim(); };
     panel.querySelector('#set-restore-tabs').onchange = (e) => { appChanges.restoreTabsOnStart = e.target.checked; };
     panel.querySelector('#set-confirm-destructive').onchange = (e) => { appChanges.confirmDestructive = e.target.checked; };
   }
@@ -1287,8 +1297,10 @@ async function showSettingsDialog() {
         appOk = false;
         showToast('Failed to save app preferences: ' + (r && r.error), 'error', 6000);
       } else {
+        const targetsChanged = 'recentMergeTargets' in appChanges;
         Object.assign(appSettings, appChanges);
         Object.keys(appChanges).forEach(k => delete appChanges[k]);
+        if (targetsChanged && state.repo) refreshBranches();
         // Re-apply in case Save changed anything
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
@@ -1326,6 +1338,7 @@ async function showSettingsDialog() {
 const DEFAULT_APP_SETTINGS_LOCAL = {
   theme: 'crusader',
   defaultBranchName: 'main',
+  recentMergeTargets: 'main, devel',
   graphLimit: 300,
   graphHideLocal: false,
   graphStripRemotePrefix: false,
