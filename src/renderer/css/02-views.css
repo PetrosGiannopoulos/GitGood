@@ -1263,6 +1263,57 @@
   color: var(--bone-white);
 }
 
+/* A local branch whose same-named remote branch is at this commit too ("x is pushed"). */
+.ref-pill .ref-sync { margin-left: 3px; opacity: 0.7; font-weight: 400; }
+
+/* "+N" — refs that didn't fit the column. Hovering the cell opens .ref-popover. */
+.ref-more {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  cursor: default;
+}
+.graph-ref-cell.packed:hover .ref-more { color: var(--bone-white); border-color: var(--accent); }
+
+/* Every ref on one commit, grouped. On <body>, so the clipped column can't cut it off. */
+.ref-popover {
+  position: fixed;
+  z-index: 9500;
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: min(420px, calc(100vh - 16px));
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  transition: opacity 0.12s;
+}
+.ref-popover.hidden { display: none; }
+.ref-popover.dragging { opacity: 0.25; pointer-events: none; }
+.ref-popover-head {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.ref-popover-head code { font-family: var(--font-mono); color: var(--bone-white); }
+.ref-popover-group + .ref-popover-group { margin-top: 8px; }
+.ref-popover-title {
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.ref-popover-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+
 /* Graph header & controls */
 .graph-toolbar {
   display: flex;

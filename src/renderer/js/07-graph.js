@@ -512,13 +512,181 @@ function visibleRefsForDisplay(refs) {
   }
   return out;
 }
+// ----- Packing a crowded ref cell -----
+// A commit can carry dozens of refs (every feature branch merged into it, each with its remote
+// twin), and the column is clamped, so they cannot all be drawn. They are ranked, the cell
+// shows as many as fit — the most important one nearest the lanes, since the cell is
+// right-aligned and overflow falls off the left — and the rest collapse into a "+N" chip
+// whose hover opens a popover listing every ref (showRefPopover).
+//
+// Two things make that ranking pay off:
+// - A local branch and its remote twin at the same commit ("x" and "origin/x") are one
+//   fact, "x is pushed", so they draw as ONE pill with a ⟁ mark. That alone halves the
+//   usual crowd. Only by name: an upstream with a different name stays a separate pill.
+// - Ranking: what you are on (HEAD) → local branches (mainline names first) → tags →
+//   remote-only branches (mainline first) → the remote's symbolic HEAD (origin/HEAD), which
+//   only ever repeats what another pill already says.
+const REF_MAINLINE = new Set(['main', 'master', 'develop', 'devel', 'trunk']);
+const REF_SYNC_CHROME = 12;  // px: the ⟁ mark a merged local+remote pill carries
+function refRank(item) {
+  const r = item.ref;
+  if (r.type === 'head' || (r.type === 'local' && r.isHead)) return 0;
+  if (r.type === 'local') return REF_MAINLINE.has(r.name) ? 1 : 2;
+  if (r.type === 'tag') return 3;
+  if (r.type === 'remote') {
+    const short = (r.name || '').replace(/^[^/]+\//, '');
+    if (short === 'HEAD') return 7;
+    return REF_MAINLINE.has(short) ? 4 : 5;
+  }
+  return 6;
+}
+// A commit's refs as the pills to draw, ranked: [{ ref, label, synced: [remote names] }].
+function rankedRefItems(refs) {
+  const shown = visibleRefsForDisplay(refs);
+  const localByName = new Map();
+  const items = [];
+  for (const s of shown) {
+    if (s.ref.type !== 'local') continue;
+    const item = { ref: s.ref, label: s.label, synced: [] };
+    localByName.set(s.ref.name, item);
+    items.push(item);
+  }
+  for (const s of shown) {
+    if (s.ref.type === 'local') continue;
+    if (s.ref.type === 'remote') {
+      const twin = localByName.get((s.ref.name || '').replace(/^[^/]+\//, ''));
+      if (twin) { twin.synced.push(s.ref.name); continue; }
+    }
+    items.push({ ref: s.ref, label: s.label, synced: [] });
+  }
+  // Array.prototype.sort is stable, so equal ranks keep git's own order.
+  return items.sort((a, b) => refRank(a) - refRank(b));
+}
+function refItemWidth(item) {
+  return Math.ceil(_refMeasureContext().measureText(item.label).width) + REF_PILL_CHROME +
+    (item.synced.length ? REF_SYNC_CHROME : 0);
+}
+// Split ranked items into what fits in `avail` px and what goes behind the "+N" chip. The top
+// item is always shown, even if it alone overflows (the hover ticker reveals it). Stops at the
+// first item that doesn't fit rather than skipping to a shorter one, so the visible pills are
+// always the top of the ranking, never a lower-ranked one that merely happened to be short.
+function packRefItems(items, avail) {
+  const moreW = (n) => Math.ceil(_refMeasureContext().measureText('+' + n).width) + 18;
+  let used = 0, k = 0;
+  for (; k < items.length; k++) {
+    const w = refItemWidth(items[k]) + (k > 0 ? REF_PILL_GAP : 0);
+    const left = items.length - k - 1;
+    if (k > 0 && used + w + (left ? moreW(left) : 0) > avail) break;
+    used += w;
+  }
+  return { shown: items.slice(0, k), hidden: items.slice(k) };
+}
+
+// One ref as a pill. data-ref-name always keeps the FULL ref name so context-menu actions get
+// the real ref; `synced` lists remote twins folded into a local pill.
+function refPillHtml(r, label, hash, synced) {
+  if (r.type === 'tag') {
+    // state.remoteTags is null until a fetch has actually asked the remote what it has,
+    // and an unmarked pill is the honest rendering of "we don't know yet".
+    const unpub = state.remoteTags && !state.remoteTags.has(r.name);
+    const tip = unpub ? ` title="Not pushed to ${escapeHtml(state.remoteTagsRemote || 'the remote')}"` : '';
+    return `<span class="ref-pill tag${unpub ? ' unpublished' : ''}" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}"${tip}>${escapeHtml(label)}</span>`;
+  }
+  if (r.type === 'local') {
+    const headCls = r.isHead ? ' head' : '';
+    const sync = synced && synced.length
+      ? `<span class="ref-sync" title="${escapeHtml(synced.join(', '))} ${synced.length === 1 ? 'is' : 'are'} at this commit too">⟁</span>`
+      : '';
+    return `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(hash)}">${escapeHtml(label)}${sync}</span>`;
+  }
+  if (r.type === 'remote') return `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
+  if (r.type === 'head') return `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
+  return `<span class="ref-pill" data-ref-type="other">${escapeHtml(label)}</span>`;
+}
+
+// ----- The "+N" popover: every ref on one commit -----
+// Lives on <body>, outside the clipped column. Lists the refs unmerged and grouped, so the
+// remote twin folded into a local pill gets its own pill (and its own context menu) here.
+let _refPopover = null, _refPopShowT = 0, _refPopHideT = 0, _refPopHash = null;
+function refPopoverEl() {
+  if (_refPopover) return _refPopover;
+  const el = document.createElement('div');
+  el.className = 'ref-popover hidden';
+  el.addEventListener('mouseenter', () => clearTimeout(_refPopHideT));
+  el.addEventListener('mouseleave', () => scheduleHideRefPopover());
+  el.addEventListener('contextmenu', (e) => {
+    const pill = e.target.closest('.ref-pill');
+    if (!pill) return;
+    e.preventDefault();
+    e.stopPropagation();
+    hideRefPopover();
+    showRefContextMenu(pill.dataset.refType, pill.dataset.refName, e.pageX, e.pageY);
+  });
+  // Dragging a local branch out of the popover onto a commit row works as from the column.
+  // The popover is faded, not removed: removing a drag's source element cancels the drag.
+  el.addEventListener('dragstart', (e) => {
+    const pill = e.target.closest('.ref-pill[draggable="true"]');
+    if (!pill) return;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/x-gitgood-branch', pill.dataset.refName);
+    e.dataTransfer.setData('text/plain', pill.dataset.refName);
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', () => { el.classList.remove('dragging'); hideRefPopover(); });
+  document.body.appendChild(el);
+  _refPopover = el;
+  return el;
+}
+function showRefPopover(cell, commit) {
+  const el = refPopoverEl();
+  const all = visibleRefsForDisplay(commit.refs)
+    .map(s => ({ ref: s.ref, label: s.label, synced: [] }))
+    .sort((a, b) => refRank(a) - refRank(b));
+  const group = (title, list) => list.length
+    ? `<div class="ref-popover-group"><div class="ref-popover-title">${title} · ${list.length}</div>` +
+      `<div class="ref-popover-pills">${list.map(i => refPillHtml(i.ref, i.label, commit.hash)).join('')}</div></div>`
+    : '';
+  const t = (i) => i.ref.type;
+  el.innerHTML =
+    `<div class="ref-popover-head">${all.length} refs at <code>${escapeHtml(commit.hash.slice(0, 7))}</code></div>` +
+    group('Branches', all.filter(i => t(i) === 'local' || t(i) === 'head')) +
+    group('Remote', all.filter(i => t(i) === 'remote')) +
+    group('Tags', all.filter(i => t(i) === 'tag')) +
+    group('Other', all.filter(i => !['local', 'head', 'remote', 'tag'].includes(t(i))));
+  el.classList.remove('hidden');
+  // Under the cell, left edges aligned; flipped above it when the window has no room below.
+  const r = cell.getBoundingClientRect();
+  const w = el.offsetWidth, h = el.offsetHeight;
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+  const top = (r.bottom + 4 + h <= window.innerHeight - 8) ? r.bottom + 4 : Math.max(8, r.top - h - 4);
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+  _refPopHash = commit.hash;
+}
+function scheduleShowRefPopover(cell, commit) {
+  clearTimeout(_refPopHideT);
+  clearTimeout(_refPopShowT);
+  if (_refPopHash === commit.hash && _refPopover && !_refPopover.classList.contains('hidden')) return;
+  _refPopShowT = setTimeout(() => { if (cell.isConnected) showRefPopover(cell, commit); }, 220);
+}
+function scheduleHideRefPopover() {
+  clearTimeout(_refPopShowT);
+  clearTimeout(_refPopHideT);
+  _refPopHideT = setTimeout(hideRefPopover, 180);
+}
+function hideRefPopover() {
+  clearTimeout(_refPopShowT);
+  clearTimeout(_refPopHideT);
+  if (_refPopover) _refPopover.classList.add('hidden');
+  _refPopHash = null;
+}
+
 function measureRefBlockWidth(commit) {
-  const shown = visibleRefsForDisplay(commit && commit.refs);
-  if (!shown.length) return 0;
-  const ctx = _refMeasureContext();
+  const items = rankedRefItems(commit && commit.refs);
+  if (!items.length) return 0;
   let w = REF_CELL_PAD;
-  for (let i = 0; i < shown.length; i++) {
-    w += Math.ceil(ctx.measureText(shown[i].label).width) + REF_PILL_CHROME;
+  for (let i = 0; i < items.length; i++) {
+    w += refItemWidth(items[i]);
     if (i > 0) w += REF_PILL_GAP;
   }
   return w;
@@ -736,33 +904,26 @@ function renderGraph() {
   // row. Only commits that actually carry a ref get a cell; the fixed column width keeps the
   // lane graph aligned regardless. Pills are right-aligned so their labels point at the lanes.
   const buildRefCell = (c, pos) => {
-    // visibleRefsForDisplay applies the hide-local / strip-remote-prefix toggles. `label` is the
-    // text to draw; data-ref-name always keeps the ref's FULL name so context-menu actions
-    // (checkout/delete a remote branch, etc.) still receive the real ref.
-    const shown = visibleRefsForDisplay(c.refs);
-    if (!shown.length) return '';
-    let refPills = '';
-    for (const { ref: r, label } of shown) {
-      if (r.type === 'tag') {
-        // state.remoteTags is null until a fetch has actually asked the remote what it has,
-        // and an unmarked pill is the honest rendering of "we don't know yet".
-        const unpub = state.remoteTags && !state.remoteTags.has(r.name);
-        const tip = unpub ? ` title="Not pushed to ${escapeHtml(state.remoteTagsRemote || 'the remote')}"` : '';
-        refPills += `<span class="ref-pill tag${unpub ? ' unpublished' : ''}" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}"${tip}>${escapeHtml(label)}</span>`;
-      }
-      else if (r.type === 'local') {
-        const headCls = r.isHead ? ' head' : '';
-        refPills += `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(c.hash)}">${escapeHtml(label)}</span>`;
-      } else if (r.type === 'remote') refPills += `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
-      else if (r.type === 'head') refPills += `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
-      else refPills += `<span class="ref-pill" data-ref-type="other">${escapeHtml(label)}</span>`;
+    // Ranked, local+remote twins merged, then packed into the column (see packRefItems).
+    const items = rankedRefItems(c.refs);
+    if (!items.length) return '';
+    const { shown, hidden } = packRefItems(items, refColWidth - 4);
+    // Right-aligned, so the DOM runs least → most important: the top-ranked pill sits next
+    // to the lanes, and the "+N" chip at the far left.
+    let refPills = hidden.length
+      ? `<span class="ref-more" title="${hidden.length} more — hover to see every ref">+${hidden.length}</span>`
+      : '';
+    for (let i = shown.length - 1; i >= 0; i--) {
+      refPills += refPillHtml(shown[i].ref, shown[i].label, c.hash, shown[i].synced);
     }
-    // title lists the refs in full for when a crowded commit's pills overflow the clamped width.
-    const refTitle = escapeHtml(shown.map(s => s.label).join('  '));
+    // A packed cell (anything hidden or folded into a twin) opens the full popover on hover,
+    // which replaces the plain title tooltip.
+    const packed = hidden.length > 0 || items.some(i => i.synced.length);
+    const refTitle = packed ? '' : ` title="${escapeHtml(items.map(s => s.label).join('  '))}"`;
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
-    // Pills go in an inner track so a crowded cell (more/longer branches than the clamped
-    // column can show) can ping-pong its overflow into view on hover (see startRefMarquee).
-    return `<div class="graph-ref-cell${relCls}" data-hash="${c.hash}" title="${refTitle}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px"><div class="graph-ref-track">${refPills}</div></div>`;
+    // Pills go in an inner track so a lone pill longer than the clamped column can still
+    // ping-pong into view on hover (see startRefMarquee).
+    return `<div class="graph-ref-cell${relCls}${packed ? ' packed' : ''}" data-hash="${c.hash}"${refTitle} style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px"><div class="graph-ref-track">${refPills}</div></div>`;
   };
 
   // Build the row HTML for one commit. Rows are absolutely positioned at their row offset
@@ -945,6 +1106,7 @@ function renderGraph() {
   };
 
   // Replace previously-attached delegated handlers (if any) to avoid stacking
+  hideRefPopover(); // its cell is about to be replaced
   if (container._graphHandlers) {
     container.removeEventListener('click', container._graphHandlers.click);
     container.removeEventListener('dblclick', container._graphHandlers.dblclick);
@@ -1049,6 +1211,7 @@ function renderGraph() {
   };
 
   const onContext = (e) => {
+    hideRefPopover();
     // Ref-pill right click — handle ref menu instead
     const pill = e.target.closest('.ref-pill');
     if (pill) {
@@ -1156,6 +1319,12 @@ function renderGraph() {
   };
 
   const onMouseOver = (e) => {
+    const packedCell = e.target.closest('.graph-ref-cell.packed');
+    if (packedCell) {
+      const commit = container._graphCommitsByHash.get(packedCell.dataset.hash);
+      if (commit) scheduleShowRefPopover(packedCell, commit);
+      return;
+    }
     const row = e.target.closest('.graph-row');
     if (!row || !row.dataset.hash) return;
     const dot = dotForHash(row.dataset.hash);
@@ -1163,6 +1332,12 @@ function renderGraph() {
     startRefMarquee(row.dataset.hash);
   };
   const onMouseOut = (e) => {
+    const packedCell = e.target.closest('.graph-ref-cell.packed');
+    if (packedCell) {
+      // Into the popover (or between the cell's own pills) keeps it; anywhere else hides it.
+      if (!packedCell.contains(e.relatedTarget)) scheduleHideRefPopover();
+      return;
+    }
     const row = e.target.closest('.graph-row');
     if (!row || !row.dataset.hash) return;
     // Ignore moves between the row's own children — only clear when truly leaving it.
@@ -1275,6 +1450,8 @@ function renderGraph() {
 
   // Repaint the window on scroll, throttled to one paint per animation frame (#1).
   const onScroll = () => {
+    // Anchored to a cell by viewport position, so it would float away from it.
+    if (_refPopHash) hideRefPopover();
     if (container._graphScrollRaf) return;
     container._graphScrollRaf = requestAnimationFrame(() => {
       container._graphScrollRaf = 0;
