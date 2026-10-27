@@ -250,6 +250,7 @@ const api = {
   lfsPush: (opts) => ipcRenderer.invoke('repo:lfsPush', opts),
   lfsCheckout: () => ipcRenderer.invoke('repo:lfsCheckout'),
   lfsMigrateImport: (opts) => ipcRenderer.invoke('repo:lfsMigrateImport', opts),
+  lfsUnconvert: (opts) => ipcRenderer.invoke('repo:lfsUnconvert', opts),
   deleteBranches: (opts) => ipcRenderer.invoke('repo:deleteBranches', opts),
 
   // Settings

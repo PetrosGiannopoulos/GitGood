@@ -861,6 +861,22 @@ html.theme-hero.hero-comic .screen {
 .lfs-file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
 .lfs-file-size { color: var(--gold-accent); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
+/* Selectable list (take files out of LFS): a checkbox column in front of the dot. */
+.lfs-files-toolbar { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.lfs-files-toolbar .lfs-files-filter { flex: 1; margin: 0; }
+.lfs-file-item.selectable { grid-template-columns: 16px 18px 1fr auto; cursor: pointer; }
+.lfs-file-item.selectable:hover { background: var(--bg-raised); }
+.lfs-file-item.selectable.disabled { cursor: default; opacity: 0.55; }
+.lfs-file-item.selectable.disabled:hover { background: transparent; }
+.lfs-file-check { margin: 0; cursor: pointer; }
+.lfs-files-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 8px; }
+.lfs-files-count { font-size: 11px; color: var(--text-dim); }
+
+.lfs-unconvert-list { list-style: none; margin: 6px 0 10px; padding: 6px 10px; max-height: 140px; overflow-y: auto;
+  border: 1px solid var(--border); font-size: 12px; color: var(--bone-white); }
+.lfs-unconvert-note { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+.lfs-unconvert-push { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 12px; cursor: pointer; }
+
 .lfs-empty {
   padding: 12px;
   text-align: center;

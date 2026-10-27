@@ -149,6 +149,9 @@ async function showLfsManager() {
       };
     });
 
+    // The file list is selectable: ticked files can be taken out of LFS (lfsUnconvertDialog).
+    // Only a downloaded file can be ticked — its working copy holds the real bytes; an
+    // undownloaded one is a pointer, which main would refuse to commit as the file anyway.
     byId('lfs-list-files').onclick = async () => {
       const out = byId('lfs-files-result');
       out.innerHTML = '<div class="lfs-empty">Loading…</div>';
@@ -156,18 +159,70 @@ async function showLfsManager() {
       if (!r.ok) { out.innerHTML = `<div class="lfs-empty">Failed: ${escapeHtml(r.error)}</div>`; return; }
       const files = r.data.files || [];
       if (!files.length) { out.innerHTML = '<div class="lfs-empty">No LFS-managed files.</div>'; return; }
+      const selected = new Set();
       out.innerHTML = `
-        <ul class="lfs-files-list">
-          ${files.slice(0, 200).map(f => `
-            <li class="lfs-file-item">
-              <span class="lfs-file-dl" title="${f.downloaded ? 'Downloaded' : 'Not downloaded'}">${f.downloaded ? '●' : '○'}</span>
-              <span class="lfs-file-path text-mono" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
-              <span class="lfs-file-size">${escapeHtml(f.size || '')}</span>
-            </li>
-          `).join('')}
-          ${files.length > 200 ? `<li class="lfs-empty">…and ${files.length - 200} more</li>` : ''}
-        </ul>
-      `;
+        <div class="lfs-files-toolbar">
+          <input type="text" class="modal-input lfs-files-filter" placeholder="Filter files…" autocomplete="off" />
+          <button class="mini-btn" data-lfs-sel="all" type="button" title="Tick every downloaded file shown">All</button>
+          <button class="mini-btn" data-lfs-sel="none" type="button">None</button>
+        </div>
+        <ul class="lfs-files-list"></ul>
+        <div class="lfs-files-actions">
+          <span class="lfs-files-count"></span>
+          <button class="mini-btn primary" id="lfs-unconvert-btn" type="button" disabled
+            title="Store the ticked files as ordinary git files from the next commit on — a small change then pushes as a small delta instead of the whole file">⇄ Store as plain git…</button>
+        </div>`;
+      const list = out.querySelector('.lfs-files-list');
+      const filterEl = out.querySelector('.lfs-files-filter');
+      const countEl = out.querySelector('.lfs-files-count');
+      const actBtn = out.querySelector('#lfs-unconvert-btn');
+      const visible = () => {
+        const terms = filterEl.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+        return files.filter(f => terms.every(t => f.path.toLowerCase().includes(t)));
+      };
+      const syncCount = () => {
+        countEl.textContent = selected.size ? `${selected.size} selected` : '';
+        actBtn.disabled = !selected.size;
+      };
+      const draw = () => {
+        const shown = visible();
+        list.innerHTML = shown.slice(0, 200).map(f => `
+          <li class="lfs-file-item selectable${f.downloaded ? '' : ' disabled'}"
+              title="${f.downloaded ? escapeHtml(f.path) : 'Not downloaded — run LFS Pull before converting this file'}">
+            <input type="checkbox" class="lfs-file-check" data-path="${escapeHtml(f.path)}"
+              ${selected.has(f.path) ? 'checked' : ''} ${f.downloaded ? '' : 'disabled'} />
+            <span class="lfs-file-dl" title="${f.downloaded ? 'Downloaded' : 'Not downloaded'}">${f.downloaded ? '●' : '○'}</span>
+            <span class="lfs-file-path text-mono">${escapeHtml(f.path)}</span>
+            <span class="lfs-file-size">${escapeHtml(f.size || '')}</span>
+          </li>`).join('') +
+          (shown.length > 200 ? `<li class="lfs-empty">…and ${shown.length - 200} more — filter to narrow the list</li>` : '') +
+          (!shown.length ? '<li class="lfs-empty">No matches</li>' : '');
+        syncCount();
+      };
+      list.onchange = (e) => {
+        const cb = e.target.closest('.lfs-file-check');
+        if (!cb) return;
+        if (cb.checked) selected.add(cb.dataset.path); else selected.delete(cb.dataset.path);
+        syncCount();
+      };
+      // Clicking anywhere on a row toggles its box, not just the box itself.
+      list.onclick = (e) => {
+        const li = e.target.closest('.lfs-file-item.selectable');
+        if (!li || e.target.closest('.lfs-file-check')) return;
+        const cb = li.querySelector('.lfs-file-check');
+        if (cb && !cb.disabled) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+      };
+      // All/None act on what the filter shows, like every other filtered list in the app.
+      out.querySelectorAll('[data-lfs-sel]').forEach(b => b.onclick = () => {
+        for (const f of visible()) {
+          if (!f.downloaded) continue;
+          if (b.dataset.lfsSel === 'all') selected.add(f.path); else selected.delete(f.path);
+        }
+        draw();
+      });
+      filterEl.oninput = draw;
+      actBtn.onclick = () => lfsUnconvertDialog(Array.from(selected));
+      draw();
     };
 
     byId('lfs-migrate-btn').onclick = async () => {
@@ -191,6 +246,48 @@ async function showLfsManager() {
   close.className = 'btn-medieval'; close.textContent = 'Close';
   close.onclick = () => { modal.hide(); refreshDiskUsage().catch(() => {}); };
   modal.show({ title: '⛂ Git LFS Manager', body, footer: [close] });
+}
+
+// Confirm taking files out of LFS (repo:lfsUnconvert). Spells out what changes and what
+// doesn't — history keeps the LFS objects, so this is not a migrate and needs no force-push —
+// then commits, and pushes through the ordinary doPush so upstream handling is the usual one.
+function lfsUnconvertDialog(paths) {
+  const n = paths.length;
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="modal-text">From the next commit on, ${n === 1 ? 'this file is' : `these ${n} files are`} stored as
+      ordinary git files instead of LFS. Git sends only the difference against the previous version,
+      so a small change (one moved GameObject) pushes as a small delta rather than the whole file.</p>
+    <ul class="lfs-unconvert-list">${paths.slice(0, 12).map(p => `<li class="text-mono">${escapeHtml(p)}</li>`).join('')}
+      ${n > 12 ? `<li class="lfs-empty">…and ${n - 12} more</li>` : ''}</ul>
+    <p class="modal-text lfs-unconvert-note">
+      • One line per file is added to <code>.gitattributes</code>; the patterns that track the rest stay as they are.<br>
+      • History is <strong>not</strong> rewritten: older commits still point at their LFS objects, so no force-push.<br>
+      • Collaborators get the change with an ordinary pull.<br>
+      • The first push uploads each file once, in full. Unity scenes delta best with
+        <em>Asset Serialization: Force Text</em>.
+    </p>
+    <label class="modal-label" for="lfs-unconvert-msg">Commit message</label>
+    <input type="text" class="modal-input" id="lfs-unconvert-msg"
+      value="${escapeHtml(`Stop storing ${n} file${n === 1 ? '' : 's'} in Git LFS`)}" />
+    <label class="lfs-unconvert-push"><input type="checkbox" id="lfs-unconvert-push" checked />
+      Push after committing, so others get it when they pull</label>`;
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-medieval'; cancel.textContent = 'Cancel';
+  cancel.onclick = () => showLfsManager();
+  const ok = document.createElement('button');
+  ok.className = 'btn-medieval primary'; ok.textContent = n === 1 ? 'Convert file' : `Convert ${n} files`;
+  ok.onclick = async () => {
+    const message = body.querySelector('#lfs-unconvert-msg').value.trim();
+    const push = body.querySelector('#lfs-unconvert-push').checked;
+    const r = await withLoading('Taking files out of LFS', () => gs.lfsUnconvert({ paths, message }));
+    if (!r.ok) { showToast(r.error || 'Conversion failed', 'error', 9000); return; }
+    modal.hide();
+    showToast(`Committed: ${r.data.converted} file${r.data.converted === 1 ? '' : 's'} now stored as plain git`, 'success', 5000);
+    await refreshAll();
+    if (push) await doPush(false);
+  };
+  modal.show({ title: '⇄ Store as plain git (leave LFS)', body, footer: [cancel, ok] });
 }
 
 function showBranchCleanupDialog(data) {

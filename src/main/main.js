@@ -13,6 +13,7 @@ const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
 const { mergeUnityYaml } = require('./lib/unity-merge');
+const { lfsOptOutPattern, appendLfsOptOuts } = require('./lib/lfs-optout');
 const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
 const { lastPushFromReflog, recentPushedBranches, parseMergeTargets, mergedIntoTarget } = require('./lib/recent-pushes');
 
@@ -3794,6 +3795,97 @@ ipcMain.handle('repo:lfsMigrateImport', wrap(async (_, opts) => {
     }
   }
   return await g.raw(args);
+}));
+
+// Take individual files out of LFS, going forward only: an override line per file in the
+// root .gitattributes (lib/lfs-optout.js), `add --renormalize` so the index stores the real
+// bytes instead of a pointer, and one commit holding exactly that. No history is rewritten —
+// older commits keep their LFS objects — so the result pushes normally, and a collaborator's
+// pull just replaces the pointer-backed file with identical bytes (verified, status clean).
+// The point is size on the wire: git delta-compresses a blob against its previous version,
+// LFS uploads the whole object again for any change.
+//
+// `add --renormalize`, not `add`: the file's stat still matches its index entry, so a plain
+// add would keep the pointer. Refused up front rather than undone after:
+//  - a file whose working copy is still a pointer (object never downloaded) — committing
+//    that would store the pointer text *as the file*, for everyone;
+//  - uncommitted changes in a selected file or .gitattributes, or anything already staged —
+//    the commit must hold the conversion and nothing else.
+ipcMain.handle('repo:lfsUnconvert', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const paths = Array.from(new Set(((opts && opts.paths) || []).filter(Boolean)));
+  const message = ((opts && opts.message) || '').trim()
+    || `Stop storing ${paths.length} file${paths.length === 1 ? '' : 's'} in Git LFS`;
+  if (!paths.length) throw new Error('No files selected');
+  paths.forEach(lfsOptOutPattern); // throws on a path .gitattributes cannot express
+  // Unity paths contain [ ], which a pathspec reads as a glob class: "My [Big].unity" would
+  // also match "My B.unity". :(literal) makes every pathspec below mean exactly that file.
+  const lit = ['.gitattributes', ...paths].map(p => ':(literal)' + p);
+
+  const staged = (await g.raw(['diff', '--cached', '--name-only'])).trim();
+  if (staged) throw new Error('You have staged changes — commit, unstage or stash them first, or they would land in this commit too.');
+
+  let dirty = '';
+  await forEachPathChunk(lit, async chunk => {
+    dirty += await g.raw(['status', '--porcelain', '--', ...chunk]);
+  });
+  if (dirty.trim()) {
+    const names = dirty.trim().split('\n').map(l => l.slice(3)).slice(0, 3).join(', ');
+    throw new Error(`Commit or discard these changes first, so the commit holds only the conversion: ${names}`);
+  }
+
+  // Which files LFS actually manages here, asked of git itself (-z: no quoting, no argv cap).
+  const lfsFilterOf = async () => {
+    const r = await gitRun(['check-attr', '--stdin', '-z', 'filter'], null, 30000, paths.join('\0') + '\0');
+    if (r.code !== 0) throw new Error(r.err.trim() || 'git check-attr failed');
+    const f = r.out.split('\0');
+    const map = new Map();
+    for (let i = 0; i + 2 < f.length; i += 3) map.set(f[i], f[i + 2]);
+    return map;
+  };
+  const before = await lfsFilterOf();
+  const notLfs = paths.filter(p => before.get(p) !== 'lfs');
+  if (notLfs.length) throw new Error(`Not tracked by LFS: ${notLfs.slice(0, 3).join(', ')}`);
+
+  const notDownloaded = [];
+  for (const p of paths) {
+    const abs = path.join(currentRepoPath, p);
+    if (!fs.existsSync(abs)) { notDownloaded.push(p); continue; }
+    const fd = fs.openSync(abs, 'r');
+    const head = Buffer.alloc(1024);
+    const n = fs.readSync(fd, head, 0, 1024, 0);
+    fs.closeSync(fd);
+    if (parseLfsPointer(head.subarray(0, n).toString('utf8'))) notDownloaded.push(p);
+  }
+  if (notDownloaded.length) {
+    throw new Error(`Only a pointer is checked out for ${notDownloaded.slice(0, 3).join(', ')}` +
+      `${notDownloaded.length > 3 ? ` (+${notDownloaded.length - 3} more)` : ''} — run LFS Pull first, or the pointer text would be committed as the file.`);
+  }
+
+  const attrPath = path.join(currentRepoPath, '.gitattributes');
+  const hadAttr = fs.existsSync(attrPath);
+  const original = hadAttr ? fs.readFileSync(attrPath, 'utf8') : '';
+  const rollback = async () => {
+    try { await forEachPathChunk(lit, chunk => g.raw(['reset', '-q', '--', ...chunk])); } catch (e) {}
+    if (hadAttr) fs.writeFileSync(attrPath, original); else { try { fs.unlinkSync(attrPath); } catch (e) {} }
+  };
+
+  fs.writeFileSync(attrPath, appendLfsOptOuts(original, paths));
+  try {
+    // A .gitattributes deeper in the tree outranks the root one, so the override can lose.
+    const after = await lfsFilterOf();
+    const still = paths.filter(p => after.get(p) === 'lfs');
+    if (still.length) {
+      throw new Error(`A .gitattributes file in a subfolder still sends ${still.slice(0, 3).join(', ')} to LFS — ` +
+        'edit that file instead; nothing was changed.');
+    }
+    await forEachPathChunk(lit, chunk => g.raw(['add', '--renormalize', '--', ...chunk]));
+    await g.raw(['commit', '-m', message]);
+  } catch (e) {
+    await rollback();
+    throw e;
+  }
+  return { converted: paths.length, message };
 }));
 
 ipcMain.handle('repo:deleteBranches', wrap(async (_, opts) => {
