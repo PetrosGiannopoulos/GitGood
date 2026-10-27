@@ -5485,6 +5485,21 @@ ipcMain.handle('repo:fileBlob', wrap(async (_, { rev, path: filePath }) => {
   return Object.assign(meta, { dataUri: `data:${mime};base64,${r.buf.toString('base64')}` });
 }));
 
+// One side of a diff as text, for the pop-out's "full file" view, which draws the lines
+// between hunks around the diff. Same revision vocabulary as repo:fileBlob (WORKTREE,
+// INDEX or a commit-ish). Binary content is reported, never decoded into mojibake.
+const FILE_TEXT_MAX_BYTES = 5 * 1024 * 1024;
+ipcMain.handle('repo:fileText', wrap(async (_, { rev, path: filePath }) => {
+  ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+  const r = await readRevBytes(rev, filePath, FILE_TEXT_MAX_BYTES);
+  if (!r.exists) return { exists: false };
+  if (r.lfsMissing) return { exists: true, lfsMissing: true };
+  if (r.tooLarge) return { exists: true, tooLarge: true, bytes: r.bytes };
+  if (r.buf.subarray(0, 8000).includes(0)) return { exists: true, binary: true };
+  return { exists: true, text: r.buf.toString('utf8') };
+}));
+
 // Asset paths for GUIDs, read from the .meta files in the working tree. One `git grep` for
 // the whole batch; cached per repository, because GUIDs are stable for an asset's lifetime.
 const _guidPaths = new Map();

@@ -41,6 +41,7 @@ const api = {
   diffUnstaged: (file, opts) => ipcRenderer.invoke('repo:diffUnstaged', file, opts),
   diffStaged: (file, opts) => ipcRenderer.invoke('repo:diffStaged', file, opts),
   fileBlob: (opts) => ipcRenderer.invoke('repo:fileBlob', opts),
+  fileText: (opts) => ipcRenderer.invoke('repo:fileText', opts),
   smartDiff: (opts) => ipcRenderer.invoke('repo:smartDiff', opts),
 
   // Staging

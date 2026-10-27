@@ -1571,11 +1571,17 @@ function buildPopoutModel() {
           into.innerHTML = '<div class="empty-state"><p>No textual differences (binary or empty).</p></div>';
           return;
         }
-        into.innerHTML = renderDiff(result.data, {
+        const full = file.staged
+          ? await popoutFullFile('INDEX', 'HEAD', file.path)
+          : await popoutFullFile('WORKTREE', 'INDEX', file.path);
+        into.innerHTML = full.notice + renderDiff(result.data, {
           filePath: file.path,
-          imageRevs: file.staged ? { oldRev: 'HEAD', newRev: 'INDEX' } : { oldRev: 'INDEX', newRev: 'WORKTREE' }
+          imageRevs: file.staged ? { oldRev: 'HEAD', newRev: 'INDEX' } : { oldRev: 'INDEX', newRev: 'WORKTREE' },
+          fullFileLines: full.lines,
+          fullFileOldLines: full.oldLines
         });
         hydrateImageDiffs(into);
+        if (full.lines) popoutScrollToFirstChange(into);
       }
     };
   }
@@ -1592,13 +1598,19 @@ function buildPopoutModel() {
       hash: opts.hash,
       label: opts.hash ? `Commit ${String(opts.hash).slice(0,7)}` : 'Commit changes',
       files: owner._cfiles.map(f => ({ path: f.path, status: f.status, _diff: f.diff })),
-      render: (file, into) => {
+      render: async (file, into) => {
         try {
-          into.innerHTML = renderDiff(file._diff, Object.assign({}, opts, {
+          const full = opts.hash
+            ? await popoutFullFile(opts.hash, opts.hash + '^', file.path)
+            : { lines: null, oldLines: null, notice: '' };
+          into.innerHTML = full.notice + renderDiff(file._diff, Object.assign({}, opts, {
             filePath: file.path,
-            imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined
+            imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
+            fullFileLines: full.lines,
+            fullFileOldLines: full.oldLines
           }));
           hydrateImageDiffs(into);
+          if (full.lines) popoutScrollToFirstChange(into);
         }
         catch (e) { into.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(e.message||String(e))}</p></div>`; }
       }
@@ -1609,6 +1621,61 @@ function buildPopoutModel() {
 
 let _popoutModel = null;
 let _popoutActivePath = null;
+// "Full file": draw the rest of the file, ghosted, around the hunks — in unified view from
+// the new side, in split view each side from its own file. It stays on across files until
+// clicked again.
+let _popoutFullFile = false;
+
+// One side of the file at `rev`, as lines, or a reason it can't be shown.
+async function popoutFileLines(rev, filePath) {
+  const r = await gs.fileText({ rev, path: filePath });
+  if (!r.ok) return { why: r.error };
+  const d = r.data || {};
+  if (!d.exists) return { why: 'the file does not exist on this side (deleted).' };
+  if (d.binary) return { why: 'binary content.' };
+  if (d.tooLarge) return { why: 'the file is too large.' };
+  if (d.lfsMissing) return { why: 'the LFS object has not been downloaded.' };
+  const lines = String(d.text).split(/\r?\n/);
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return { lines };
+}
+
+// The diff options full-file mode adds: the new side's lines (which place the gaps) and, in
+// split view, the old side's. Anything that can't be shown (deleted, binary, too large, LFS
+// object not downloaded) yields a notice and the plain diff instead. A missing old side
+// (a root commit's parent) only costs the left column its own text — it falls back to the
+// new side's, which outside the hunks is the same line.
+async function popoutFullFile(rev, oldRev, filePath) {
+  if (!_popoutFullFile) return { lines: null, oldLines: null, notice: '' };
+  const split = state.diffMode === 'split';
+  const [nw, old] = await Promise.all([
+    popoutFileLines(rev, filePath),
+    split && oldRev ? popoutFileLines(oldRev, filePath) : Promise.resolve({})
+  ]);
+  if (!nw.lines) {
+    return { lines: null, oldLines: null,
+      notice: `<div class="diff-notice">${escapeHtml('Full file unavailable: ' + nw.why)}</div>` };
+  }
+  return { lines: nw.lines, oldLines: old.lines || null, notice: '' };
+}
+
+// With the whole file drawn, the change may be thousands of lines down — land on it.
+function popoutScrollToFirstChange(into) {
+  const first = into.querySelector(
+    '.diff-line.hunk, .diff-line.add, .diff-line.del, .dsplit-meta, .dsplit-side.add, .dsplit-side.del');
+  if (first) {
+    into.scrollTop += first.getBoundingClientRect().top - into.getBoundingClientRect().top - 60;
+  }
+}
+
+function syncPopoutFullFileBtn() {
+  const btn = document.getElementById('diff-popout-fullfile');
+  if (!btn) return;
+  btn.classList.toggle('active', _popoutFullFile);
+  btn.title = _popoutFullFile
+    ? 'Hide the rest of the file'
+    : 'Show the rest of the file around the changes (ghosted)';
+}
 
 function renderPopoutFileList() {
   const listEl = document.getElementById('diff-popout-filelist');
@@ -1686,6 +1753,7 @@ function openDiffPopout() {
   // Sync mode buttons
   document.querySelectorAll('#diff-popout-toggle .diff-view-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.diffmode === state.diffMode));
+  syncPopoutFullFileBtn();
 
   renderPopoutFileList();
   if (initial) selectPopoutFile(initial);
@@ -1714,11 +1782,18 @@ function refreshPopoutDiff() {
   if (file && content) _popoutModel.render(file, content);
   document.querySelectorAll('#diff-popout-toggle .diff-view-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.diffmode === state.diffMode));
+  syncPopoutFullFileBtn();
 }
 
 (() => {
   const closeBtn = document.getElementById('diff-popout-close');
   if (closeBtn) closeBtn.onclick = () => closeDiffPopout();
+  const fullBtn = document.getElementById('diff-popout-fullfile');
+  if (fullBtn) fullBtn.onclick = () => {
+    _popoutFullFile = !_popoutFullFile;
+    syncPopoutFullFileBtn();
+    refreshPopoutDiff();
+  };
   const overlay = document.getElementById('diff-popout-overlay');
   // Note: intentionally NOT closing on backdrop click — only the Close button or Esc.
   document.addEventListener('keydown', (e) => {

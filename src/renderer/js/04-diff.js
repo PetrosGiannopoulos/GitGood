@@ -745,8 +745,34 @@ function renderDiffUnified(diffText, opts) {
     }
 
     const lang = detectLanguage(file.path);
+
+    // Full-file mode (the pop-out's toggle): the new side's lines that no hunk shows are
+    // drawn ghosted in the gaps. A zero-count side's start names the line *before* the
+    // change, hence the +1. Old-side numbers follow from each hunk's offset.
+    const ghost = (opts.fullFileLines && parsed.files.length === 1) ? opts.fullFileLines : null;
+    let ghostNext = 1, ghostOldNext = 1;
+    const emitGhosts = (from, to, oldFrom) => {
+      for (let n = from; n <= to && n <= ghost.length; n++) {
+        if (emitted >= cap) { stop = true; return; }
+        out.push(
+          `<div class="diff-line ghost">` +
+            `<div class="diff-gutter">${oldFrom + (n - from)}</div><div class="diff-gutter">${n}</div>` +
+            `<div class="diff-text"> ${renderCodeLine(ghost[n - 1], null, lang)}</div>` +
+          `</div>`);
+        emitted++;
+      }
+    };
+
     file.hunks.forEach((hunk, hi) => {
       if (stop) return;
+      if (ghost) {
+        const nS = hunk.newCount ? hunk.newStart : hunk.newStart + 1;
+        const oS = hunk.oldCount ? hunk.oldStart : hunk.oldStart + 1;
+        emitGhosts(ghostNext, nS - 1, ghostOldNext);
+        if (stop) return;
+        ghostNext = nS + hunk.newCount;
+        ghostOldNext = oS + hunk.oldCount;
+      }
       const actions = stageable
         ? `<span class="dhunk-actions">` +
             (opts.staged
@@ -825,6 +851,8 @@ function renderDiffUnified(diffText, opts) {
         if (!delRun.length && !addRun.length) i++;
       }
     });
+    // A truncated diff's last hunk is not its real last hunk, so the tail would be wrong.
+    if (ghost && !stop && !opts.diffTruncated) emitGhosts(ghostNext, ghost.length, ghostOldNext);
     if (smart) out.push(SMART_DIFF_CLOSE);
   }
 
@@ -881,8 +909,37 @@ function renderDiffSplit(diffText, opts) {
     }
 
     const lang = detectLanguage(file.path);
+
+    // Full-file mode, as in the unified view, with each side's gap drawn from its own file.
+    // Outside the hunks the two sides normally match, but under -w they may differ in
+    // whitespace — so the old file is used when it was supplied, the new one otherwise.
+    const ghost = (opts.fullFileLines && parsed.files.length === 1) ? opts.fullFileLines : null;
+    const ghostOld = opts.fullFileOldLines || null;
+    let ghostNext = 1, ghostOldNext = 1;
+    const emitGhosts = (from, to, oldFrom) => {
+      for (let n = from; n <= to && n <= ghost.length; n++) {
+        if (emitted >= cap) { stop = true; return; }
+        const o = oldFrom + (n - from);
+        const oldText = ghostOld && o <= ghostOld.length ? ghostOld[o - 1] : ghost[n - 1];
+        parts.push(
+          `<div class="dsplit-row ghost">` +
+            `<div class="dsplit-side"><span class="dsplit-num">${o}</span><span class="dsplit-text">${renderCodeLine(oldText, null, lang)}</span></div>` +
+            `<div class="dsplit-side"><span class="dsplit-num">${n}</span><span class="dsplit-text">${renderCodeLine(ghost[n - 1], null, lang)}</span></div>` +
+          `</div>`);
+        emitted++;
+      }
+    };
+
     file.hunks.forEach((hunk, hi) => {
       if (stop) return;
+      if (ghost) {
+        const nS = hunk.newCount ? hunk.newStart : hunk.newStart + 1;
+        const oS = hunk.oldCount ? hunk.oldStart : hunk.oldStart + 1;
+        emitGhosts(ghostNext, nS - 1, ghostOldNext);
+        if (stop) return;
+        ghostNext = nS + hunk.newCount;
+        ghostOldNext = oS + hunk.oldCount;
+      }
       const actions = stageable
         ? `<span class="dhunk-actions">` +
             (opts.staged
@@ -963,6 +1020,7 @@ function renderDiffSplit(diffText, opts) {
         newLine += addRun.length;
       }
     });
+    if (ghost && !stop && !opts.diffTruncated) emitGhosts(ghostNext, ghost.length, ghostOldNext);
     if (smart) parts.push(SMART_DIFF_CLOSE);
   }
 

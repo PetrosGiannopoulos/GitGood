@@ -1898,6 +1898,27 @@ body.diff-popout-open .toast-container { z-index: 9710; }
 }
 .diff-popout-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 
+/* "Full file" toggle: deliberately quiet — text only until hovered or switched on. */
+.diff-popout-fullfile-btn {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 3px 7px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: color 0.12s, border-color 0.12s, opacity 0.12s;
+}
+.diff-popout-fullfile-btn:hover { opacity: 1; color: var(--text-dim); border-color: var(--border-strong); }
+.diff-popout-fullfile-btn.active { opacity: 1; color: var(--accent); border-color: var(--accent); }
+
+/* The rest of the file around the hunks: present for orientation, visibly not the change. */
+.diff-line.ghost, .dsplit-row.ghost { opacity: 0.38; background: transparent; }
+.diff-line.ghost:hover, .dsplit-row.ghost:hover { opacity: 0.6; }
+
 /* Vertical body: filter + file list on top (full width), diff below. */
 .diff-popout-body {
   flex: 1;
