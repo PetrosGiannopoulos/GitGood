@@ -51,6 +51,13 @@ function layoutGraph(commits, opts) {
   // mode a "missing first parent" means the parent was filtered out, NOT that history ran off
   // the loaded window — so we must not draw the long "continues below" line down to the bottom.
   const filtered = !!(opts && opts.filtered);
+  // Filtered, a lane must not be held for a parent the filter removed: nothing will ever
+  // land on it, so it stays occupied to the end of the list and every later chain of
+  // matches opens a new lane to its right — a staircase wide enough to push the message,
+  // author and date columns off-screen. (Unfiltered, holding it is right: the parent is
+  // beyond the loaded window and the line is drawn on to the bottom edge.)
+  const present = filtered ? new Set(commits.map(c => c.hash)) : null;
+  const holdsLane = (hash) => !filtered || present.has(hash);
   const positions = new Map();
   const edges = [];
 
@@ -131,10 +138,10 @@ function layoutGraph(commits, opts) {
     for (const i of convergingLanes) { lanes[i] = null; laneColorIdx[i] = -1; laneRef[i] = null; }
 
     // Assign myLane to follow the first parent
-    if (parents.length > 0) {
+    if (parents.length > 0 && holdsLane(parents[0])) {
       lanes[myLane] = parents[0];
     } else {
-      lanes[myLane] = null; // root commit; lane ends
+      lanes[myLane] = null; // root commit, or a parent filtered out of view; lane ends
       laneColorIdx[myLane] = -1;
       laneRef[myLane] = null;
     }
@@ -146,6 +153,7 @@ function layoutGraph(commits, opts) {
     const mergeSource = parseMergeSource(c.message);
     for (let p = 1; p < parents.length; p++) {
       const par = parents[p];
+      if (!holdsLane(par)) continue; // filtered out: drawn as a merge-out stub in pass 2c
       let pl = findLane(par);
       if (pl === -1) {
         pl = allocLane();
