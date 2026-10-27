@@ -183,7 +183,14 @@ app.on('activate', () => {
 
 // simple-git blocks GIT_SSH_COMMAND by default for safety. Since our SSH key path comes
 // from the user's own file picker (not an untrusted source), we opt-in to allow it.
-const SG_OPTS = { unsafe: { allowUnsafeSshCommand: true } };
+//
+// core.quotePath=false: by default git prints any path with a byte over 0x7f as a quoted
+// octal escape ("\316\261.txt" for "α.txt"), in every listing and diff header, so a Greek
+// or accented file name reaches the UI as gibberish — and as a path no other git command
+// accepts back. Only those bytes are affected: a path with a quote, tab or newline is still
+// quoted. Passed as `-c`, which simple-git allows; GIT_CONFIG_COUNT in the env is guarded.
+const SG_CONFIG = ['core.quotePath=false'];
+const SG_OPTS = { config: SG_CONFIG, unsafe: { allowUnsafeSshCommand: true } };
 
 // Environment variables simple-git refuses to be handed through `.env()` — an editor,
 // pager, askpass or ssh command taken from the environment is arbitrary code execution —
@@ -1987,7 +1994,7 @@ ipcMain.handle('repo:rewriteCommitPaths', wrap(async (_, opts) => {
   } else {
     // rebaseSafeEnv for the same reason repo:rebase uses it. These replayed commits get a
     // fresh committer date — that is rebase's behaviour, and the price of the conflict.
-    const rg = simpleGit(currentRepoPath).env(Object.assign({}, rebaseSafeEnv(), { GIT_TERMINAL_PROMPT: '0' }));
+    const rg = simpleGit(currentRepoPath, { config: SG_CONFIG }).env(Object.assign({}, rebaseSafeEnv(), { GIT_TERMINAL_PROMPT: '0' }));
     try {
       await rg.raw(['rebase', '--onto', replacement, full, f.branch]);
     } catch (err) {
@@ -4485,7 +4492,7 @@ ipcMain.handle('llm:cancel', wrap(async () => {
 function gitRunCapped(args, maxBytes) {
   return new Promise((resolve, reject) => {
     const { spawn } = require('child_process');
-    const proc = spawn('git', args, {
+    const proc = spawn('git', ['-c', 'core.quotePath=false', ...args], {
       cwd: currentRepoPath,
       env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' })
     });
@@ -4880,7 +4887,7 @@ ipcMain.handle('repo:rebase', wrap(async (_, opts) => {
   // here: the editor is a script this process just wrote to its own temp dir, invoked
   // through our own Electron binary, with nothing user-supplied in the command. The
   // exemption is scoped to this one instance — the module-level `git` keeps the guard.
-  const rg = simpleGit(currentRepoPath, { unsafe: { allowUnsafeEditor: true } }).env(env);
+  const rg = simpleGit(currentRepoPath, { config: SG_CONFIG, unsafe: { allowUnsafeEditor: true } }).env(env);
   try {
     const output = await rg.raw(args);
     return { rebased: true, output, conflicted: false };
@@ -5356,7 +5363,7 @@ async function runAutoFetch() {
   try {
     // A plain instance with prompting disabled: no progress events, so the status-bar
     // widget stays quiet for a fetch the user didn't ask for.
-    const qg = simpleGit(currentRepoPath).env(
+    const qg = simpleGit(currentRepoPath, { config: SG_CONFIG }).env(
       Object.assign({}, rebaseSafeEnv(), { GIT_TERMINAL_PROMPT: '0' })
     );
     await qg.raw(['fetch', '--all', '--prune', '--tags']);
