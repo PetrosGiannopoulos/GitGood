@@ -2093,6 +2093,29 @@ body.diff-popout-open .toast-container { z-index: 9710; }
 .imgdiff-kind.added   { color: var(--added); border-color: var(--added); }
 .imgdiff-kind.deleted { color: var(--crusader-red-bright); border-color: var(--crusader-red); }
 .imgdiff-kind.changed { color: var(--gold-accent); border-color: var(--gold-accent); }
+.imgdiff-kind.unchanged { color: var(--muted-text); border-color: var(--border); }
+
+/* Unity import panel: what each platform ships, from the texture's .meta. */
+.imgdiff-unity:empty { display: none; }
+.imgdiff-unity { margin: 0 0 10px; padding: 8px 10px; background: var(--bg-panel); border: 1px solid var(--border); font-size: 12px; }
+.imgu-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.imgu-title { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--gold-accent); }
+.imgu-type { color: var(--text); }
+.imgu-src { color: var(--muted-text); font-family: var(--font-mono); font-size: 11px; }
+.imgu-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+.imgu-table th { text-align: left; font-weight: normal; color: var(--muted-text); padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border); }
+.imgu-table td { padding: 3px 10px 3px 0; color: var(--text-dim); vertical-align: top; }
+.imgu-table tr.changed td { background: color-mix(in srgb, var(--gold-accent) 10%, transparent); }
+.imgu-table tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--gold-accent); padding-left: 6px; }
+.imgu-plat { color: var(--text); white-space: nowrap; }
+.imgu-ov { font-size: 9px; color: var(--muted-text); border: 1px solid var(--border); padding: 0 4px; border-radius: 2px; }
+.imgu-was { color: color-mix(in srgb, var(--removed) 80%, var(--text)); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--removed) 60%, transparent); }
+.imgu-now { color: color-mix(in srgb, var(--added) 85%, var(--text)); }
+.imgu-scaled { color: var(--gold-accent); }
+.imgu-changes { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.imgu-changes-title { width: 100%; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-text); }
+.imgu-change { font-size: 11px; color: var(--text-dim); }
+.imgu-change b { color: var(--text); font-weight: 600; }
 .imgdiff-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
 .imgdiff-meta { color: var(--muted-text); margin-left: auto; }
 
@@ -2305,4 +2328,102 @@ body.diff-popout-open .toast-container { z-index: 9710; }
 .sdu-after { color: color-mix(in srgb, var(--added) 85%, var(--text)); }
 .sdu-arrow { color: var(--muted-text); width: 1%; }
 .sdu-ref { color: var(--gold-accent); }
+/* A named asset reads as a link-like chip: the name, with its path and guid on hover. */
+.sdu-ref.asset { border-bottom: 1px dotted color-mix(in srgb, var(--gold-accent) 55%, transparent); cursor: help; }
+.sdu-ref.image::before { content: '▣ '; font-size: 10px; opacity: .7; }
+.sdu-ref.image { cursor: zoom-in; }
+
+/* The hover preview of a texture/sprite reference. Fixed to the viewport (it is placed from
+   the reference's rect) and transparent to the mouse, so it never steals the hover. */
+.sdu-imgpop {
+  position: fixed; z-index: 10050; pointer-events: none;
+  max-width: 300px; padding: 6px;
+  background: var(--bg-panel); border: 1px solid var(--accent);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .55);
+  font-size: 11px; color: var(--text-dim);
+}
+.sdu-imgpop[hidden] { display: none; }
+.sdu-imgpop-frame {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 64px; min-height: 64px;
+  /* A checkerboard, so transparency reads as transparency. */
+  background: repeating-conic-gradient(#3a3a3a 0 25%, #2a2a2a 0 50%) 0 0 / 12px 12px;
+}
+.sdu-imgpop-frame img { display: block; max-width: 256px; max-height: 256px; image-rendering: auto; }
+.sdu-imgpop-cap { display: flex; gap: 8px; align-items: baseline; margin-top: 5px; }
+.sdu-imgpop-name { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sdu-imgpop-meta { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-text); white-space: nowrap; }
+.sdu-imgpop-path { margin-top: 3px; font-family: var(--font-mono); font-size: 10px; color: var(--muted-text); white-space: pre-line; word-break: break-all; }
+.sdu-imgpop-note { margin-top: 3px; font-size: 10px; color: var(--gold-accent); }
+.sdu-imgpop-msg { padding: 8px 2px 2px; color: var(--text-dim); line-height: 1.4; }
+.sdu-imgpop-load { padding: 4px 2px; font-family: var(--font-mono); }
 .sdu-more { font-size: 11px; color: var(--muted-text); padding: 0 0 4px 18px; font-style: italic; }
+
+/* Scene / prefab: a Hierarchy and an Inspector side by side, as in Unity. Changed rows are
+   tinted by status; untouched rows are greyed; the path down to a change stays readable.
+   The split stacks when its pane is narrow (the Changes tab beside a long file list). */
+.sdu-modes { display: inline-flex; gap: 4px; }
+.sdu-modes .smartdiff-tab[disabled] { opacity: .45; cursor: not-allowed; }
+.sdu-hwrap { container-type: inline-size; }
+.sdu-split { display: grid; grid-template-columns: minmax(220px, 2fr) 3fr; gap: 8px; }
+@container (max-width: 640px) { .sdu-split { grid-template-columns: minmax(0, 1fr); } }
+.sdu-pane { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); background: var(--bg-panel); }
+.sdu-pane-title {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted-text); padding: 4px 8px; border-bottom: 1px solid var(--border); background: var(--bg-raised);
+}
+.sdu-hier, .sdu-insp { max-height: 62vh; min-height: 120px; overflow: auto; }
+.sdu-hier { padding: 3px 0; font-size: 12px; outline: none; }
+.sdu-hier:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.sdu-row {
+  display: flex; align-items: center; gap: 4px; height: 20px;
+  padding: 0 8px 0 calc(4px + var(--d, 0) * 14px);
+  white-space: nowrap; cursor: default; color: var(--text); user-select: none;
+}
+.sdu-row:hover { background: var(--bg-raised); }
+.sdu-tw { flex: none; width: 12px; text-align: center; font-size: 9px; color: var(--muted-text); cursor: pointer; }
+.sdu-ico { flex: none; width: 14px; height: 14px; color: var(--text-dim); stroke: currentColor; stroke-width: 1.2; stroke-linejoin: round; }
+.sdu-ico-body { fill: color-mix(in srgb, currentColor 18%, transparent); }
+.sdu-rname { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sdu-row .sdu-mark { margin-left: 2px; }
+.sdu-scene { font-weight: 600; color: var(--text); }
+.sdu-scene-ico { flex: none; width: 14px; text-align: center; font-size: 11px; color: var(--gold-accent); }
+.sdu-more-row { color: var(--muted-text); font-style: italic; cursor: pointer; }
+.sdu-more-row:hover { color: var(--gold-accent); }
+.sdu-hier-empty, .sdu-insp-empty { padding: 10px; font-size: 12px; color: var(--muted-text); line-height: 1.5; }
+
+/* The rest of the scene, greyed; a row with changes below it is half-lit. */
+.sdu-row.quiet { opacity: .4; }
+.sdu-row.quiet:hover, .sdu-row.quiet.sel { opacity: .8; }
+.sdu-row.ctx { color: var(--text-dim); }
+.sdu-row.st-added    { background: var(--added-bg);   box-shadow: inset 3px 0 0 var(--added); }
+.sdu-row.st-removed  { background: var(--removed-bg); box-shadow: inset 3px 0 0 var(--crusader-red); }
+.sdu-row.st-modified { background: color-mix(in srgb, var(--gold-accent) 13%, transparent); box-shadow: inset 3px 0 0 var(--gold-accent); }
+.sdu-row.st-added .sdu-rname    { color: color-mix(in srgb, var(--added) 75%, var(--text)); font-weight: 600; }
+.sdu-row.st-removed .sdu-rname  { color: color-mix(in srgb, var(--crusader-red-bright) 75%, var(--text)); font-weight: 600;
+  text-decoration: line-through; text-decoration-color: var(--crusader-red); }
+.sdu-row.st-modified .sdu-rname { color: color-mix(in srgb, var(--gold-accent) 80%, var(--text)); font-weight: 600; }
+.sdu-row.sel, .sdu-row.sel:hover { background: color-mix(in srgb, var(--accent) 34%, var(--bg-panel)); }
+/* Unity's own cues: prefab instances in blue, inactive objects faded. */
+.sdu-row.prefab .sdu-ico, .sdu-insp-head.prefab .sdu-ico { color: #5aa7f0; }
+.sdu-row.prefab:not([class*=" st-"]) .sdu-rname { color: color-mix(in srgb, #5aa7f0 70%, var(--text)); }
+.sdu-row.inactive .sdu-rname, .sdu-insp-head.inactive .sdu-name { font-style: italic; opacity: .65; }
+.sdu-moved { color: var(--gold-accent); font-size: 11px; }
+.sdu-below {
+  margin-left: 4px; padding: 0 5px; border-radius: 7px; font-size: 9px; line-height: 13px;
+  font-family: var(--font-mono); color: var(--bg); background: var(--gold-accent);
+}
+
+.sdu-insp { padding: 8px 10px; }
+.sdu-insp-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.sdu-insp-head .sdu-kind { margin-left: 0; }
+.sdu-insp-head .sdu-chip { margin-left: auto; font-size: 10px; padding: 1px 6px; }
+.sdu-insp-path { margin: 2px 0 0 20px; font-family: var(--font-mono); font-size: 11px; color: var(--muted-text); word-break: break-all; }
+.sdu-insp-moved { margin: 4px 0 0 20px; font-size: 11px; color: var(--text-dim); }
+.sdu-insp .sdu-comps { padding: 6px 0 0; }
+.sdu-insp-sub { margin: 12px 0 4px; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-text); }
+.sdu-goto { display: flex; align-items: center; gap: 6px; padding: 2px 4px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.sdu-goto:hover { color: var(--gold-accent); background: var(--bg-raised); }
+.sdu-others { margin-top: 10px; }
+.sdu-others > summary { cursor: pointer; padding: 4px 0; font-size: 11px; color: var(--muted-text); }
+.sdu-others > summary:hover { color: var(--gold-accent); }

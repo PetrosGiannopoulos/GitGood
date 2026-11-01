@@ -733,7 +733,7 @@ function renderDiffUnified(diffText, opts) {
     const smart = smartDiffKind(file, opts);
     if (smart) {
       const hasRaw = !file.binary && file.hunks.length > 0;
-      out.push(smartDiffOpenHtml(file, smart, opts.imageRevs, hasRaw));
+      out.push(smartDiffOpenHtml(file, smart, opts.imageRevs, hasRaw, opts.fullFile));
       if (!hasRaw) { out.push(SMART_DIFF_CLOSE); continue; }
     }
     if (file.binary) {
@@ -898,7 +898,7 @@ function renderDiffSplit(diffText, opts) {
     const smart = smartDiffKind(file, opts);
     if (smart) {
       const hasRaw = !file.binary && file.hunks.length > 0;
-      parts.push(smartDiffOpenHtml(file, smart, opts.imageRevs, hasRaw));
+      parts.push(smartDiffOpenHtml(file, smart, opts.imageRevs, hasRaw, opts.fullFile));
       if (!hasRaw) { parts.push(SMART_DIFF_CLOSE); continue; }
     }
     if (file.binary) {
@@ -1666,11 +1666,34 @@ function whitespaceNoticeHtml() {
 // throws away the one thing the user actually wants, so we show both versions instead —
 // side by side, as an opacity blend, or under a swipe divider.
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'svg', 'avif']);
+// Formats a browser cannot draw but Unity projects are full of; decodeTga/decodePsd turn
+// them into pixels, and hydrateImageDiffs into an <img>-able URL.
+const DECODED_IMAGE_EXT = new Set(['tga', 'psd']);
 
 function isImagePath(p) {
   if (!p) return false;
   const ext = String(p).split('.').pop().toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext);
+  return IMAGE_EXTENSIONS.has(ext) || DECODED_IMAGE_EXT.has(ext);
+}
+
+// Object URLs of decoded TGA/PSD sides, released once the diff that showed them is gone —
+// a full-size PNG of a 4K texture is tens of megabytes.
+let _decodedImageUrls = [];
+
+// Replace a TGA/PSD side's raw bytes with a PNG the <img> can show, in place. A file that
+// cannot be decoded keeps a reason instead (decodeError), which the pane shows.
+async function decodeImageSide(side, ext, node) {
+  if (!side || !side.exists || !side.dataUri) return;
+  const img = ext === 'tga' ? decodeTga(sduBytesFromDataUri(side.dataUri)) : decodePsd(sduBytesFromDataUri(side.dataUri));
+  side.dataUri = null;
+  if (img.error) { side.decodeError = img.error; return; }
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width; canvas.height = img.height;
+  canvas.getContext('2d').putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
+  const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+  if (!blob) { side.decodeError = 'Could not draw this image'; return; }
+  side.dataUri = URL.createObjectURL(blob);
+  _decodedImageUrls.push({ url: side.dataUri, node });
 }
 
 // Emitted synchronously by the renderers in place of the binary notice; the actual bytes
@@ -1693,20 +1716,37 @@ async function hydrateImageDiffs(root) {
   // Every diff pane calls this after rendering, so it is also where smart views start.
   hydrateSmartDiffs(root);
   const nodes = Array.from(root.querySelectorAll('.imgdiff[data-imgdiff="1"]:not(.loaded)'));
+  if (nodes.length) {
+    _decodedImageUrls = _decodedImageUrls.filter(e => e.node.isConnected || (URL.revokeObjectURL(e.url), false));
+  }
   for (const node of nodes) {
     node.classList.add('loaded');   // claim it before awaiting, so a re-entrant call skips it
     const filePath = node.dataset.path;
     const oldRev = node.dataset.oldrev;
     const newRev = node.dataset.newrev;
     try {
-      const [oldR, newR] = await Promise.all([
+      // The import settings ride along: in a Unity project they decide the size a texture
+      // actually ships at, which the file's own pixels do not say.
+      const [oldR, newR, imp] = await Promise.all([
         gs.fileBlob({ rev: oldRev, path: filePath }),
-        gs.fileBlob({ rev: newRev, path: filePath })
+        gs.fileBlob({ rev: newRev, path: filePath }),
+        gs.textureImport({ path: filePath, oldRev, newRev }).catch(() => null),
       ]);
+      const before = oldR && oldR.ok ? oldR.data : null;
+      const after = newR && newR.ok ? newR.data : null;
+      const ext = fileExt(filePath);
+      if (DECODED_IMAGE_EXT.has(ext)) {
+        // Identical sides (only the .meta changed) are decoded once and shared.
+        const same = before && after && before.dataUri && before.dataUri === after.dataUri;
+        await decodeImageSide(before, ext, node);
+        if (same) Object.assign(after, { dataUri: before.dataUri, decodeError: before.decodeError, same: true });
+        else await decodeImageSide(after, ext, node);
+      }
       renderImageDiff(node, {
         path: filePath,
-        before: oldR && oldR.ok ? oldR.data : null,
-        after: newR && newR.ok ? newR.data : null
+        before,
+        after,
+        unity: imp && imp.ok && (imp.data.before || imp.data.after) ? imp.data : null,
       });
     } catch (err) {
       node.innerHTML = `<div class="imgdiff-error">Could not load the image: ${escapeHtml(err.message || String(err))}</div>`;
@@ -1719,6 +1759,83 @@ function formatBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+// The size Unity imports a w×h source at, given its settings (lib/texture-import.js) and the
+// Max Size in force for a platform. Non-power-of-two sources are rescaled first, per axis,
+// unless the setting is None or the texture is a Sprite (Unity never rescales sprites);
+// then the larger side is capped at Max Size, keeping the aspect ratio.
+function unityImportedSize(w, h, s, maxSize) {
+  if (!w || !h) return null;
+  const pot = (n) => (n & (n - 1)) === 0;
+  if (s && s.npotScale && s.textureType !== 8 && (!pot(w) || !pot(h))) {
+    const lower = (n) => 2 ** Math.floor(Math.log2(n));
+    const fit = {
+      1: (n) => (pot(n) ? n : (n - lower(n) < lower(n) * 2 - n ? lower(n) : lower(n) * 2)),
+      2: (n) => (pot(n) ? n : lower(n) * 2),
+      3: (n) => lower(n),
+    }[s.npotScale];
+    if (fit) { w = fit(w); h = fit(h); }
+  }
+  const m = Math.max(w, h);
+  if (maxSize && m > maxSize) {
+    const k = maxSize / m;
+    w = Math.max(1, Math.round(w * k));
+    h = Math.max(1, Math.round(h * k));
+  }
+  return { w, h };
+}
+
+// The Unity panel of an image diff: what each platform actually ships (imported size and
+// format, before → after), and every import setting the diff changed. `sizes` holds the
+// source dimensions per side, as far as they have been measured yet.
+function textureImportHtml(imp, sizes) {
+  if (!imp || (!imp.before && !imp.after)) return '';
+  const a = imp.before, b = imp.after;
+  const sz = (d) => (d ? `${d.w}×${d.h}` : '—');
+  const pair = (x, y, cls) => {
+    if (!a) return `<span class="${cls || ''}">${escapeHtml(y)}</span>`;
+    if (!b) return `<span class="${cls || ''}">${escapeHtml(x)}</span>`;
+    return x === y ? `<span class="${cls || ''}">${escapeHtml(x)}</span>`
+      : `<span class="imgu-was">${escapeHtml(x)}</span> → <span class="imgu-now ${cls || ''}">${escapeHtml(y)}</span>`;
+  };
+  // Default, then every platform overridden on either side.
+  const rows = [{ name: 'Default', pa: a && a.default, pb: b && b.default }];
+  const targets = new Set([...(a ? a.platforms : []), ...(b ? b.platforms : [])].filter(p => p.overridden).map(p => p.target));
+  for (const t of targets) {
+    const pick = (s) => { const p = s && s.platforms.find(x => x.target === t); return p && p.overridden ? p : null; };
+    const pa = pick(a), pb = pick(b);
+    rows.push({ name: (pb || pa).name, pa: pa || (a && a.default), pb: pb || (b && b.default), inherits: { a: !pa, b: !pb } });
+  }
+  const src = sizes.after || sizes.before;
+  const body = rows.map(r => {
+    const ia = a && r.pa ? unityImportedSize(sizes.before && sizes.before.w, sizes.before && sizes.before.h, a, r.pa.maxTextureSize) : null;
+    const ib = b && r.pb ? unityImportedSize(sizes.after && sizes.after.w, sizes.after && sizes.after.h, b, r.pb.maxTextureSize) : null;
+    const max = (p, inh) => (p ? (inh ? `${p.maxTextureSize} (default)` : String(p.maxTextureSize)) : '—');
+    const fmt = (p, inh) => (p ? (inh ? `${p.formatLabel} (default)` : p.formatLabel) : '—');
+    const shown = ib || ia;
+    const scaled = shown && src && (shown.w < src.w || shown.h < src.h);
+    const changed = a && b && (sz(ia) !== sz(ib) || max(r.pa, r.inherits && r.inherits.a) !== max(r.pb, r.inherits && r.inherits.b) ||
+      fmt(r.pa, r.inherits && r.inherits.a) !== fmt(r.pb, r.inherits && r.inherits.b));
+    return `<tr class="${changed ? 'changed' : ''}"><td class="imgu-plat">${escapeHtml(r.name)}${r.name === 'Default' ? '' : ' <span class="imgu-ov">override</span>'}</td>` +
+      `<td>${pair(max(r.pa, r.inherits && r.inherits.a), max(r.pb, r.inherits && r.inherits.b))}</td>` +
+      `<td title="${scaled ? 'Smaller than the source file: Unity downscales it at import' : ''}">${pair(sz(ia), sz(ib), scaled ? 'imgu-scaled' : '')}</td>` +
+      `<td>${pair(fmt(r.pa, r.inherits && r.inherits.a), fmt(r.pb, r.inherits && r.inherits.b))}</td></tr>`;
+  }).join('');
+  const s = b || a;
+  const changes = imp.changes || [];
+  const changeList = changes.length
+    ? `<div class="imgu-changes"><span class="imgu-changes-title">Import settings changed</span>` +
+        changes.map(c => `<span class="imgu-change"><b>${escapeHtml(c.label)}</b> ${escapeHtml(String(c.before ?? '—'))} → ${escapeHtml(String(c.after ?? '—'))}</span>`).join('') +
+      `</div>`
+    : '';
+  const note = !a ? 'import settings added' : !b ? 'import settings removed' : '';
+  return `<div class="imgu-head"><span class="imgu-title">Unity import</span>` +
+      `<span class="imgu-type">${escapeHtml(s.typeName || '')}</span>` +
+      (src ? `<span class="imgu-src">source ${sz(src)}</span>` : '') +
+      (note ? `<span class="imgu-src">${note}</span>` : '') + `</div>` +
+    `<table class="imgu-table"><tr><th>Platform</th><th>Max Size</th><th>In the build</th><th>Format</th></tr>${body}</table>` +
+    changeList;
 }
 
 function renderImageDiff(node, data) {
@@ -1737,13 +1854,18 @@ function renderImageDiff(node, data) {
   }
 
   // Added / deleted images only have one side, so the comparison modes are meaningless —
-  // show the single version with a clear label instead of an empty pane beside it.
-  const single = !before || !after;
-  const kind = !before ? 'added' : (!after ? 'deleted' : 'changed');
+  // show the single version with a clear label instead of an empty pane beside it. The
+  // same goes for identical sides, which is what a texture whose .meta alone changed has.
+  const identical = !!(before && after && (after.same ||
+    (before.dataUri && before.dataUri === after.dataUri) ||
+    (before.lfs && after.lfs && before.lfs.oid === after.lfs.oid)));
+  const single = !before || !after || identical;
+  const kind = identical ? 'unchanged' : !before ? 'added' : (!after ? 'deleted' : 'changed');
 
   // An LFS image whose object was never downloaded exists, but has no pixels to show.
   const imgOf = (s, alt) => !s ? '' : s.lfsMissing
     ? `<div class="imgdiff-absent">LFS object not downloaded — <code>git lfs fetch</code> gets it</div>`
+    : s.decodeError ? `<div class="imgdiff-absent">${escapeHtml(s.decodeError)}</div>`
     : `<img class="imgdiff-img" src="${s.dataUri}" alt="${alt}" />`;
   const beforeImg = imgOf(before, 'before');
   const afterImg = imgOf(after, 'after');
@@ -1764,14 +1886,15 @@ function renderImageDiff(node, data) {
       <span class="imgdiff-name">${escapeHtml(data.path)}</span>
       <span class="imgdiff-meta" id="imgdiff-dims"></span>
     </div>
+    <div class="imgdiff-unity"></div>
     ${modeBar}
     <div class="imgdiff-stage mode-side">
-      <div class="imgdiff-pane before">
+      ${identical ? '' : `<div class="imgdiff-pane before">
         <div class="imgdiff-pane-label">before ${before ? '· ' + escapeHtml(formatBytes(before.bytes)) : '· absent'}</div>
         <div class="imgdiff-frame">${beforeImg || '<div class="imgdiff-absent">did not exist</div>'}</div>
-      </div>
+      </div>`}
       <div class="imgdiff-pane after">
-        <div class="imgdiff-pane-label">after ${after ? '· ' + escapeHtml(formatBytes(after.bytes)) : '· absent'}</div>
+        <div class="imgdiff-pane-label">${identical ? 'pixels unchanged' : 'after'} ${after ? '· ' + escapeHtml(formatBytes(after.bytes)) : '· absent'}</div>
         <div class="imgdiff-frame">${afterImg || '<div class="imgdiff-absent">deleted</div>'}</div>
       </div>
     </div>`;
@@ -1779,20 +1902,26 @@ function renderImageDiff(node, data) {
   const stage = node.querySelector('.imgdiff-stage');
   const slider = node.querySelector('.imgdiff-slider');
   const dims = node.querySelector('#imgdiff-dims');
+  const unityBox = node.querySelector('.imgdiff-unity');
 
   // Report the pixel dimensions once the images decode — a resize is often the whole
-  // point of the change and is invisible otherwise.
+  // point of the change and is invisible otherwise. The Unity panel needs them too: an
+  // imported size is the source size after the importer's rules.
   const measured = {};
+  const sizes = {};
   const report = () => {
     const parts = [];
     if (measured.before) parts.push(`before ${measured.before}`);
-    if (measured.after) parts.push(`after ${measured.after}`);
+    if (measured.after) parts.push(`${identical ? '' : 'after '}${measured.after}`);
     if (dims) dims.textContent = parts.join('  →  ');
+    if (unityBox) unityBox.innerHTML = textureImportHtml(data.unity, identical ? { before: sizes.after, after: sizes.after } : sizes);
   };
+  report();
   node.querySelectorAll('.imgdiff-img').forEach(img => {
     const which = img.getAttribute('alt');
     const done = () => {
       measured[which] = `${img.naturalWidth}×${img.naturalHeight}`;
+      sizes[which] = { w: img.naturalWidth, h: img.naturalHeight };
       report();
     };
     if (img.complete && img.naturalWidth) done();
@@ -1874,7 +2003,7 @@ function isLfsPointerDiff(file) {
   return n > 0;
 }
 
-// 'image' | 'audio' | 'video' | 'unity' | 'binary' | null (render the line diff as usual).
+// 'image' | 'texmeta' | 'audio' | 'video' | 'unity' | 'binary' | null (render the line diff as usual).
 function smartDiffKind(file, opts) {
   if (opts && opts.noSmart) return null;
   // A headerless binary chunk carries no path of its own; the caller's is the right one.
@@ -1882,8 +2011,11 @@ function smartDiffKind(file, opts) {
   if (!file.path) return null;
   const ext = fileExt(file.path);
   if (SMART_UNITY_EXT.has(ext)) return 'unity';
+  // A texture's .meta: its YAML diff is the import settings, which read far better as the
+  // texture itself with what each platform now ships. The Raw pane keeps the YAML.
+  if (ext === 'meta' && !file.binary && isImagePath(file.path.slice(0, -5))) return 'texmeta';
   if (!file.binary && !isLfsPointerDiff(file)) return null;
-  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
+  if (isImagePath(file.path)) return 'image';
   if (SMART_AUDIO_EXT.has(ext)) return 'audio';
   if (SMART_VIDEO_EXT.has(ext)) return 'video';
   return 'binary';
@@ -1893,7 +2025,8 @@ function smartDiffKind(file, opts) {
 // files does not flip back to the smart view each time someone wanted the raw text.
 let _smartShowRaw = false;
 
-function smartDiffOpenHtml(file, kind, revs, hasRaw) {
+// `fullFile` is the pop-out's "Full file" toggle; a Unity view opens on the whole hierarchy.
+function smartDiffOpenHtml(file, kind, revs, hasRaw, fullFile) {
   const oldRev = (revs && revs.oldRev) || 'HEAD';
   const newRev = (revs && revs.newRev) || 'WORKTREE';
   const raw = hasRaw && _smartShowRaw;
@@ -1904,11 +2037,11 @@ function smartDiffOpenHtml(file, kind, revs, hasRaw) {
         `<button class="smartdiff-tab${raw ? ' active' : ''}" type="button" data-smart-view="raw">${rawLabel}</button>` +
       `</div>`
     : '';
-  const body = kind === 'image'
-    ? imageDiffPlaceholderHtml(file.path, revs)
+  const body = kind === 'image' ? imageDiffPlaceholderHtml(file.path, revs)
+    : kind === 'texmeta' ? imageDiffPlaceholderHtml(file.path.slice(0, -5), revs)
     : `<div class="smartdiff-load" data-smartload="1"><span class="loading"></span> Reading both versions…</div>`;
   return `<div class="smartdiff" data-smart="${kind}" data-path="${escapeHtml(file.path)}"` +
-      ` data-oldrev="${escapeHtml(oldRev)}" data-newrev="${escapeHtml(newRev)}">` + bar +
+      ` data-oldrev="${escapeHtml(oldRev)}" data-newrev="${escapeHtml(newRev)}"${fullFile ? ' data-full="1"' : ''}>` + bar +
     `<div class="smartdiff-body"${raw ? ' hidden' : ''}>${body}</div>` +
     `<div class="smartdiff-raw"${hasRaw && !raw ? ' hidden' : ''}>`;
 }
@@ -1950,7 +2083,7 @@ async function loadSmartDiff(node, target) {
     const r = await gs.smartDiff({ path: filePath, oldRev, newRev });
     if (!r.ok) { target.innerHTML = `<div class="imgdiff-error">${escapeHtml(r.error || 'Could not read this file')}</div>`; return; }
     done();
-    if (r.data.kind === 'unity') renderUnityDiff(target, filePath, r.data);
+    if (r.data.kind === 'unity') renderUnityDiff(target, filePath, r.data, node.dataset.full === '1');
     else target.innerHTML = smartBinaryCardHtml(filePath, r.data);
   } catch (err) {
     target.innerHTML = `<div class="imgdiff-error">Could not read this file: ${escapeHtml(err.message || String(err))}</div>`;
@@ -2017,20 +2150,98 @@ function prettyUnityProp(p) {
   if (ov) return 'Override › ' + ov[1].split('.').map(word).join(' › ');
   return p.split('.').map(seg => seg.replace(/^([^[]+)/, (m) => word(m))).join(' › ');
 }
-function prettyUnityValue(v) {
+// Unity's built-in resources: two fixed GUIDs ("unity default resources" and
+// "unity_builtin_extra") whose objects are told apart by fileID alone. No .meta exists for
+// them anywhere, so the names that turn up in scenes most often are listed here.
+const UNITY_BUILTIN = {
+  '0000000000000000f000000000000000': { 10202: 'Cube', 10206: 'Cylinder', 10207: 'Sphere', 10208: 'Capsule',
+    10209: 'Plane', 10210: 'Quad', 10102: 'Arial' },
+  '0000000000000000e000000000000000': { 10303: 'Default-Material', 10301: 'Default-Particle', 10754: 'Sprites-Default',
+    10901: 'Checkmark', 10905: 'UISprite', 10907: 'Background', 10911: 'InputFieldBackground', 10913: 'Knob',
+    10915: 'DropdownArrow', 10917: 'UIMask' },
+};
+
+// A reference's display name and tooltip, or null when nothing better than the raw
+// value is known. `refs` = { assetPaths: guid → path, objectNames: fileID → name }.
+function unityRefName(fileId, guid, refs) {
+  if (!guid) {
+    const n = refs && refs.objectNames[fileId];
+    return n ? { text: n, title: `Object in this file · fileID ${fileId}` } : null;
+  }
+  const builtin = UNITY_BUILTIN[guid];
+  if (builtin) return { text: builtin[fileId] || 'Built-in resource', title: `Unity built-in resource · fileID ${fileId}` };
+  const p = refs && refs.assetPaths[guid];
+  return p ? { text: p.split('/').pop(), title: `${p}\nguid ${guid} · fileID ${fileId}`, path: p } : null;
+}
+
+function prettyUnityValue(v, refs) {
   if (v === null || v === undefined) return '<span class="sdiff-absent">—</span>';
   if (/^\{fileID: 0\}$/.test(v)) return '<span class="sdiff-absent">None</span>';
   const ref = /^\{fileID: (-?\d+)(?:, guid: ([0-9a-f]{32}), type: \d+)?\}$/.exec(v);
-  if (ref) return `<span class="sdu-ref">${ref[2] ? 'asset ' + ref[2].slice(0, 8) + '…' : 'object #' + ref[1]}</span>`;
+  if (ref) {
+    const named = unityRefName(ref[1], ref[2], refs);
+    if (named) {
+      // An image is previewed on hover (unityWireImagePreviews), from the repository path.
+      // Its details go in the popup instead of a native tooltip, which would cover it.
+      const img = named.path && SDU_IMG_EXT.has(fileExt(named.path));
+      const attrs = img ? ` data-asset="${escapeHtml(named.path)}" data-detail="${escapeHtml(named.title)}"` : ` title="${escapeHtml(named.title)}"`;
+      return `<span class="sdu-ref${ref[2] ? ' asset' : ''}${img ? ' image' : ''}"${attrs}>${escapeHtml(named.text)}</span>`;
+    }
+    return ref[2]
+      ? `<span class="sdu-ref" data-guid="${ref[2]}" data-fid="${escapeHtml(ref[1])}" title="guid ${ref[2]} — no .meta file in this repository names it">asset ${ref[2].slice(0, 8)}…</span>`
+      : `<span class="sdu-ref">object #${escapeHtml(ref[1])}</span>`;
+  }
   const s = String(v);
   return s.length > 240 ? `<span title="${escapeHtml(s)}">${escapeHtml(s.slice(0, 240))}…</span>` : escapeHtml(s);
 }
 
 const SDU_MARK = { added: '+', removed: '−', modified: '~' };
 
-// A Unity scene/prefab/asset as objects: one block per GameObject (or free-standing object),
-// the components that changed inside it, and each changed property before → after.
-function renderUnityDiff(node, filePath, d) {
+// The components that changed on one object, each with its properties before → after.
+function unityCompsHtml(g, refs) {
+  return g.components.map(c => {
+    const rows = c.changes.map(ch =>
+      `<tr><td class="sdu-prop" title="${escapeHtml(ch.prop)}">${escapeHtml(prettyUnityProp(ch.prop))}</td>` +
+      (c.status === 'modified'
+        ? `<td class="sdu-before">${prettyUnityValue(ch.before, refs)}</td><td class="sdu-arrow">→</td><td class="sdu-after">${prettyUnityValue(ch.after, refs)}</td>`
+        : `<td class="sdu-${c.status === 'added' ? 'after' : 'before'}" colspan="3">${prettyUnityValue(c.status === 'added' ? ch.after : ch.before, refs)}</td>`) +
+      `</tr>`).join('');
+    const more = c.totalChanges > c.changes.length ? `<div class="sdu-more">…and ${c.totalChanges - c.changes.length} more</div>` : '';
+    const n = c.status === 'modified' ? `${c.totalChanges} change${c.totalChanges === 1 ? '' : 's'}` : `${c.totalChanges} propert${c.totalChanges === 1 ? 'y' : 'ies'}`;
+    return `<details class="sdu-comp ${c.status}"${c.status === 'modified' ? ' open' : ''}>` +
+      `<summary><span class="sdu-mark ${c.status}">${SDU_MARK[c.status]}</span><span class="sdu-ctype"${c.labelGuid ? ` data-label-guid="${c.labelGuid}" data-label-kind="${c.labelKind}"` : ''}>${escapeHtml(c.type)}</span><span class="sdu-count">${n}</span></summary>` +
+      (rows ? `<table class="sdu-props">${rows}</table>` : '') + more + `</details>`;
+  }).join('');
+}
+
+const unityGroupSearch = (g) => [g.name, g.path, g.kind, ...g.components.map(c => c.type + ' ' + c.changes.map(x => x.prop).join(' '))].join(' ').toLowerCase();
+
+// One block per object, as a flat list — for assets with no hierarchy (a material, an
+// animation clip) and for a scene's objects that sit outside it (RenderSettings…).
+function unityGroupListHtml(groups, openFirst, refs) {
+  return groups.map((g, gi) =>
+    `<details class="sdu-group ${g.status}"${gi < openFirst ? ' open' : ''} data-search="${escapeHtml(unityGroupSearch(g))}">` +
+      `<summary><span class="sdu-mark ${g.status}">${SDU_MARK[g.status]}</span>` +
+        `<span class="sdu-title">${g.path ? `<span class="sdu-path">${escapeHtml(g.path)}/</span>` : ''}<span class="sdu-name">${escapeHtml(g.name)}</span></span>` +
+        `<span class="sdu-kind">${escapeHtml(g.kind || '')}</span></summary>` +
+      `<div class="sdu-comps">${unityCompsHtml(g, refs)}</div></details>`).join('');
+}
+
+// Which hierarchy the Unity view last showed: 'changes' (changed objects and the path down
+// to them) or 'whole' (every object, the untouched ones greyed). Kept for the session, like
+// the Smart/Raw toggle. The pop-out's Full file toggle opens it on 'whole' regardless.
+let _unityHierMode = 'changes';
+
+const SDU_CUBE = '<svg class="sdu-ico" viewBox="0 0 16 16" aria-hidden="true">' +
+  '<path class="sdu-ico-body" d="M8 1.5 14 4.5v7L8 14.5 2 11.5v-7z"/>' +
+  '<path d="M2 4.5 8 7.5l6-3M8 7.5v7" fill="none"/></svg>';
+const SDU_ROWS_PER_PARENT = 300;
+
+// A Unity scene/prefab/asset as objects. A scene or prefab is drawn the way Unity draws it:
+// a Hierarchy on the left (changed objects highlighted, the rest greyed or left out) and an
+// Inspector on the right holding the selected object's changed components, property by
+// property. Anything else — or a scene's objects outside the hierarchy — is a flat list.
+function renderUnityDiff(node, filePath, d, fullFile) {
   const k = smartChangeKind(d.before, d.after);
   const head = `<div class="imgdiff-head"><span class="imgdiff-kind ${k}">${k}</span><span class="imgdiff-name">${escapeHtml(filePath)}</span>` +
     `<span class="imgdiff-meta">Unity asset · ${smartSideText(d.before)} → ${smartSideText(d.after)}</span></div>`;
@@ -2044,44 +2255,570 @@ function renderUnityDiff(node, filePath, d) {
     return;
   }
   const u = d.unity;
-  if (!u.groups.length) {
-    node.innerHTML = head + `<div class="sdiff-note">No object in this asset changed — only formatting or bookkeeping (component and child order).</div>`;
+  const refs = { assetPaths: Object.assign({}, u.assetPaths), objectNames: u.objectNames || {} };
+  const noChange = `<div class="sdiff-note">No object in this asset changed — only formatting or bookkeeping (component and child order).</div>`;
+  if (!u.groups.length && !u.tree) { node.innerHTML = head + noChange; return; }
+  const chip = (n, label, cls) => n ? `<span class="sdu-chip ${cls}">${n} ${label}</span>` : '';
+  const chips = chip(u.counts.added, 'added', 'added') + chip(u.counts.removed, 'removed', 'removed') + chip(u.counts.modified, 'modified', 'modified');
+  const truncNote = u.truncated ? `<div class="sdiff-note">Details are listed for the first ${u.groups.length} of ${u.counts.objects} changed objects.</div>` : '';
+  const filterHtml = `<input type="search" class="sdu-filter commit-search" placeholder="Filter objects, components, properties…" />`;
+
+  if (!u.tree) {
+    node.innerHTML = head + `<div class="sdu-summary">${chips}${filterHtml}</div>` +
+      `<div class="sdu-groups">${unityGroupListHtml(u.groups, 25, refs)}</div>` + truncNote;
+    const filter = node.querySelector('.sdu-filter');
+    filter.oninput = () => {
+      const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      node.querySelectorAll('.sdu-group').forEach(el => {
+        el.style.display = terms.every(t => el.dataset.search.includes(t)) ? '' : 'none';
+      });
+    };
+    unityResolveLate(node, u, refs);
+    unityWireImagePreviews(node);
     return;
   }
-  const chip = (n, label, cls) => n ? `<span class="sdu-chip ${cls}">${n} ${label}</span>` : '';
-  const groups = u.groups.map((g, gi) => {
-    const comps = g.components.map(c => {
-      const rows = c.changes.map(ch =>
-        `<tr><td class="sdu-prop" title="${escapeHtml(ch.prop)}">${escapeHtml(prettyUnityProp(ch.prop))}</td>` +
-        (c.status === 'modified'
-          ? `<td class="sdu-before">${prettyUnityValue(ch.before)}</td><td class="sdu-arrow">→</td><td class="sdu-after">${prettyUnityValue(ch.after)}</td>`
-          : `<td class="sdu-${c.status === 'added' ? 'after' : 'before'}" colspan="3">${prettyUnityValue(c.status === 'added' ? ch.after : ch.before)}</td>`) +
-        `</tr>`).join('');
-      const more = c.totalChanges > c.changes.length ? `<div class="sdu-more">…and ${c.totalChanges - c.changes.length} more</div>` : '';
-      const n = c.status === 'modified' ? `${c.totalChanges} change${c.totalChanges === 1 ? '' : 's'}` : `${c.totalChanges} propert${c.totalChanges === 1 ? 'y' : 'ies'}`;
-      return `<details class="sdu-comp ${c.status}"${c.status === 'modified' ? ' open' : ''}>` +
-        `<summary><span class="sdu-mark ${c.status}">${SDU_MARK[c.status]}</span><span class="sdu-ctype">${escapeHtml(c.type)}</span><span class="sdu-count">${n}</span></summary>` +
-        (rows ? `<table class="sdu-props">${rows}</table>` : '') + more + `</details>`;
-    }).join('');
-    const search = [g.name, g.path, g.kind, ...g.components.map(c => c.type + ' ' + c.changes.map(x => x.prop).join(' '))].join(' ').toLowerCase();
-    return `<details class="sdu-group ${g.status}"${gi < 25 ? ' open' : ''} data-search="${escapeHtml(search)}">` +
-      `<summary><span class="sdu-mark ${g.status}">${SDU_MARK[g.status]}</span>` +
-        `<span class="sdu-title">${g.path ? `<span class="sdu-path">${escapeHtml(g.path)}/</span>` : ''}<span class="sdu-name">${escapeHtml(g.name)}</span></span>` +
-        `<span class="sdu-kind">${escapeHtml(g.kind || '')}</span></summary>` +
-      `<div class="sdu-comps">${comps}</div></details>`;
-  }).join('');
+
+  // ---- The hierarchy ----
+  const tree = u.tree;
+  const isScene = fileExt(filePath) === 'unity';
+  const noun = isScene ? 'scene' : 'prefab';
+  const byId = new Map(tree.nodes.map(n => [n.id, n]));
+  const parentOf = new Map();
+  for (const n of tree.nodes) for (const c of n.children) parentOf.set(c, n.id);
+  const groupById = new Map(u.groups.map(g => [g.id, g]));
+  const others = u.groups.filter(g => !byId.has(g.id));
+  // How many changed objects sit under each node: what keeps a path visible in "changed
+  // only", what starts it expanded, and the count a collapsed row shows.
+  const below = new Map();
+  for (const n of tree.nodes) if (n.status) {
+    let p = parentOf.get(n.id), guard = 0;
+    while (p && guard++ < 256) { below.set(p, (below.get(p) || 0) + 1); p = parentOf.get(p); }
+  }
+  const open = new Set(below.keys());
+  const limits = new Map();
+  const ancestors = (id) => {
+    const out = [];
+    let p = parentOf.get(id), guard = 0;
+    while (p && guard++ < 256) { out.unshift(p); p = parentOf.get(p); }
+    return out;
+  };
+  let selected = null;
+  (function firstChange(ids) {
+    for (const id of ids) {
+      if (selected) return;
+      const n = byId.get(id);
+      if (n.status) { selected = id; return; }
+      if (below.get(id)) firstChange(n.children);
+    }
+  })(tree.roots);
+
+  let mode = fullFile ? 'whole' : _unityHierMode;
+  if (tree.pruned) mode = 'changes';
+  let terms = [];
+  let matchPath = null;   // with a filter: every node that matches or has a match below
+  const searchCache = new Map();
+  const searchText = (n) => {
+    if (!searchCache.has(n.id)) {
+      const g = groupById.get(n.id);
+      searchCache.set(n.id, [n.name, n.prefab ? 'prefab' : '', g ? unityGroupSearch(g) : ''].join(' ').toLowerCase());
+    }
+    return searchCache.get(n.id);
+  };
+  const visible = (id) => {
+    if (matchPath) return matchPath.has(id);
+    return mode === 'whole' || !!byId.get(id).status || !!below.get(id);
+  };
+  const isOpen = (id) => matchPath ? byId.get(id).children.some(c => matchPath.has(c)) : open.has(id);
+
+  const rowHtml = (n, depth, kids) => {
+    const cls = ['sdu-row'];
+    if (n.status) cls.push('st-' + n.status);
+    else cls.push(below.get(n.id) ? 'ctx' : 'quiet');
+    if (n.inactive) cls.push('inactive');
+    if (n.prefab) cls.push('prefab');
+    if (n.id === selected) cls.push('sel');
+    const opened = kids && isOpen(n.id);
+    const tw = kids ? `<span class="sdu-tw" data-tw="1">${opened ? '▾' : '▸'}</span>` : '<span class="sdu-tw"></span>';
+    const nb = below.get(n.id);
+    const tags = (n.movedFrom ? `<span class="sdu-moved" title="Moved from ${escapeHtml(n.movedFrom)}">↪</span>` : '') +
+      (n.status ? `<span class="sdu-mark ${n.status}">${SDU_MARK[n.status]}</span>` : '') +
+      (nb && !opened ? `<span class="sdu-below" title="${nb} changed object${nb === 1 ? '' : 's'} inside">${nb}</span>` : '');
+    const tip = n.name + (n.prefab ? ' (prefab instance)' : '') + (n.inactive ? ' — inactive' : '') + (n.status ? ' — ' + n.status : '');
+    return `<div class="${cls.join(' ')}" data-id="${n.id}" style="--d:${depth}" title="${escapeHtml(tip)}">${tw}${SDU_CUBE}` +
+      `<span class="sdu-rname">${escapeHtml(n.name)}</span>${tags}</div>`;
+  };
+
+  const hierHtml = () => {
+    const out = [];
+    const base = isScene ? 1 : 0;
+    if (isScene) {
+      out.push(`<div class="sdu-row sdu-scene"><span class="sdu-tw">▾</span><span class="sdu-scene-ico">◆</span>` +
+        `<span class="sdu-rname">${escapeHtml(filePath.split('/').pop().replace(/\.unity$/i, ''))}</span></div>`);
+    }
+    const emit = (ids, depth, key) => {
+      const vis = ids.filter(visible);
+      const lim = limits.get(key) || SDU_ROWS_PER_PARENT;
+      for (let i = 0; i < vis.length && i < lim; i++) {
+        const n = byId.get(vis[i]);
+        const kids = n.children.filter(visible).length;
+        out.push(rowHtml(n, depth, kids));
+        if (kids && isOpen(n.id)) emit(n.children, depth + 1, n.id);
+      }
+      if (vis.length > lim) {
+        out.push(`<div class="sdu-row sdu-more-row" data-more="${key}" style="--d:${depth}"><span class="sdu-tw"></span>… ${vis.length - lim} more — show them</div>`);
+      }
+    };
+    emit(tree.roots, base, 'root');
+    if (out.length === base) {
+      out.push(`<div class="sdu-hier-empty">${matchPath ? 'No object matches the filter.'
+        : `No GameObject changed${others.length ? ' — see the objects below the hierarchy.' : '.'}`}</div>`);
+    }
+    return out.join('');
+  };
+
+  const inspectorHtml = () => {
+    const n = selected && byId.get(selected);
+    if (!n) {
+      return `<div class="sdu-insp-empty">${u.groups.length ? 'Select an object in the hierarchy to see what changed on it.'
+        : `No object in this ${noun} changed — only formatting or bookkeeping (component and child order).`}</div>`;
+    }
+    const g = groupById.get(n.id);
+    const path = ancestors(n.id).map(id => byId.get(id).name).join('/');
+    let body;
+    if (g) body = `<div class="sdu-comps">${unityCompsHtml(g, refs)}</div>`;
+    else if (n.status) body = `<div class="sdu-insp-empty">This object ${n.status === 'modified' ? 'changed' : 'was ' + n.status}, but its details are past the first ${u.groups.length} objects listed.</div>`;
+    else body = `<div class="sdu-insp-empty">Nothing changed on this object.</div>`;
+    const nb = below.get(n.id);
+    if (nb) {
+      const list = [];
+      (function collect(ids) {
+        for (const id of ids) {
+          if (list.length >= 40) return;
+          const c = byId.get(id);
+          if (c.status) list.push(c);
+          if (below.get(id)) collect(c.children);
+        }
+      })(n.children);
+      body += `<div class="sdu-insp-sub">${nb} changed object${nb === 1 ? '' : 's'} inside</div>` +
+        list.map(c => `<div class="sdu-goto" data-goto="${c.id}"><span class="sdu-mark ${c.status}">${SDU_MARK[c.status]}</span>${escapeHtml(c.name)}</div>`).join('') +
+        (nb > list.length ? `<div class="sdu-more">…and ${nb - list.length} more</div>` : '');
+    }
+    const status = n.status ? `<span class="sdu-chip ${n.status}">${n.status}</span>` : '<span class="sdu-chip">unchanged</span>';
+    return `<div class="sdu-insp-head${n.prefab ? ' prefab' : ''}${n.inactive ? ' inactive' : ''}">${SDU_CUBE}<span class="sdu-name">${escapeHtml(n.name)}</span>` +
+        (n.prefab ? '<span class="sdu-kind">Prefab instance</span>' : '') + (n.inactive ? '<span class="sdu-kind">inactive</span>' : '') + status + `</div>` +
+      (path ? `<div class="sdu-insp-path">${escapeHtml(path)}</div>` : '') +
+      (n.movedFrom ? `<div class="sdu-insp-moved">↪ Moved from <b>${escapeHtml(n.movedFrom)}</b></div>` : '') + body;
+  };
+
+  const modeBtn = (m, label, title, disabled) =>
+    `<button class="smartdiff-tab${mode === m ? ' active' : ''}" type="button" data-hmode="${m}" title="${escapeHtml(title)}"${disabled ? ' disabled' : ''}>${label}</button>`;
+  const wholeTitle = tree.pruned
+    ? `This ${noun} has ${tree.total.toLocaleString()} objects — too many to draw whole. Showing the changed objects and the path to them.`
+    : `Every object in the ${noun}, the untouched ones greyed out`;
   node.innerHTML = head +
-    `<div class="sdu-summary">${chip(u.counts.added, 'added', 'added')}${chip(u.counts.removed, 'removed', 'removed')}${chip(u.counts.modified, 'modified', 'modified')}` +
-      `<input type="search" class="sdu-filter commit-search" placeholder="Filter objects, components, properties…" /></div>` +
-    `<div class="sdu-groups">${groups}</div>` +
-    (u.truncated ? `<div class="sdiff-note">Showing the first ${u.groups.length} of ${u.counts.objects} changed objects.</div>` : '');
+    `<div class="sdu-summary">${chips}` +
+      `<span class="sdu-modes">${modeBtn('changes', '◆ Changed only', 'Only the changed objects and the path down to them')}` +
+        modeBtn('whole', isScene ? '▤ Whole scene' : '▤ Whole prefab', wholeTitle, tree.pruned) + `</span>` +
+      filterHtml + `</div>` +
+    `<div class="sdu-hwrap"><div class="sdu-split">` +
+      `<div class="sdu-pane"><div class="sdu-pane-title">Hierarchy</div><div class="sdu-hier" tabindex="0"></div></div>` +
+      `<div class="sdu-pane"><div class="sdu-pane-title">Inspector</div><div class="sdu-insp"></div></div>` +
+    `</div></div>` + truncNote +
+    (others.length
+      ? `<details class="sdu-others" open><summary>${isScene ? 'Scene settings &amp; objects outside the hierarchy' : 'Objects outside the hierarchy'} (${others.length})</summary>` +
+          `<div class="sdu-groups">${unityGroupListHtml(others, 3, refs)}</div></details>`
+      : '');
+
+  const hier = node.querySelector('.sdu-hier');
+  const insp = node.querySelector('.sdu-insp');
+  const drawHier = () => { hier.innerHTML = hierHtml(); };
+  const drawInsp = () => { insp.innerHTML = inspectorHtml(); insp.scrollTop = 0; };
+  const scrollToSelected = () => {
+    const row = hier.querySelector('.sdu-row.sel');
+    if (!row) return;
+    const top = row.getBoundingClientRect().top - hier.getBoundingClientRect().top + hier.scrollTop;
+    if (top < hier.scrollTop || top + row.offsetHeight > hier.scrollTop + hier.clientHeight) {
+      hier.scrollTop = top - hier.clientHeight / 3;
+    }
+  };
+  const select = (id, reveal) => {
+    selected = id;
+    if (reveal) {
+      for (const a of ancestors(id)) open.add(a);
+      // A row past the per-parent cap would stay hidden; raise the cap far enough.
+      const key = parentOf.get(id) || 'root';
+      const sibs = (key === 'root' ? tree.roots : byId.get(key).children).filter(visible);
+      const at = sibs.indexOf(id);
+      if (at >= (limits.get(key) || SDU_ROWS_PER_PARENT)) limits.set(key, at + 1);
+      drawHier();
+    } else {
+      hier.querySelectorAll('.sdu-row.sel').forEach(r => r.classList.remove('sel'));
+      const row = hier.querySelector(`.sdu-row[data-id="${id}"]`);
+      if (row) row.classList.add('sel');
+    }
+    drawInsp();
+    scrollToSelected();
+  };
+  // Alt+click expands or collapses the whole subtree, as in Unity.
+  const toggle = (id, deep) => {
+    const want = !open.has(id);
+    const apply = (x) => { if (want) open.add(x); else open.delete(x); if (deep) byId.get(x).children.forEach(apply); };
+    apply(id);
+    drawHier();
+  };
+
+  hier.onclick = (e) => {
+    const more = e.target.closest('.sdu-more-row');
+    if (more) {
+      const key = more.dataset.more;
+      limits.set(key, (limits.get(key) || SDU_ROWS_PER_PARENT) + SDU_ROWS_PER_PARENT);
+      drawHier();
+      return;
+    }
+    const row = e.target.closest('.sdu-row[data-id]');
+    if (!row) return;
+    if (e.target.closest('[data-tw]')) { if (!matchPath) toggle(row.dataset.id, e.altKey); return; }
+    select(row.dataset.id, false);
+  };
+  hier.ondblclick = (e) => {
+    const row = e.target.closest('.sdu-row[data-id]');
+    if (row && !matchPath && !e.target.closest('[data-tw]') && byId.get(row.dataset.id).children.some(visible)) toggle(row.dataset.id, false);
+  };
+  hier.onkeydown = (e) => {
+    const rows = Array.from(hier.querySelectorAll('.sdu-row[data-id]'));
+    if (!rows.length) return;
+    const i = rows.findIndex(r => r.dataset.id === selected);
+    const cur = i >= 0 ? rows[i].dataset.id : null;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const j = i < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
+      select(rows[j].dataset.id, false);
+    } else if (e.key === 'ArrowRight' && cur) {
+      if (!matchPath && byId.get(cur).children.some(visible) && !isOpen(cur)) toggle(cur, e.altKey);
+    } else if (e.key === 'ArrowLeft' && cur) {
+      if (!matchPath && isOpen(cur)) toggle(cur, e.altKey);
+      else if (parentOf.get(cur)) select(parentOf.get(cur), false);
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  insp.onclick = (e) => {
+    const go = e.target.closest('[data-goto]');
+    if (go) select(go.dataset.goto, true);
+  };
+  node.querySelectorAll('[data-hmode]').forEach(btn => {
+    btn.onclick = () => {
+      if (btn.disabled || mode === btn.dataset.hmode) return;
+      mode = _unityHierMode = btn.dataset.hmode;
+      node.querySelectorAll('[data-hmode]').forEach(b => b.classList.toggle('active', b === btn));
+      filter.oninput();
+    };
+  });
   const filter = node.querySelector('.sdu-filter');
-  if (filter) filter.oninput = () => {
-    const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    node.querySelectorAll('.sdu-group').forEach(el => {
+  filter.oninput = () => {
+    terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    matchPath = null;
+    if (terms.length) {
+      matchPath = new Set();
+      for (const n of tree.nodes) {
+        if (mode !== 'whole' && !n.status) continue;
+        const s = searchText(n);
+        if (!terms.every(t => s.includes(t))) continue;
+        matchPath.add(n.id);
+        for (const a of ancestors(n.id)) matchPath.add(a);
+      }
+    }
+    node.querySelectorAll('.sdu-others .sdu-group').forEach(el => {
       el.style.display = terms.every(t => el.dataset.search.includes(t)) ? '' : 'none';
     });
+    drawHier();
+    scrollToSelected();
   };
+
+  drawHier();
+  drawInsp();
+  scrollToSelected();
+  unityResolveLate(node, u, refs, () => searchCache.clear());
+  unityWireImagePreviews(node);
+}
+
+// GUIDs main could not name from the repository's .meta files usually belong to a package
+// (uGUI's Slider, a TextMeshPro font), whose .meta files only exist in Library/PackageCache.
+// Indexing that can take many seconds on a cold disk, so it happens after the view is drawn:
+// the answer renames components and references in place and is kept in `refs` and the
+// groups, so anything drawn later (another object in the inspector) is named too.
+async function unityResolveLate(node, u, refs, onResolved) {
+  const guids = u.unresolvedGuids || [];
+  if (!guids.length) return;
+  let r;
+  try { r = await gs.unityPackageGuids(guids); } catch (e) { return; }
+  if (!r || !r.ok || !Object.keys(r.data).length || !node.isConnected) return;
+  Object.assign(refs.assetPaths, r.data);
+  const base = (p) => p.split('/').pop().replace(/\.[^.]+$/, '');
+  const labelFor = (c) => {
+    const p = refs.assetPaths[c.labelGuid];
+    if (!p) return null;
+    return c.labelKind === 'PrefabInstance' ? `Prefab instance of ${base(p)}` : base(p);
+  };
+  for (const g of u.groups) for (const c of g.components) {
+    const label = c.labelGuid && labelFor(c);
+    if (label) { c.type = label; delete c.labelGuid; }
+  }
+  node.querySelectorAll('[data-label-guid]').forEach(el => {
+    const label = labelFor({ labelGuid: el.dataset.labelGuid, labelKind: el.dataset.labelKind });
+    if (label) { el.textContent = label; el.removeAttribute('data-label-guid'); }
+  });
+  node.querySelectorAll('.sdu-ref[data-guid]').forEach(el => {
+    const named = unityRefName(el.dataset.fid, el.dataset.guid, refs);
+    if (!named) return;
+    el.textContent = named.text;
+    el.title = named.title;
+    el.classList.add('asset');
+    if (named.path && SDU_IMG_EXT.has(fileExt(named.path))) {
+      el.dataset.asset = named.path;
+      el.dataset.detail = named.title;
+      el.removeAttribute('title');
+      el.classList.add('image');
+    }
+    el.removeAttribute('data-guid');
+  });
+  if (onResolved) onResolved();
+}
+
+// ---- Image previews for texture and sprite references ----
+// Hovering a reference to an image asset shows it in a small popup. The bytes come from
+// repo:fileBlob at the side of the diff the value belongs to (the before column reads the
+// old revision), so an LFS texture is read from the local store, never downloaded. A
+// browser can draw PNG/JPG and friends itself; TGA and PSD — what Unity projects are
+// mostly made of — are decoded here. Anything else (TIFF, EXR) says it has no preview.
+const SDU_IMG_EXT = new Set([...IMAGE_EXTENSIONS, 'tga', 'psd', 'tif', 'tiff', 'exr', 'hdr']);
+const SDU_MAX_PIXELS = 8192 * 8192;
+const SDU_PREVIEW_SIDE = 256;
+const _sduImgCache = new Map();   // rev \0 path → Promise<{ src, w, h, bytes } | { msg } | { missing }>
+let _sduPop = null, _sduPopFor = null, _sduPopTimer = 0;
+
+// Targa: uncompressed or RLE, true-colour (24/32-bit BGR[A]) or 8-bit greyscale. Rows are
+// stored bottom-up unless descriptor bit 5 says otherwise; bit 4 flips the columns.
+function decodeTga(b) {
+  if (b.length < 18) return { error: 'Not a TGA file' };
+  const idLen = b[0], cmapType = b[1], type = b[2];
+  const cmapLen = b[5] | (b[6] << 8), cmapBits = b[7];
+  const w = b[12] | (b[13] << 8), h = b[14] | (b[15] << 8), bpp = b[16], desc = b[17];
+  const rle = type === 10 || type === 11, gray = type === 3 || type === 11;
+  if (![2, 3, 10, 11].includes(type) || !(gray ? bpp === 8 : (bpp === 24 || bpp === 32))) {
+    return { error: `No preview for this TGA (type ${type}, ${bpp}-bit)` };
+  }
+  if (!w || !h || w * h > SDU_MAX_PIXELS) return { error: 'Image too large to preview' };
+  let p = 18 + idLen + (cmapType ? cmapLen * Math.ceil(cmapBits / 8) : 0);
+  const px = bpp >> 3, n = w * h;
+  const raw = new Uint8ClampedArray(n * 4);
+  const put = (i, s) => {
+    const o = i * 4;
+    if (gray) { raw[o] = raw[o + 1] = raw[o + 2] = b[s]; raw[o + 3] = 255; }
+    else { raw[o] = b[s + 2]; raw[o + 1] = b[s + 1]; raw[o + 2] = b[s]; raw[o + 3] = px === 4 ? b[s + 3] : 255; }
+  };
+  if (!rle) {
+    if (p + n * px > b.length) return { error: 'Truncated TGA' };
+    for (let i = 0; i < n; i++) put(i, p + i * px);
+  } else {
+    let i = 0;
+    while (i < n && p < b.length) {
+      const c = b[p++], count = (c & 127) + 1;
+      if (c & 128) { for (let k = 0; k < count && i < n; k++) put(i++, p); p += px; }
+      else for (let k = 0; k < count && i < n; k++) { put(i++, p); p += px; }
+    }
+    if (i < n || p > b.length) return { error: 'Truncated TGA' };
+  }
+  // Many 32-bit TGAs leave the alpha byte at zero; drawn honestly they would be invisible.
+  if (px === 4) {
+    let any = false;
+    for (let o = 3; o < raw.length; o += 4) if (raw[o]) { any = true; break; }
+    if (!any) for (let o = 3; o < raw.length; o += 4) raw[o] = 255;
+  }
+  const top = !!(desc & 0x20), right = !!(desc & 0x10);
+  if (top && !right) return { width: w, height: h, data: raw };
+  const data = new Uint8ClampedArray(n * 4);
+  for (let y = 0; y < h; y++) {
+    const sy = top ? y : h - 1 - y;
+    for (let x = 0; x < w; x++) {
+      const s = (sy * w + (right ? w - 1 - x : x)) * 4, o = (y * w + x) * 4;
+      data[o] = raw[s]; data[o + 1] = raw[s + 1]; data[o + 2] = raw[s + 2]; data[o + 3] = raw[s + 3];
+    }
+  }
+  return { width: w, height: h, data };
+}
+
+// Photoshop: the flattened composite at the end of the file (the "Image Data" section),
+// 8-bit RGB or greyscale, raw or PackBits. Layers are skipped by their length fields.
+// Without "Maximize Compatibility" Photoshop may store a blank composite; that is the file.
+function decodePsd(b) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  if (b.length < 26 || dv.getUint32(0) !== 0x38425053) return { error: 'Not a PSD file' };
+  if (dv.getUint16(4) !== 1) return { error: 'No preview for Large Document (PSB) files' };
+  const ch = dv.getUint16(12), h = dv.getUint32(14), w = dv.getUint32(18), depth = dv.getUint16(22), mode = dv.getUint16(24);
+  if (depth !== 8 || (mode !== 3 && mode !== 1)) {
+    return { error: `No preview for this PSD (${depth}-bit, ${({ 0: 'bitmap', 2: 'indexed', 4: 'CMYK', 7: 'multichannel', 8: 'duotone', 9: 'Lab' })[mode] || 'mode ' + mode})` };
+  }
+  if (!w || !h || w * h > SDU_MAX_PIXELS) return { error: 'Image too large to preview' };
+  const trunc = { error: 'Truncated PSD' };
+  let p = 26;
+  for (let s = 0; s < 3; s++) {                // colour mode data, image resources, layers
+    if (p + 4 > b.length) return trunc;
+    p += 4 + dv.getUint32(p);
+  }
+  if (p + 2 > b.length) return trunc;
+  const comp = dv.getUint16(p); p += 2;
+  const n = w * h, want = Math.min(ch, mode === 3 ? 4 : 2);
+  const planes = [];
+  if (comp === 0) {
+    for (let c = 0; c < want; c++) { if (p + n > b.length) return trunc; planes.push(b.subarray(p, p + n)); p += n; }
+  } else if (comp === 1) {
+    const counts = p;
+    p += ch * h * 2;
+    for (let c = 0; c < want; c++) {
+      const plane = new Uint8Array(n);
+      for (let y = 0; y < h; y++) {
+        if (counts + (c * h + y) * 2 + 2 > b.length) return trunc;
+        const end = p + dv.getUint16(counts + (c * h + y) * 2);
+        if (end > b.length) return trunc;
+        let o = y * w;
+        const rowEnd = o + w;
+        while (p < end && o < rowEnd) {
+          const hb = b[p++];
+          if (hb < 128) { for (let k = 0; k <= hb && o < rowEnd && p < end; k++) plane[o++] = b[p++]; }
+          else if (hb > 128) { const v = b[p++]; for (let k = 0; k < 257 - hb && o < rowEnd; k++) plane[o++] = v; }
+        }
+        p = end;
+      }
+      planes.push(plane);
+    }
+  } else return { error: 'No preview for ZIP-compressed PSD' };
+  const data = new Uint8ClampedArray(n * 4);
+  const [r, g = r, bl = r] = mode === 3 ? planes : [planes[0]];
+  const a = mode === 3 ? planes[3] : planes[1];
+  for (let i = 0, o = 0; i < n; i++, o += 4) {
+    data[o] = r[i]; data[o + 1] = g[i]; data[o + 2] = bl[i]; data[o + 3] = a ? a[i] : 255;
+  }
+  return { width: w, height: h, data };
+}
+
+function sduBytesFromDataUri(uri) {
+  const bin = atob(uri.slice(uri.indexOf(',') + 1));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// A scaled-down PNG of decoded pixels, so the cache holds a thumbnail, not a 4K texture.
+function sduThumb(img) {
+  const full = document.createElement('canvas');
+  full.width = img.width; full.height = img.height;
+  full.getContext('2d').putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
+  const k = Math.min(1, SDU_PREVIEW_SIDE * 2 / Math.max(img.width, img.height));
+  if (k === 1) return full.toDataURL();
+  const small = document.createElement('canvas');
+  small.width = Math.max(1, Math.round(img.width * k)); small.height = Math.max(1, Math.round(img.height * k));
+  const ctx = small.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(full, 0, 0, small.width, small.height);
+  return small.toDataURL();
+}
+
+function sduLoadImage(rev, filePath) {
+  const key = rev + '\0' + filePath;
+  if (!_sduImgCache.has(key)) {
+    if (_sduImgCache.size >= 60) _sduImgCache.delete(_sduImgCache.keys().next().value);
+    _sduImgCache.set(key, (async () => {
+      const r = await gs.fileBlob({ rev, path: filePath });
+      if (!r.ok) return { msg: r.error || 'Could not read this file' };
+      const f = r.data;
+      if (!f.exists) return { missing: true };
+      if (f.lfsMissing) return { msg: 'Stored in Git LFS and not downloaded — git lfs fetch brings it down.', bytes: f.bytes };
+      if (f.tooLarge) return { msg: 'Too large to preview.', bytes: f.bytes };
+      const ext = fileExt(filePath);
+      if (IMAGE_EXTENSIONS.has(ext)) return { src: f.dataUri, bytes: f.bytes };
+      const img = ext === 'tga' ? decodeTga(sduBytesFromDataUri(f.dataUri))
+        : ext === 'psd' ? decodePsd(sduBytesFromDataUri(f.dataUri))
+        : { error: `No preview for .${ext} files.` };
+      if (img.error) return { msg: img.error, bytes: f.bytes };
+      return { src: sduThumb(img), w: img.width, h: img.height, bytes: f.bytes };
+    })().catch(e => ({ msg: e.message || String(e) })));
+  }
+  return _sduImgCache.get(key);
+}
+
+function sduHideImage() {
+  clearTimeout(_sduPopTimer);
+  _sduPopFor = null;
+  if (_sduPop) _sduPop.hidden = true;
+}
+
+function sduPlacePopup(el) {
+  const r = el.getBoundingClientRect();
+  const pw = _sduPop.offsetWidth, ph = _sduPop.offsetHeight;
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+  let top = r.bottom + 6;
+  if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+  _sduPop.style.left = left + 'px';
+  _sduPop.style.top = top + 'px';
+}
+
+async function sduShowImage(el) {
+  if (!el.isConnected) return;
+  if (!_sduPop) {
+    _sduPop = document.createElement('div');
+    _sduPop.className = 'sdu-imgpop';
+    document.body.appendChild(_sduPop);
+    // Anything that scrolls moves the reference out from under the popup.
+    window.addEventListener('scroll', sduHideImage, true);
+  }
+  _sduPopFor = el;
+  const frame = el.closest('.smartdiff');
+  const before = !!el.closest('.sdu-before');
+  const rev = frame ? (before ? frame.dataset.oldrev : frame.dataset.newrev) : 'WORKTREE';
+  const filePath = el.dataset.asset;
+  const name = filePath.split('/').pop();
+  _sduPop.innerHTML = `<div class="sdu-imgpop-load"><span class="loading"></span> ${escapeHtml(name)}</div>`;
+  _sduPop.hidden = false;
+  sduPlacePopup(el);
+  // The texture may not exist at that revision (added later, or since deleted); the
+  // working tree's copy is the next best thing, and the caption says which one this is.
+  let res = await sduLoadImage(rev, filePath), from = rev;
+  if (res.missing && rev !== 'WORKTREE') { res = await sduLoadImage('WORKTREE', filePath); from = 'WORKTREE'; }
+  if (_sduPopFor !== el) return;
+  const note = (from !== rev ? '<div class="sdu-imgpop-note">Not in this revision — showing the working tree copy</div>' : '') +
+    (el.dataset.detail ? `<div class="sdu-imgpop-path">${escapeHtml(el.dataset.detail)}</div>` : '');
+  const meta = (d) => [d.w && d.h ? `${d.w}×${d.h}` : '', d.bytes ? formatBytes(d.bytes) : ''].filter(Boolean).join(' · ');
+  if (res.src) {
+    _sduPop.innerHTML = `<div class="sdu-imgpop-frame"><img alt=""></div>` +
+      `<div class="sdu-imgpop-cap"><span class="sdu-imgpop-name">${escapeHtml(name)}</span><span class="sdu-imgpop-meta"></span></div>` + note;
+    const img = _sduPop.querySelector('img');
+    const metaEl = _sduPop.querySelector('.sdu-imgpop-meta');
+    img.onload = () => {
+      metaEl.textContent = meta({ w: res.w || img.naturalWidth, h: res.h || img.naturalHeight, bytes: res.bytes });
+      if (_sduPopFor === el) sduPlacePopup(el);
+    };
+    img.src = res.src;
+  } else {
+    _sduPop.innerHTML = `<div class="sdu-imgpop-cap"><span class="sdu-imgpop-name">${escapeHtml(name)}</span><span class="sdu-imgpop-meta">${escapeHtml(meta(res))}</span></div>` +
+      `<div class="sdu-imgpop-msg">${escapeHtml(res.missing ? 'This file is in neither this revision nor the working tree.' : res.msg)}</div>` + note;
+  }
+  sduPlacePopup(el);
+}
+
+// Delegated, so references drawn later (another object's inspector, a late package name)
+// need no wiring of their own.
+function unityWireImagePreviews(root) {
+  root.addEventListener('mouseover', (e) => {
+    const el = e.target.closest && e.target.closest('.sdu-ref[data-asset]');
+    if (!el || el === _sduPopFor) return;
+    clearTimeout(_sduPopTimer);
+    _sduPopTimer = setTimeout(() => sduShowImage(el), 180);
+  });
+  root.addEventListener('mouseout', (e) => {
+    const el = e.target.closest && e.target.closest('.sdu-ref[data-asset]');
+    if (!el || (e.relatedTarget && el.contains(e.relatedTarget))) return;
+    sduHideImage();
+  });
 }
 
 // The diff parser and the partial-staging patch synthesizer are pure, and the `reverse`
@@ -2089,5 +2826,5 @@ function renderUnityDiff(node, filePath, d) {
 // tested (test/partial-patch.test.js). In the browser `module` is undefined, which makes
 // this a no-op: the functions stay plain globals like every other renderer script.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseUnifiedDiff, buildPartialPatch, hunkLineKeys };
+  module.exports = { parseUnifiedDiff, buildPartialPatch, hunkLineKeys, decodeTga, decodePsd, unityImportedSize };
 }

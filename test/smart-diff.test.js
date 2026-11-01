@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, referencedGuids, diffUnity } = require('../src/main/lib/smart-diff');
+const { smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, referencedGuids, changedValueGuids, diffUnity } = require('../src/main/lib/smart-diff');
 
 const HEAD = '%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n';
 const scene = (playerX, extra = '') => HEAD + `--- !u!1 &100
@@ -154,4 +154,152 @@ ${mods.map(([path, value]) => `    - target: {fileID: 42, guid: bbbbbbbbbbbbbbbb
 test('diffUnity: identical assets produce nothing', () => {
   const r = diffUnity(parseUnityYaml(scene(3)), parseUnityYaml(scene(3)));
   assert.deepStrictEqual(r.counts, { added: 0, removed: 0, modified: 0, objects: 0 });
+});
+
+// ---------- The hierarchy (what the Hierarchy pane of the smart view draws) ----------
+const go = (id, name, tid, father, children = [], extra = '') => `--- !u!1 &${id}
+GameObject:
+  m_Component:
+  - component: {fileID: ${tid}}
+  m_Name: ${name}
+  m_IsActive: 1
+${extra}--- !u!4 &${tid}
+Transform:
+  m_GameObject: {fileID: ${id}}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_Children:${children.length ? '\n' + children.map(c => `  - {fileID: ${c}}`).join('\n') : ' []'}
+  m_Father: {fileID: ${father}}
+`;
+const treeOf = (r) => {
+  const by = new Map(r.tree.nodes.map(n => [n.id, n]));
+  const draw = (id) => { const n = by.get(id); return n.children.length ? { [n.name]: n.children.map(draw) } : n.name; };
+  return { by, shape: r.tree.roots.map(draw) };
+};
+
+test('diffUnity tree: parents, sibling order from m_Children, root order from SceneRoots, untouched nodes kept', () => {
+  const text = (lampX) => HEAD +
+    go(10, 'Level', 11, 0, [21, 31]) +
+    go(20, 'Lamp', 21, 11).replace('x: 0', `x: ${lampX}`) +
+    go(30, 'Door', 31, 11) +
+    go(40, 'Camera', 41, 0) +
+    `--- !u!1660057539 &9223372036854775807
+SceneRoots:
+  m_ObjectHideFlags: 0
+  m_Roots:
+  - {fileID: 41}
+  - {fileID: 11}
+`;
+  // Lamp is listed after Door in the file but before it in m_Children: the list wins.
+  const reordered = (x) => text(x).replace(/(--- !u!1 &20[\s\S]*?)(--- !u!1 &30[\s\S]*?)(--- !u!1 &40)/, '$2$1$3');
+  const r = diffUnity(parseUnityYaml(text(0)), parseUnityYaml(reordered(4)));
+  const { by, shape } = treeOf(r);
+  assert.deepStrictEqual(shape, ['Camera', { Level: ['Lamp', 'Door'] }]);
+  assert.strictEqual(by.get('20').status, 'modified');
+  assert.strictEqual(by.get('30').status, null);
+  assert.strictEqual(by.get('10').status, null);
+  assert.strictEqual(r.tree.total, 4);
+  assert.strictEqual(r.tree.pruned, false);
+  // SceneRoots is not a GameObject and sits outside the hierarchy.
+  assert.strictEqual(r.groups.find(g => g.name === 'Lamp').path, 'Level');
+});
+
+test('diffUnity tree: a prefab instance hangs under its m_TransformParent, named after its prefab', () => {
+  const guid = 'c'.repeat(32);
+  const text = (extra) => HEAD + go(10, 'Spawn', 11, 0, [600]) + `--- !u!1001 &500
+PrefabInstance:
+  m_Modification:
+    serializedVersion: 3
+    m_TransformParent: {fileID: 11}
+    m_Modifications:
+    - target: {fileID: 7, guid: ${guid}, type: 3}
+      propertyPath: m_IsActive
+      value: 0
+      objectReference: {fileID: 0}
+  m_SourcePrefab: {fileID: 100100000, guid: ${guid}, type: 3}
+--- !u!4 &600 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 8, guid: ${guid}, type: 3}
+  m_PrefabInstance: {fileID: 500}
+  m_PrefabAsset: {fileID: 0}
+--- !u!1 &700 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 7, guid: ${guid}, type: 3}
+  m_PrefabInstance: {fileID: 500}
+  m_PrefabAsset: {fileID: 0}
+${extra}`;
+  // A component added to the instance belongs to the instance's row, not to a stripped stub.
+  const added = `--- !u!114 &800
+MonoBehaviour:
+  m_GameObject: {fileID: 700}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: ${'d'.repeat(32)}, type: 3}
+`;
+  const r = diffUnity(parseUnityYaml(text('')), parseUnityYaml(text(added)), { guidPaths: { [guid]: 'Assets/Prefabs/Enemy.prefab' } });
+  const { by, shape } = treeOf(r);
+  assert.deepStrictEqual(shape, [{ Spawn: ['Enemy'] }]);
+  const inst = by.get('500');
+  assert.strictEqual(inst.prefab, true);
+  assert.strictEqual(inst.inactive, true);
+  assert.strictEqual(inst.status, 'modified');
+  assert.deepStrictEqual(r.groups.map(g => g.id), ['500']);
+  assert.strictEqual(r.groups[0].path, 'Spawn');
+});
+
+test('diffUnity tree: a reparented object sits under its new parent and remembers the old one', () => {
+  const before = HEAD + go(10, 'A', 11, 0, [21]) + go(20, 'Child', 21, 11) + go(30, 'B', 31, 0);
+  const after = HEAD + go(10, 'A', 11, 0) + go(20, 'Child', 21, 31) + go(30, 'B', 31, 0, [21]);
+  const r = diffUnity(parseUnityYaml(before), parseUnityYaml(after));
+  const { by, shape } = treeOf(r);
+  assert.deepStrictEqual(shape, ['A', { B: ['Child'] }]);
+  assert.strictEqual(by.get('20').movedFrom, 'A');
+  assert.strictEqual(by.get('20').status, 'modified');
+});
+
+test('diffUnity tree: a removed subtree stays in place; past maxTreeNodes only the changed path is kept', () => {
+  const before = HEAD + go(10, 'Root', 11, 0, [21, 31]) + go(20, 'Keep', 21, 11) + go(30, 'Gone', 31, 11, [41]) + go(40, 'GoneChild', 41, 31);
+  const after = HEAD + go(10, 'Root', 11, 0, [21]) + go(20, 'Keep', 21, 11) + go(50, 'Other', 51, 0);
+  const r = diffUnity(parseUnityYaml(before), parseUnityYaml(after));
+  const { by, shape } = treeOf(r);
+  assert.deepStrictEqual(shape, [{ Root: ['Keep', { Gone: ['GoneChild'] }] }, 'Other']);
+  assert.strictEqual(by.get('30').status, 'removed');
+  assert.strictEqual(by.get('40').status, 'removed');
+
+  const p = diffUnity(parseUnityYaml(before), parseUnityYaml(after), { maxTreeNodes: 3 });
+  assert.strictEqual(p.tree.pruned, true);
+  assert.strictEqual(p.tree.total, 5);
+  assert.deepStrictEqual(treeOf(p).shape, [{ Root: [{ Gone: ['GoneChild'] }] }, 'Other']);
+});
+
+test('diffUnity tree: an asset without Transforms has no hierarchy', () => {
+  const mat = (c) => HEAD + `--- !u!21 &2100000
+Material:
+  m_Name: Rock
+  m_Color: ${c}
+`;
+  const r = diffUnity(parseUnityYaml(mat('red')), parseUnityYaml(mat('blue')));
+  assert.strictEqual(r.tree, null);
+  assert.strictEqual(r.groups.length, 1);
+});
+
+test('diffUnity: references in changed values are nameable — in-file ones by object, assets by guid', () => {
+  const mat = 'e'.repeat(32), script = 'f'.repeat(32);
+  const text = (target, material) => HEAD + go(10, 'Door', 11, 0) + go(20, 'Key', 21, 0) + `--- !u!114 &30
+MonoBehaviour:
+  m_GameObject: {fileID: 10}
+  m_Script: {fileID: 11500000, guid: ${script}, type: 3}
+  target: {fileID: ${target}}
+  look: {fileID: 2100000, guid: ${material}, type: 2}
+`;
+  const r = diffUnity(parseUnityYaml(text(0, '0'.repeat(32))), parseUnityYaml(text(21, mat)));
+  const comp = r.groups[0].components[0];
+  // A GameObject's Transform is named after its owner; the unresolved script is flagged.
+  assert.strictEqual(r.objectNames['21'], 'Key (Transform)');
+  assert.strictEqual(comp.labelGuid, script);
+  assert.strictEqual(comp.labelKind, 'MonoBehaviour');
+  assert.deepStrictEqual(changedValueGuids(r).sort(), ['0'.repeat(32), mat].sort());
+
+  const named = diffUnity(parseUnityYaml(text(0, mat)), parseUnityYaml(text(11, mat)), { guidPaths: { [script]: 'Assets/Door.cs' } });
+  assert.strictEqual(named.objectNames['11'], 'Door (Transform)');
+  assert.strictEqual(named.groups[0].components[0].type, 'Door');
+  assert.strictEqual(named.groups[0].components[0].labelGuid, undefined);
 });

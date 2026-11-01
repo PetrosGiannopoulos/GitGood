@@ -1578,7 +1578,8 @@ function buildPopoutModel() {
           filePath: file.path,
           imageRevs: file.staged ? { oldRev: 'HEAD', newRev: 'INDEX' } : { oldRev: 'INDEX', newRev: 'WORKTREE' },
           fullFileLines: full.lines,
-          fullFileOldLines: full.oldLines
+          fullFileOldLines: full.oldLines,
+          fullFile: _popoutFullFile
         });
         hydrateImageDiffs(into);
         if (full.lines) popoutScrollToFirstChange(into);
@@ -1607,7 +1608,8 @@ function buildPopoutModel() {
             filePath: file.path,
             imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
             fullFileLines: full.lines,
-            fullFileOldLines: full.oldLines
+            fullFileOldLines: full.oldLines,
+            fullFile: _popoutFullFile
           }));
           hydrateImageDiffs(into);
           if (full.lines) popoutScrollToFirstChange(into);

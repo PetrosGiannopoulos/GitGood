@@ -11,7 +11,8 @@ const { partialPickMessage, applyFailureHelp, rewritePlan } = require('./lib/par
 const { parsePushPorcelain } = require('./lib/push-porcelain');
 const { parseWorktreeList } = require('./lib/worktree-list');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
-const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, diffUnity } = require('./lib/smart-diff');
+const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, changedValueGuids, diffUnity } = require('./lib/smart-diff');
+const { parseTextureImport, diffTextureImport } = require('./lib/texture-import');
 const { mergeUnityYaml } = require('./lib/unity-merge');
 const { lfsOptOutPattern, appendLfsOptOuts } = require('./lib/lfs-optout');
 const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
@@ -5648,9 +5649,100 @@ ipcMain.handle('repo:smartDiff', wrap(async (_, { path: filePath, oldRev, newRev
   const ta = text(a), tb = text(b);
   if (ta === null || tb === null) return out;
   const before = parseUnityYaml(ta), after = parseUnityYaml(tb);
-  const guidPaths = await resolveGuids(referencedGuids(before, after));
+  const refGuids = referencedGuids(before, after);
+  const guidPaths = withPackageGuids(await resolveGuids(refGuids), refGuids);
   out.unity = diffUnity(before, after, { guidPaths });
+  // Every asset a changed value points at (a material slot, a sprite, an override's
+  // objectReference), so the inspector shows "Rock.mat" rather than a GUID.
+  const valueGuids = changedValueGuids(out.unity);
+  const assetPaths = withPackageGuids(await resolveGuids(valueGuids), valueGuids);
+  Object.assign(assetPaths, guidPaths);
+  out.unity.assetPaths = assetPaths;
+  // Whatever is left may live in a package; the renderer asks repo:unityPackageGuids for
+  // those after drawing, because indexing the package cache cold can take many seconds.
+  out.unity.unresolvedGuids = [...new Set([...refGuids, ...valueGuids])].filter(g => !assetPaths[g] && !BUILTIN_GUID.test(g));
   return out;
+}));
+
+// A texture's Unity import settings at both sides of a diff, from `<path>.meta`
+// (lib/texture-import.js). Not a Unity project, or not a texture's .meta → both null, and
+// the image diff shows nothing extra. The renderer turns these into imported sizes, since
+// it is the side that knows the source dimensions.
+ipcMain.handle('repo:textureImport', wrap(async (_, { path: filePath, oldRev, newRev }) => {
+  ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+  const read = async (rev) => {
+    const r = await readRevBytes(rev, filePath + '.meta', 512 * 1024);
+    return r.exists && r.buf ? parseTextureImport(r.buf.toString('utf8')) : null;
+  };
+  const [before, after] = await Promise.all([read(oldRev), read(newRev)]);
+  return { before, after, changes: diffTextureImport(before, after) };
+}));
+
+// Unity's built-in resources (default meshes, Default-Material, Arial) have fixed GUIDs and
+// no .meta anywhere; the renderer names them itself.
+const BUILTIN_GUID = /^0{16}[ef]0{15}$/;
+
+// Package assets — uGUI's Button and Slider, TextMeshPro's fonts — keep their .meta files in
+// <project>/Library/PackageCache, which is never tracked, so git grep cannot see them. The
+// cache is indexed from disk once per repository (8–9k files in a typical project: well
+// under a second warm, but tens of seconds on a cold disk, hence never on the diff's own path).
+// Paths are reported as Unity shows them: Packages/<name>/…, without the @version folder.
+const _packageGuids = new Map();   // repo → { promise, index }
+function packageGuidIndex() {
+  const repo = currentRepoPath;
+  if (_packageGuids.has(repo)) return _packageGuids.get(repo).promise;
+  const entry = { index: null };
+  entry.promise = (async () => {
+    const index = new Map();
+    let roots = '';
+    try { roots = await ensureGit().raw(['ls-files', '-z', '--', '*ProjectSettings/ProjectVersion.txt']); } catch (e) {}
+    for (const rel of roots.split('\0').filter(Boolean)) {
+      const project = path.join(repo, path.dirname(path.dirname(rel)));
+      const cache = path.join(project, 'Library', 'PackageCache');
+      const metas = [];
+      const walk = async (dir) => {
+        let entries;
+        try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) { return; }
+        for (const e of entries) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) await walk(p);
+          else if (e.name.endsWith('.meta')) metas.push(p);
+        }
+      };
+      await walk(cache);
+      for (let i = 0; i < metas.length; i += 64) {
+        await Promise.all(metas.slice(i, i + 64).map(async (m) => {
+          try {
+            const g = /guid: ([0-9a-f]{32})/.exec(await fsp.readFile(m, 'latin1'));
+            if (!g || index.has(g[1])) return;
+            const inCache = path.relative(cache, m.replace(/\.meta$/, '')).split(path.sep);
+            inCache[0] = inCache[0].replace(/@[^@]*$/, '');
+            index.set(g[1], 'Packages/' + inCache.join('/'));
+          } catch (e) {}
+        }));
+      }
+    }
+    entry.index = index;
+    return index;
+  })();
+  _packageGuids.set(repo, entry);
+  return entry.promise;
+}
+
+// Fill GUIDs git grep could not resolve from the package index — only if it is already built.
+function withPackageGuids(paths, guids) {
+  const entry = _packageGuids.get(currentRepoPath);
+  if (entry && entry.index) for (const g of guids) if (!paths[g] && entry.index.has(g)) paths[g] = entry.index.get(g);
+  return paths;
+}
+
+ipcMain.handle('repo:unityPackageGuids', wrap(async (_, { guids }) => {
+  ensureGit();
+  const index = await packageGuidIndex();
+  const res = {};
+  for (const g of (guids || []).slice(0, 2000)) if (index.has(g)) res[g] = index.get(g);
+  return res;
 }));
 
 // ============================================

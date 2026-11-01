@@ -98,6 +98,7 @@ function flattenDocument(lines) {
 
 const fileIdOf = (v) => { const m = /fileID:\s*(-?\d+)/.exec(v || ''); return m && m[1] !== '0' ? m[1] : null; };
 const guidOf = (v) => { const m = /guid:\s*([0-9a-f]{32})/.exec(v || ''); return m ? m[1] : null; };
+const LOCAL_REF = /^\{fileID: (-?\d+)\}$/;
 
 // A prefab instance's overrides are a list, so its flattened keys are positional
 // (m_Modifications[7].value) and adding one override renumbers everything after it. Re-key
@@ -171,10 +172,61 @@ const NOISE = /^(m_Component|m_Children)(\[|\.|$)|^serializedVersion$/;
 
 const baseName = (p) => String(p || '').split('/').pop().replace(/\.[^.]+$/, '');
 
+// The hierarchy node a document belongs to: its GameObject, or — for anything stripped out
+// of a prefab instance (its root Transform, a GameObject a component was added to) — the
+// PrefabInstance, which is the one row Unity's Hierarchy draws for it.
+function hierarchyNodeOf(docs, id) {
+  const d = docs.get(id);
+  if (!d) return null;
+  const o = (d.gameObject && docs.get(d.gameObject)) || d;
+  if (o.stripped && o.prefabInstance) return o.prefabInstance;
+  return d.gameObject || d.id;
+}
+
+// One side's hierarchy: node → { parent, index }, plus each node's position among its
+// siblings. Parents come from Transform.m_Father, or a PrefabInstance's m_TransformParent
+// (its root Transform is stripped and carries no m_Father). Sibling order is the parent's
+// m_Children; roots are ordered by SceneRoots (2022+), else m_RootOrder (older Unity, and a
+// prefab instance's override of it), else file order.
+function hierarchyOf(docs) {
+  const nodes = new Map();
+  const index = new Map();
+  const listIndex = (props, re, map) => {
+    for (const [k, v] of props) {
+      const m = re.exec(k);
+      if (!m) continue;
+      const n = hierarchyNodeOf(docs, fileIdOf(v));
+      if (n && !map.has(n)) map.set(n, Number(m[1]));
+    }
+  };
+  for (const d of docs.values()) {
+    if (/Transform$/.test(d.type) && !d.stripped && d.gameObject) {
+      const id = hierarchyNodeOf(docs, d.id);
+      nodes.set(id, { parent: d.father ? hierarchyNodeOf(docs, d.father) : null });
+      listIndex(d.props, /^m_Children\[(\d+)\]$/, index);
+      const ro = d.props.get('m_RootOrder');
+      if (!d.father && ro != null && !index.has(id)) index.set(id, Number(ro));
+    } else if (d.type === 'PrefabInstance') {
+      const tp = fileIdOf(d.props.get('m_Modification.m_TransformParent'));
+      nodes.set(d.id, { parent: tp ? hierarchyNodeOf(docs, tp) : null });
+      for (const [k, v] of d.props) {
+        if (/^override m_RootOrder(\s|$)/.test(k) && !tp && !index.has(d.id)) index.set(d.id, Number(v));
+      }
+    }
+  }
+  for (const d of docs.values()) if (d.type === 'SceneRoots') {
+    const roots = new Map();
+    listIndex(d.props, /^m_Roots\[(\d+)\]$/, roots);
+    for (const [n, i] of roots) index.set(n, i);
+  }
+  return { nodes, index };
+}
+
 // Diff two parsed assets. `guidPaths` maps a GUID to its asset path, when known.
-// Returns { groups, counts, truncated } — one group per GameObject (or per free-standing
-// object, e.g. a material or an animation clip), each with the components that changed.
-function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges = 80 } = {}) {
+// Returns { groups, counts, truncated, tree } — one group per GameObject (or per
+// free-standing object, e.g. a material or an animation clip), each with the components
+// that changed — and, for a scene or prefab, the hierarchy both sides make together.
+function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges = 80, maxTreeNodes = 20000 } = {}) {
   before = before || new Map();
   after = after || new Map();
 
@@ -190,9 +242,9 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
     return d.type;
   };
 
-  // Which group a document belongs to: its GameObject, or the prefab instance it was
-  // stripped from, or itself.
-  const ownerOf = (d) => d.gameObject || (d.stripped && d.prefabInstance) || d.id;
+  // Which group a document belongs to: its hierarchy node (GameObject or prefab instance),
+  // or itself.
+  const ownerOf = (d) => hierarchyNodeOf(after.has(d.id) ? after : before, d.id) || d.id;
 
   const lookup = (id) => after.get(id) || before.get(id) || null;
   const nameOf = (id) => {
@@ -200,24 +252,24 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
     if (!d) return null;
     if (d.name) return d.name;
     if (d.stripped && d.prefabInstance) { const p = lookup(d.prefabInstance); if (p && p.name) return p.name; }
+    // A prefab instance that never overrode its name shows the prefab's, as Unity does.
+    if (d.type === 'PrefabInstance' && d.prefabGuid && guidPaths[d.prefabGuid]) return baseName(guidPaths[d.prefabGuid]);
     return null;
   };
-  // Hierarchy path through the Transforms: find the GameObject's transform, climb m_Father.
-  const transformOf = (docs, goId) => { for (const d of docs.values()) if (d.gameObject === goId && /Transform$/.test(d.type)) return d; return null; };
-  const pathOf = (goId) => {
+
+  // Both sides' hierarchies, merged: a node takes its parent from the side it still exists
+  // on (after, unless it was removed). One that changed parent remembers where it was.
+  const ha = hierarchyOf(after), hb = hierarchyOf(before);
+  const treeIds = new Set([...hb.nodes.keys(), ...ha.nodes.keys()]);
+  const parentOf = (id) => {
+    const n = ha.nodes.get(id) || hb.nodes.get(id);
+    const p = n && n.parent;
+    return p && p !== id && treeIds.has(p) ? p : null;
+  };
+  const pathOf = (id, parent = parentOf) => {
     const parts = [];
-    for (const docs of [after, before]) {
-      let t = transformOf(docs, goId), guard = 0;
-      if (!t) continue;
-      while (t && t.father && guard++ < 64) {
-        const parent = docs.get(t.father);
-        if (!parent) break;
-        const owner = parent.gameObject || (parent.stripped && parent.prefabInstance);
-        parts.unshift(nameOf(owner) || '?');
-        t = parent;
-      }
-      break;
-    }
+    let p = parent(id), guard = 0;
+    while (p && guard++ < 256) { parts.unshift(nameOf(p) || '?'); p = parent(p); }
     return parts.join('/');
   };
 
@@ -262,7 +314,12 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
     const owner = ownerOf(d);
     const g = groupFor(owner);
     if (id === owner) { g.status = status; g.kind = d.type; }
-    g.components.push({ id, type: label(d), classId: d.classId, status, changes, totalChanges: total, self: id === owner });
+    const comp = { id, type: label(d), classId: d.classId, status, changes, totalChanges: total, self: id === owner };
+    // A label still built from a bare GUID (a package script, say) is renamed by the
+    // renderer once main has looked further.
+    const labelGuid = d.type === 'MonoBehaviour' ? d.scriptGuid : (d.type === 'PrefabInstance' ? d.prefabGuid : null);
+    if (labelGuid && !guidPaths[labelGuid]) { comp.labelGuid = labelGuid; comp.labelKind = d.type; }
+    g.components.push(comp);
   }
 
   const list = [];
@@ -270,7 +327,7 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
     const ownerDoc = lookup(g.id);
     g.name = nameOf(g.id) || (ownerDoc ? label(ownerDoc) : `Object ${g.id}`);
     g.kind = g.kind || (ownerDoc ? ownerDoc.type : null);
-    g.path = ownerDoc && (ownerDoc.type === 'GameObject' || ownerDoc.type === 'PrefabInstance' || ownerDoc.stripped) ? pathOf(g.id) : '';
+    g.path = treeIds.has(g.id) ? pathOf(g.id) : '';
     // The GameObject's own document first, then its components in a stable order.
     g.components.sort((x, y) => (y.self - x.self) || x.type.localeCompare(y.type));
     counts[g.status]++;
@@ -279,7 +336,91 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
   }
   const rank = { added: 0, removed: 1, modified: 2 };
   list.sort((x, y) => (rank[x.status] - rank[y.status]) || (x.path + '/' + x.name).localeCompare(y.path + '/' + y.name));
-  return { groups: list.slice(0, maxGroups), counts, truncated: list.length > maxGroups };
+  const shown = list.slice(0, maxGroups);
+  return { groups: shown, counts, truncated: list.length > maxGroups,
+    tree: buildTree(), objectNames: objectNames(shown) };
+
+  // Names for the in-file references ({fileID: N}) the shown changes mention: a GameObject by
+  // its name, a component as "Owner (Type)", so the inspector never shows a bare fileID it
+  // could have named. Asset references (with a guid) are main.js's job — see changedValueGuids.
+  function objectNames(gs) {
+    const out = {};
+    for (const g of gs) for (const c of g.components) for (const ch of c.changes) {
+      for (const v of [ch.before, ch.after]) {
+        const m = LOCAL_REF.exec(v || '');
+        if (!m || m[1] === '0' || m[1] in out) continue;
+        const d = lookup(m[1]);
+        if (!d) continue;
+        const owner = ownerOf(d);
+        const ownerName = nameOf(owner);
+        out[m[1]] = owner !== d.id && ownerName ? `${ownerName} (${label(d)})` : (nameOf(d.id) || label(d));
+      }
+    }
+    return out;
+  }
+
+  // The hierarchy as Unity's Hierarchy window would draw it, every node marked with its own
+  // status (null = untouched). Statuses come from the full group list, not the truncated
+  // one, so the tree never under-reports. A scene past `maxTreeNodes` keeps only the changed
+  // nodes and their ancestors (`pruned`) — the renderer then cannot offer the whole scene.
+  function buildTree() {
+    if (!treeIds.size) return null;
+    const status = new Map();
+    for (const g of groups.values()) if (treeIds.has(g.id)) status.set(g.id, g.status);
+    let keep = treeIds;
+    const pruned = treeIds.size > maxTreeNodes;
+    if (pruned) {
+      keep = new Set();
+      for (const id of status.keys()) {
+        let p = id, guard = 0;
+        while (p && !keep.has(p) && guard++ < 256) { keep.add(p); p = parentOf(p); }
+      }
+    }
+    // File order breaks ties (and orders nodes no list mentions); a removed node sorts by
+    // its old position among the survivors.
+    const seq = new Map();
+    for (const id of [...ha.nodes.keys(), ...hb.nodes.keys()]) if (!seq.has(id)) seq.set(id, seq.size);
+    const pos = (id) => {
+      const i = ha.nodes.has(id) ? ha.index.get(id) : hb.index.get(id);
+      return i == null ? Infinity : i;
+    };
+    const kids = new Map();
+    const roots = [];
+    for (const id of keep) {
+      const p = parentOf(id);
+      if (p && keep.has(p)) { if (!kids.has(p)) kids.set(p, []); kids.get(p).push(id); } else roots.push(id);
+    }
+    const order = (a, b) => (pos(a) - pos(b)) || (seq.get(a) - seq.get(b));
+    const nodes = [];
+    for (const id of keep) {
+      const d = lookup(id) || { type: 'GameObject', props: new Map() };
+      const prefab = d.type === 'PrefabInstance';
+      let active = d.props.get('m_IsActive');
+      if (prefab) for (const [k, v] of d.props) if (/^override m_IsActive(\s|$)/.test(k)) { active = v; break; }
+      const node = {
+        id, name: nameOf(id) || (prefab ? label(d) : `Object ${id}`), prefab,
+        status: status.get(id) || null, inactive: active === '0',
+        children: (kids.get(id) || []).sort(order),
+      };
+      const pb = hb.nodes.get(id), pa = ha.nodes.get(id);
+      if (pb && pa && (pb.parent || null) !== (pa.parent || null)) {
+        const from = pb.parent ? pathOf(pb.parent, (x) => { const n = hb.nodes.get(x); return n && n.parent; }) : '';
+        node.movedFrom = pb.parent ? (from ? from + '/' : '') + (nameOf(pb.parent) || '?') : '(root)';
+      }
+      nodes.push(node);
+    }
+    return { roots: roots.sort(order), nodes, total: treeIds.size, pruned };
+  }
 }
 
-module.exports = { LFS_POINTER_PREFIX, smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, referencedGuids, diffUnity };
+// The GUIDs named by the values of a diff's changes (a material slot, a sprite, an override's
+// objectReference) — what main.js resolves to asset paths so the inspector can name them.
+function changedValueGuids(result) {
+  const out = new Set();
+  for (const g of (result && result.groups) || []) for (const c of g.components) for (const ch of c.changes) {
+    for (const v of [ch.before, ch.after]) { const guid = guidOf(v); if (guid) out.add(guid); }
+  }
+  return Array.from(out);
+}
+
+module.exports = { LFS_POINTER_PREFIX, smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, referencedGuids, changedValueGuids, diffUnity };
