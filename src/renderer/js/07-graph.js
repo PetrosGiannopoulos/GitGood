@@ -1590,6 +1590,9 @@ function showCommitContextMenu(hash, x, y) {
     { label: 'Cherry-pick files…', icon: '⚒', action: () => openPartialCherryPick(hash) },
     { label: 'Revert this commit', icon: '↶', action: () => doRevert(hash) },
     'sep',
+    // Trace, compare, Unity checks and an automatic bisect, with this commit as Start.
+    { label: 'Debug from here…', icon: '⚑', action: () => openDebugToolkit(hash) },
+    'sep',
     { label: 'Reset current branch to here…', icon: '↺', action: () => showResetDialog(hash) }
   ];
   if (foldable) {

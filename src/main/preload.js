@@ -151,6 +151,28 @@ const api = {
   // The same dialog's other mode: replace the commit in the branch's history instead.
   rewritePreview: (h) => ipcRenderer.invoke('repo:rewritePreview', h),
   rewriteCommitPaths: (opts) => ipcRenderer.invoke('repo:rewriteCommitPaths', opts),
+  // Debug Toolkit (commit menu → Debug from here…): queries, Unity runs, automatic bisect.
+  debugRange: (o) => ipcRenderer.invoke('debug:range', o),
+  debugCatalog: () => ipcRenderer.invoke('debug:catalog'),
+  debugQuery: (o) => ipcRenderer.invoke('debug:query', o),
+  debugUnityInfo: () => ipcRenderer.invoke('debug:unityInfo'),
+  debugSetUnityEditor: () => ipcRenderer.invoke('debug:setUnityEditor'),
+  debugClearUnityEditor: () => ipcRenderer.invoke('debug:clearUnityEditor'),
+  debugSuspects: (o) => ipcRenderer.invoke('debug:suspects', o),
+  debugScriptUsers: (o) => ipcRenderer.invoke('debug:scriptUsers', o),
+  debugPickLogFile: () => ipcRenderer.invoke('debug:pickLogFile'),
+  debugUnityLog: (o) => ipcRenderer.invoke('debug:unityLog', o),
+  debugUnityRun: (o) => ipcRenderer.invoke('debug:unityRun', o),
+  debugOpenPath: (p) => ipcRenderer.invoke('debug:openPath', p),
+  debugBisect: (o) => ipcRenderer.invoke('debug:bisect', o),
+  debugBisectState: () => ipcRenderer.invoke('debug:bisectState'),
+  debugBisectReset: () => ipcRenderer.invoke('debug:bisectReset'),
+  debugCancel: () => ipcRenderer.invoke('debug:cancel'),
+  onDebugOutput: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('debug:output', handler);
+    return () => ipcRenderer.removeListener('debug:output', handler);
+  },
   revert: (h) => ipcRenderer.invoke('repo:revert', h),
   reset: (opts) => ipcRenderer.invoke('repo:reset', opts),
   moveBranch: (opts) => ipcRenderer.invoke('repo:moveBranch', opts),

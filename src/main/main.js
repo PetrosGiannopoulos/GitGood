@@ -9340,3 +9340,642 @@ ipcMain.handle('update:install', wrap(async () => {
   setTimeout(() => app.quit(), 800);
   return { mode: 'installer', version: info.latest };
 }));
+
+// ============================================
+// DEBUG TOOLKIT (commit menu → "Debug from here…")
+// ============================================
+// `debug:*` here, `23-debug-toolkit.js` in the renderer, pure half `lib/unity-debug.js`
+// (tested in test/unity-debug.test.js). Start is the commit that was right-clicked, End is
+// typed (HEAD by default). Everything except the bisect and the headless Unity run is a
+// read-only git query whose argv is built in the lib — the renderer names a query and its
+// inputs, never a command line.
+const ud = require('./lib/unity-debug');
+
+// One long-running job at a time (a headless Unity run or a bisect). Its output is kept so
+// a dialog closed and reopened mid-run can show what already happened.
+let debugJob = null;   // { kind, proc, canceled, output, startedAt, repo, info }
+let debugLastTmp = null;
+
+function debugSend(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('debug:output', payload); } catch (e) {}
+  }
+}
+
+// A process tree, not just the process: git bisect run → sh → Electron step → Unity.
+// Killing git alone would leave Unity running and holding the project's lock.
+function killTree(proc) {
+  if (!proc || proc.exitCode !== null) return;
+  const { spawn } = require('child_process');
+  if (process.platform === 'win32') {
+    try { spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true }); } catch (e) {}
+  } else {
+    try { process.kill(-proc.pid, 'SIGTERM'); } catch (e) { try { proc.kill('SIGTERM'); } catch (_) {} }
+  }
+}
+app.on('will-quit', () => { if (debugJob) killTree(debugJob.proc); });
+
+// git with stdout capped and stderr kept, for the queries: their output goes straight into
+// the dialog, so a runaway `log -p` must stop rather than fill the main process.
+function gitCapture(args, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const proc = spawn('git', ['-c', 'core.quotePath=false', ...args], {
+      cwd: currentRepoPath,
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' }),
+      windowsHide: true
+    });
+    const bufs = [];
+    let got = 0, truncated = false, err = '';
+    proc.stdout.on('data', d => {
+      if (truncated) return;
+      bufs.push(d); got += d.length;
+      if (got >= maxBytes) { truncated = true; proc.kill(); }
+    });
+    proc.stderr.on('data', d => { if (err.length < 8192) err += String(d); });
+    proc.on('error', reject);
+    proc.on('close', code => resolve({ out: Buffer.concat(bufs).toString('utf8').slice(0, maxBytes), err, code, truncated }));
+  });
+}
+
+async function debugResolve(ref) {
+  const r = ud.safeRef(ref || 'HEAD');
+  const res = await gitRun(['rev-parse', '--verify', '--quiet', `${r}^{commit}`]);
+  const hash = (res.out || '').trim();
+  if (res.code !== 0 || !/^[0-9a-f]{40}$/.test(hash)) throw new Error(`"${r}" is not a commit, branch or tag in this repository.`);
+  return hash;
+}
+
+async function debugCommitInfo(hash) {
+  const out = (await gitRun(['show', '-s', '--format=%H%x1f%h%x1f%s%x1f%an%x1f%aI', hash])).out.trim();
+  const [h, short, subject, author, date] = out.split('\x1f');
+  return { hash: h, short, subject, author, date };
+}
+
+// merge-base answers on stdout, so it is safe where `--is-ancestor` (exit code only) is
+// not — see the submodule notes in CLAUDE.md.
+async function debugIsAncestor(a, b) {
+  return (await gitRun(['merge-base', a, b])).out.trim() === a;
+}
+
+async function debugRangeFacts(startRef, endRef) {
+  const start = await debugResolve(startRef);
+  const end = await debugResolve(endRef);
+  let relation = 'unrelated', older = null, newer = null;
+  if (start === end) relation = 'same';
+  else if (await debugIsAncestor(start, end)) { relation = 'start-older'; older = start; newer = end; }
+  else if (await debugIsAncestor(end, start)) { relation = 'end-older'; older = end; newer = start; }
+  let count = 0;
+  if (older) count = parseInt((await gitRun(['rev-list', '--count', `${older}..${newer}`])).out.trim(), 10) || 0;
+  return { start, end, relation, older, newer, count };
+}
+
+ipcMain.handle('debug:range', wrap(async (_, o) => {
+  ensureGit();
+  const f = await debugRangeFacts(o && o.start, o && o.end);
+  return Object.assign(f, {
+    startInfo: await debugCommitInfo(f.start),
+    endInfo: await debugCommitInfo(f.end),
+    steps: ud.bisectStepsEstimate(f.count)
+  });
+}));
+
+// Scripts and refs for the dialog's pickers.
+ipcMain.handle('debug:catalog', wrap(async () => {
+  ensureGit();
+  const files = (await gitCapture(['ls-files', '-z', '--', '*.cs'], 4 * 1024 * 1024)).out.split('\0').filter(Boolean);
+  const refs = (await gitRun(['for-each-ref', '--format=%(refname:short)', '--count=600', 'refs/heads', 'refs/tags', 'refs/remotes'])).out
+    .split('\n').map(s => s.trim()).filter(s => s && !/\/HEAD$/.test(s));
+  return { scripts: files.slice(0, 6000), scriptCount: files.length, refs };
+}));
+
+ipcMain.handle('debug:query', wrap(async (_, o) => {
+  ensureGit();
+  const p = Object.assign({}, o || {});
+  if (p.kind === 'method') {
+    const attrFile = path.join(os.tmpdir(), `gitgood-csharp-attr-${process.pid}`);
+    fs.writeFileSync(attrFile, '*.cs diff=csharp\n', 'utf8');
+    p.attributesFile = attrFile.replace(/\\/g, '/');
+  }
+  const args = ud.debugQueryArgs(p.kind, p);
+  const r = await gitCapture(args, 3 * 1024 * 1024);
+  // grep exits 1 for "nothing found" and says nothing; anything else on stderr is an error.
+  if (r.code !== 0 && !r.out && !(p.kind === 'grep' && r.code === 1 && !r.err.trim())) {
+    throw new Error(r.err.trim() || `git exited ${r.code}`);
+  }
+  // The command as the user could type it: without the colour flag and the temp file.
+  const shown = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-c' && /^core\.attributesFile=/.test(args[i + 1] || '')) { i++; continue; }
+    if (args[i] === '--color=always' || /^--format=/.test(args[i])) continue;
+    shown.push(/[\s*?|()\\]/.test(args[i]) ? `'${args[i]}'` : args[i]);
+  }
+  return { text: r.out, truncated: r.truncated, command: 'git ' + shown.join(' ') };
+}));
+
+// ---- Unity projects & editors ----------------------------------------------------------
+
+function debugInstalledEditors() {
+  const installed = {};
+  let secondary = null;
+  try {
+    const cfg = ud.hubSecondaryConfigPath(process.platform, process.env);
+    if (cfg && fs.existsSync(cfg)) {
+      const v = JSON.parse(fs.readFileSync(cfg, 'utf8'));
+      if (typeof v === 'string' && v.trim()) secondary = v.trim();
+    }
+  } catch (e) {}
+  for (const root of ud.hubEditorRoots(process.platform, process.env, secondary)) {
+    let names = [];
+    try { names = fs.readdirSync(root); } catch (e) { continue; }
+    for (const n of names) {
+      const exe = ud.editorExeIn(path.join(root, n), process.platform);
+      if (!installed[n] && fs.existsSync(exe)) installed[n] = exe;
+    }
+  }
+  return installed;
+}
+
+// Unity takes an exclusive lock on Temp/UnityLockfile while a project is open (Windows).
+// Elsewhere the file's existence is all there is, and a crash leaves it behind, so it is
+// reported as "maybe" — a warning, not a refusal.
+function debugProjectLock(projDir) {
+  const lock = path.join(projDir, 'Temp', 'UnityLockfile');
+  if (!fs.existsSync(lock)) return 'no';
+  if (process.platform !== 'win32') return 'maybe';
+  try { fs.closeSync(fs.openSync(lock, 'r+')); return 'no'; }
+  catch (e) { return /EBUSY|EPERM|EACCES/.test(e.code || e.message) ? 'yes' : 'maybe'; }
+}
+
+async function debugUnityProjects() {
+  const tracked = (await gitCapture(['ls-files', '-z', '--', '*ProjectSettings/ProjectVersion.txt'], 1024 * 1024)).out
+    .split('\0').filter(Boolean);
+  const tail = 'ProjectSettings/ProjectVersion.txt';
+  const prefixes = tracked.map(p => p.slice(0, p.length - tail.length)).filter(p => p === '' || p.endsWith('/'));
+  if (!prefixes.length && fs.existsSync(path.join(currentRepoPath, 'ProjectSettings', 'ProjectVersion.txt'))) prefixes.push('');
+  return prefixes.slice(0, 20).map(prefix => {
+    const dir = path.join(currentRepoPath, prefix);
+    const read = (f) => { try { return fs.readFileSync(path.join(dir, 'ProjectSettings', f), 'utf8'); } catch (e) { return ''; } };
+    return {
+      prefix,
+      version: ud.parseProjectVersion(read('ProjectVersion.txt')),
+      identity: ud.parseProjectIdentity(read('ProjectSettings.asset')),
+      locked: debugProjectLock(dir)
+    };
+  });
+}
+
+function debugEditorFor(version, installed) {
+  const override = loadSettings().unityEditorPath;
+  if (override && fs.existsSync(override)) return { path: override, source: 'chosen' };
+  if (version && installed[version]) return { path: installed[version], source: 'hub' };
+  return null;
+}
+
+async function debugUnityInfo() {
+  const installed = debugInstalledEditors();
+  const projects = await debugUnityProjects();
+  return {
+    projects: projects.map(p => Object.assign(p, { editor: debugEditorFor(p.version, installed) })),
+    installed,
+    override: loadSettings().unityEditorPath || null
+  };
+}
+
+ipcMain.handle('debug:unityInfo', wrap(async () => { ensureGit(); return debugUnityInfo(); }));
+
+ipcMain.handle('debug:setUnityEditor', wrap(async () => {
+  ensureGit();
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Locate the Unity editor',
+    properties: ['openFile'],
+    filters: process.platform === 'win32' ? [{ name: 'Unity editor (Unity.exe)', extensions: ['exe'] }] : []
+  });
+  if (r.canceled || !r.filePaths[0]) return debugUnityInfo();
+  let p = r.filePaths[0];
+  // A macOS .app bundle picked in the dialog → the binary inside it.
+  if (/\.app$/i.test(p)) p = path.join(p, 'Contents', 'MacOS', 'Unity');
+  if (!fs.existsSync(p)) throw new Error(`${p} does not exist.`);
+  const s = loadSettings(); s.unityEditorPath = p; saveSettings(s);
+  return debugUnityInfo();
+}));
+
+ipcMain.handle('debug:clearUnityEditor', wrap(async () => {
+  ensureGit();
+  const s = loadSettings(); delete s.unityEditorPath; saveSettings(s);
+  return debugUnityInfo();
+}));
+
+// ---- Unity suspects ---------------------------------------------------------------------
+
+async function debugShowAt(rev, p) {
+  const r = await gitCapture(['show', `${rev}:${p}`], 256 * 1024);
+  return r.code === 0 ? r.out : null;
+}
+
+// Scenes/prefabs/assets at `rev` (or on disk when rev is null) that reference a GUID,
+// with how many times. git grep prints "<rev>:<path>:<count>" at a rev, "<path>:<count>"
+// in the working tree.
+async function debugGuidUsers(rev, guid) {
+  const args = ['grep', '-c', '-F', '-e', `guid: ${guid}`];
+  if (rev) args.push(rev);
+  args.push('--', '*.unity', '*.prefab', '*.asset', '*.controller', '*.overrideController', '*.playable');
+  const r = await gitCapture(args, 2 * 1024 * 1024);
+  return r.out.split('\n').filter(Boolean).map(line => {
+    const rest = rev && line.startsWith(rev + ':') ? line.slice(rev.length + 1) : line;
+    const m = /^(.*):(\d+)$/.exec(rest);
+    return m ? { path: m[1], count: parseInt(m[2], 10) } : null;
+  }).filter(Boolean);
+}
+
+async function debugMetaFindings(start, end) {
+  const ns = await gitCapture(['diff', '--name-status', '-z', '-M', '--no-ext-diff', start, end, '--', '*.cs', '*.cs.meta'], 8 * 1024 * 1024);
+  const changes = ud.parseNameStatusZ(ns.out);
+  const metaStart = {}, metaEnd = {};
+  let reads = 0;
+  for (const c of changes) {
+    if (reads > 600) break;
+    const p = c.path;
+    if (/\.cs\.meta$/i.test(p) && c.status !== 'A' && c.status !== 'D') {
+      metaStart[c.oldPath || p] = await debugShowAt(start, c.oldPath || p);
+      metaEnd[p] = await debugShowAt(end, p);
+      reads += 2;
+    } else if (/\.cs$/i.test(p) && c.status === 'D') {
+      metaStart[p + '.meta'] = await debugShowAt(start, p + '.meta');
+      reads += 1;
+    } else if (/\.cs$/i.test(p) && c.status === 'R') {
+      metaStart[c.oldPath + '.meta'] = await debugShowAt(start, c.oldPath + '.meta');
+      metaEnd[p + '.meta'] = await debugShowAt(end, p + '.meta');
+      reads += 2;
+    }
+  }
+  // Did each added script get its .meta committed by End? One cat-file pass: it answers
+  // one line per input line, in order ("… missing" when absent). ls-tree would not do —
+  // its paths are literal, a '*.cs.meta' pattern matches nothing (verified).
+  const added = changes.filter(c => c.status === 'A' && /\.cs$/i.test(c.path) && !/\n/.test(c.path)).map(c => c.path);
+  const metasAtEnd = new Set();
+  if (added.length) {
+    const r = await gitRun(['cat-file', '--batch-check'], null, 60000, added.map(p => `${end}:${p}.meta`).join('\n') + '\n');
+    r.out.split('\n').slice(0, added.length).forEach((line, i) => { if (!/ missing$/.test(line)) metasAtEnd.add(added[i] + '.meta'); });
+  }
+  const findings = ud.scriptMetaFindings(changes, metaStart, metaEnd, p => metasAtEnd.has(p + '.meta'));
+  // Who is affected: for a lost GUID, the scenes and prefabs at End that still name it.
+  let lookups = 0;
+  for (const f of findings) {
+    if ((f.kind === 'guid' || f.kind === 'deleted') && f.guid && lookups++ < 40) {
+      f.users = (await debugGuidUsers(end, f.guid)).slice(0, 50);
+    }
+  }
+  return findings;
+}
+
+async function debugEditorLeaks() {
+  // Editor-only assemblies: an .asmdef whose includePlatforms is exactly ["Editor"]. Read
+  // as JSON rather than grepped, since the array is usually split across lines.
+  const asmdefs = (await gitCapture(['ls-files', '-z', '--', '*.asmdef'], 2 * 1024 * 1024)).out.split('\0').filter(Boolean);
+  const editorDirs = [];
+  for (const a of asmdefs.slice(0, 500)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(currentRepoPath, a), 'utf8').replace(/^﻿/, ''));
+      const inc = j.includePlatforms || [];
+      if (inc.length === 1 && inc[0] === 'Editor') {
+        const d = path.posix.dirname(a);
+        editorDirs.push(d === '.' ? '' : d);
+      }
+    } catch (e) {}
+  }
+  const r = await gitCapture(['grep', '-l', '-I', '-E', '-e', '\\bUnityEditor\\b', '--', '*.cs'], 4 * 1024 * 1024);
+  const files = r.out.split('\n').map(s => s.trim()).filter(Boolean).filter(p => !ud.isEditorOnlyPath(p, editorDirs));
+  const out = [];
+  for (const f of files.slice(0, 400)) {
+    let text;
+    try { text = fs.readFileSync(path.join(currentRepoPath, f), 'utf8'); } catch (e) { continue; }
+    const leaks = ud.editorLeaks(text);
+    if (leaks.length) out.push({ path: f, lines: leaks.slice(0, 20) });
+  }
+  return { files: out, scanned: files.length, editorAsmdefs: editorDirs.length };
+}
+
+ipcMain.handle('debug:suspects', wrap(async (_, o) => {
+  ensureGit();
+  o = o || {};
+  const checks = new Set(o.checks || []);
+  const prefix = o.prefix || '';
+  const sections = [];
+  let start = null, end = null;
+  if (['versions', 'settings', 'metas', 'renames'].some(c => checks.has(c))) {
+    start = await debugResolve(o.start);
+    end = await debugResolve(o.end);
+  }
+  const run = async (id, title, fn) => {
+    try { sections.push(Object.assign({ id, title }, await fn())); }
+    catch (e) { sections.push({ id, title, error: e.message || String(e) }); }
+  };
+  if (checks.has('versions')) await run('versions', 'Unity & package versions', async () => {
+    const r = await gitCapture(ud.debugQueryArgs('versions', { start, end, prefix }), 2 * 1024 * 1024);
+    return { text: r.out, truncated: r.truncated };
+  });
+  if (checks.has('metas')) await run('metas', 'Script GUIDs, missing scripts & execution order', async () =>
+    ({ findings: await debugMetaFindings(start, end) }));
+  if (checks.has('renames')) await run('renames', 'Renamed serialized fields', async () => {
+    const r = await gitCapture(['diff', '-U1', '--no-color', '--no-ext-diff', '--no-textconv', start, end, '--', '*.cs'], 24 * 1024 * 1024);
+    return { renames: ud.findSerializedRenames(r.out), truncated: r.truncated };
+  });
+  if (checks.has('settings')) await run('settings', 'Project settings', async () => {
+    const r = await gitCapture(ud.debugQueryArgs('settings', { start, end, prefix }), 2 * 1024 * 1024);
+    return { text: r.out, truncated: r.truncated };
+  });
+  if (checks.has('leaks')) await run('leaks', 'Editor-only code that breaks builds', async () =>
+    ({ leaks: await debugEditorLeaks() }));
+  return { sections };
+}));
+
+// Which scenes/prefabs use this script? GUID from its .meta at End (or on disk).
+ipcMain.handle('debug:scriptUsers', wrap(async (_, o) => {
+  ensureGit();
+  o = o || {};
+  const file = String(o.file || '').trim().replace(/\.meta$/i, '');
+  if (!file) throw new Error('Choose a script.');
+  const rev = o.end ? await debugResolve(o.end) : null;
+  let meta = rev ? await debugShowAt(rev, file + '.meta') : null;
+  if (meta == null) { try { meta = fs.readFileSync(path.join(currentRepoPath, file + '.meta'), 'utf8'); } catch (e) { meta = null; } }
+  const guid = ud.parseScriptMeta(meta).guid;
+  if (!guid) throw new Error(`${file}.meta was not found — without it the script has no GUID to look for.`);
+  return { guid, users: await debugGuidUsers(rev, guid) };
+}));
+
+// ---- Unity logs -------------------------------------------------------------------------
+
+ipcMain.handle('debug:pickLogFile', wrap(async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open a log file', properties: ['openFile'],
+    filters: [{ name: 'Logs', extensions: ['log', 'txt'] }, { name: 'All files', extensions: ['*'] }]
+  });
+  return (r.canceled || !r.filePaths[0]) ? null : r.filePaths[0];
+}));
+
+ipcMain.handle('debug:unityLog', wrap(async (_, o) => {
+  o = o || {};
+  let file = null;
+  if (o.which === 'custom') file = o.path;
+  else {
+    let identity = null;
+    if (/^player/.test(o.which || '') && currentRepoPath) {
+      try { identity = ud.parseProjectIdentity(fs.readFileSync(path.join(currentRepoPath, o.prefix || '', 'ProjectSettings', 'ProjectSettings.asset'), 'utf8')); }
+      catch (e) { identity = null; }
+    }
+    file = ud.unityLogPath(o.which || 'editor', process.platform, process.env, identity);
+    if (!file) {
+      if (/^player/.test(o.which || '')) throw new Error('The Player log\'s folder is named after the project\'s company and product, and ProjectSettings.asset could not be read to find them.');
+      throw new Error('Could not work out where Unity keeps that log on this system.');
+    }
+  }
+  if (!file || !fs.existsSync(file)) return { path: file, exists: false };
+  const st = fs.statSync(file);
+  const MAX = 6 * 1024 * 1024;   // the end of the log is what matters; Editor.log grows all session
+  const from = Math.max(0, st.size - MAX);
+  const fd = fs.openSync(file, 'r');
+  let text;
+  try {
+    const buf = Buffer.alloc(st.size - from);
+    fs.readSync(fd, buf, 0, buf.length, from);
+    text = buf.toString('utf8');
+  } finally { fs.closeSync(fd); }
+  if (from > 0) text = text.slice(text.indexOf('\n') + 1);
+  const base = { path: file, exists: true, size: st.size, mtime: st.mtimeMs, truncated: from > 0 };
+  if (o.mode === 'all') {
+    const needle = String(o.filter || '').toLowerCase();
+    let lines = text.replace(/\r/g, '').split('\n');
+    if (needle) lines = lines.filter(l => l.toLowerCase().includes(needle));
+    return Object.assign(base, { text: lines.slice(-3000).join('\n'), lineCount: lines.length });
+  }
+  return Object.assign(base, { blocks: ud.filterUnityLog(text, { warnings: o.mode === 'warnings', filter: o.filter }) });
+}));
+
+// ---- Headless Unity run (compile check / tests) on the working tree --------------------
+
+function debugTmpDir(tag) {
+  if (debugLastTmp) { try { fs.rmSync(debugLastTmp, { recursive: true, force: true }); } catch (e) {} }
+  debugLastTmp = fs.mkdtempSync(path.join(os.tmpdir(), `gitgood-${tag}-`));
+  return debugLastTmp;
+}
+
+async function debugPickProject(prefix) {
+  const info = await debugUnityInfo();
+  if (!info.projects.length) throw new Error('No Unity project was found in this repository (no ProjectSettings/ProjectVersion.txt).');
+  const proj = info.projects.find(p => p.prefix === (prefix || '')) || info.projects[0];
+  if (!proj.editor) {
+    throw new Error(`Unity ${proj.version || '(unknown version)'} is not installed through Unity Hub on this machine. Use "Locate Unity…" to point GitGood at an editor.`);
+  }
+  if (proj.locked === 'yes') throw new Error('Unity has this project open. Close the Editor first — a headless run cannot open a project that is already open.');
+  return { proj, info };
+}
+
+ipcMain.handle('debug:unityRun', wrap(async (_, o) => {
+  ensureGit();
+  o = o || {};
+  if (debugJob) throw new Error('Another debug job is still running. Cancel it first.');
+  const mode = ['compile', 'editmode', 'playmode'].includes(o.mode) ? o.mode : 'compile';
+  const { proj } = await debugPickProject(o.prefix);
+  const projDir = path.join(currentRepoPath, proj.prefix);
+  const tmp = debugTmpDir('unity');
+  const logFile = path.join(tmp, 'unity.log');
+  const resultsFile = path.join(tmp, 'results.xml');
+  const args = ud.unityArgs(mode, { projectPath: projDir, logFile, resultsFile, filter: (o.filter || '').trim(), noGraphics: o.noGraphics !== false });
+  const { spawn } = require('child_process');
+  const startedAt = Date.now();
+  const proc = spawn(proj.editor.path, args, { cwd: projDir, stdio: 'ignore', windowsHide: true, detached: process.platform !== 'win32' });
+  const job = debugJob = { kind: 'unity', proc, canceled: false, output: '', startedAt, repo: currentRepoPath, info: { mode } };
+  // Unity writes its progress to the log file, not stdout: tail it so the dialog can say
+  // "Compiling…" / "Running tests…" instead of showing a silent spinner for minutes.
+  let lastLine = '';
+  const timer = setInterval(() => {
+    try {
+      const st = fs.statSync(logFile);
+      const n = Math.min(st.size, 8192);
+      const fd = fs.openSync(logFile, 'r');
+      const buf = Buffer.alloc(n);
+      fs.readSync(fd, buf, 0, n, st.size - n);
+      fs.closeSync(fd);
+      const lines = buf.toString('utf8').replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean);
+      const line = lines[lines.length - 1] || '';
+      if (line && line !== lastLine) { lastLine = line; job.output = line; debugSend({ kind: 'unity-status', text: line.slice(0, 240) }); }
+    } catch (e) {}
+  }, 1500);
+  let exitCode;
+  try {
+    exitCode = await new Promise((resolve) => {
+      proc.on('error', (e) => { job.spawnError = e.message; resolve(null); });
+      proc.on('close', resolve);
+    });
+  } finally {
+    clearInterval(timer);
+    debugJob = null;
+  }
+  if (job.spawnError) throw new Error(`Could not start Unity: ${job.spawnError}`);
+  if (job.canceled) return { canceled: true };
+  let log = '';
+  try { log = fs.readFileSync(logFile, 'utf8'); } catch (e) {}
+  let xml = '';
+  try { xml = fs.readFileSync(resultsFile, 'utf8'); } catch (e) {}
+  const results = mode === 'compile' ? null : ud.parseNUnitResults(xml);
+  const errs = ud.compileErrors(log);
+  return {
+    mode, exitCode, results, compileErrors: errs,
+    verdict: ud.unityVerdict(mode, { exitCode, results, compileErrors: errs }),
+    seconds: Math.round((Date.now() - startedAt) / 1000),
+    logFile, logTail: log.replace(/\r/g, '').split('\n').slice(-60).join('\n'),
+    problems: ud.filterUnityLog(log).slice(0, 40),
+    editor: proj.editor.path, version: proj.version
+  };
+}));
+
+ipcMain.handle('debug:openPath', wrap(async (_, p) => {
+  // Only the logs this toolkit wrote (its temp folder) or a Unity log it just read.
+  if (!p || !fs.existsSync(p)) throw new Error('That file no longer exists.');
+  shell.showItemInFolder(p);
+  return true;
+}));
+
+// ---- Automatic bisect -------------------------------------------------------------------
+
+async function debugGitDirBusy() {
+  const gitDir = (await gitRun(['rev-parse', '--absolute-git-dir'])).out.trim();
+  const op = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']
+    .find(f => fs.existsSync(path.join(gitDir, f)));
+  return { gitDir, op, bisecting: fs.existsSync(path.join(gitDir, 'BISECT_START')) };
+}
+
+ipcMain.handle('debug:bisectState', wrap(async () => {
+  ensureGit();
+  const b = await debugGitDirBusy();
+  return {
+    bisecting: b.bisecting,
+    running: !!debugJob,
+    job: debugJob ? { kind: debugJob.kind, startedAt: debugJob.startedAt, output: debugJob.output.slice(-200000), info: debugJob.info } : null
+  };
+}));
+
+ipcMain.handle('debug:bisectReset', wrap(async () => {
+  ensureGit();
+  if (debugJob) throw new Error('A debug job is still running. Cancel it first.');
+  const r = await gitRun(['bisect', 'reset']);
+  if (r.code !== 0) throw new Error(r.err.trim() || 'git bisect reset failed');
+  return true;
+}));
+
+ipcMain.handle('debug:cancel', wrap(async () => {
+  if (!debugJob) return false;
+  debugJob.canceled = true;
+  killTree(debugJob.proc);
+  return true;
+}));
+
+ipcMain.handle('debug:bisect', wrap(async (_, o) => {
+  ensureGit();
+  o = o || {};
+  if (debugJob) throw new Error('Another debug job is still running. Cancel it first.');
+  const repo = currentRepoPath;
+  const kind = o.test && o.test.kind;
+  const unityMode = { 'unity-editmode': 'editmode', 'unity-playmode': 'playmode', 'unity-compile': 'compile' }[kind];
+  if (!unityMode && kind !== 'command') throw new Error('Choose how each commit should be tested.');
+  const command = String((o.test && o.test.command) || '').trim();
+  if (kind === 'command' && !command) throw new Error('Type the command that tests a commit (for example: npm test).');
+
+  // ---- preflight: every refusal says what to do about it
+  const f = await debugRangeFacts(o.start, o.end);
+  if (f.relation === 'same') throw new Error('Start and End are the same commit — there is nothing between them to search.');
+  if (f.relation === 'unrelated') throw new Error('Start and End are on separate lines of history (neither contains the other). Pick an End that was built on top of Start — for example the branch where the problem shows.');
+  if (f.count < 1) throw new Error('There are no commits between Start and End to test.');
+  const busy = await debugGitDirBusy();
+  if (busy.bisecting) throw new Error('A bisect is already in progress in this repository. Reset it first, then start again.');
+  if (busy.op) throw new Error(`An unfinished ${busy.op.replace(/_HEAD$/, '').replace('-', ' ').toLowerCase()} is in progress. Finish or abort it first.`);
+  const dirty = (await gitRun(['status', '--porcelain', '--untracked-files=no'])).out.split('\n').filter(Boolean);
+  if (dirty.length) {
+    throw new Error(`Bisect checks out other commits, so uncommitted changes would be in the way (${dirty.length} file${dirty.length === 1 ? '' : 's'}, e.g. ${dirty[0].slice(3)}). Commit or stash them first.`);
+  }
+  let editor = null, prefix = '', installed = {};
+  if (unityMode) {
+    const { proj, info } = await debugPickProject(o.prefix);
+    editor = proj.editor.path; prefix = proj.prefix; installed = info.installed;
+  }
+  const baselineUntracked = o.cleanup !== false
+    ? (await gitCapture(['ls-files', '-o', '--exclude-standard', '-z'], 32 * 1024 * 1024)).out.split('\0').filter(Boolean)
+    : [];
+
+  // ---- the step script and its config live outside the repository: bisect checks out
+  // other commits underneath anything inside it.
+  const tmp = debugTmpDir('bisect');
+  const script = path.join(tmp, 'step.js');
+  const cfgFile = path.join(tmp, 'config.json');
+  const fixMode = o.find === 'fix';
+  fs.writeFileSync(script, ud.bisectStepScript(), 'utf8');
+  fs.writeFileSync(cfgFile, JSON.stringify({
+    repo, prefix, tmp, kind: unityMode ? 'unity' : 'command', mode: unityMode, command,
+    cwd: repo,
+    filter: ((o.test && o.test.filter) || '').trim(), noGraphics: o.noGraphics !== false,
+    compileFailAs: o.compileFailAs === 'fail' ? 'fail' : 'skip',
+    editor, installed, useOwnVersion: o.useOwnVersion !== false,
+    timeoutMs: Math.max(1, Math.min(600, parseInt(o.timeoutMinutes, 10) || 30)) * 60000,
+    cleanup: o.cleanup !== false, baselineUntracked, invert: fixMode
+  }), 'utf8');
+
+  const { spawn } = require('child_process');
+  // ELECTRON_RUN_AS_NODE: the step runs on this app's own binary in plain-Node mode, the
+  // same trick as the rebase editor shim — no `node` needs to be on PATH.
+  const env = Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ELECTRON_RUN_AS_NODE: '1' });
+  const job = debugJob = { kind: 'bisect', proc: null, canceled: false, output: '', startedAt: Date.now(), repo,
+    info: { start: f.start, end: f.end, older: f.older, newer: f.newer, count: f.count, steps: ud.bisectStepsEstimate(f.count), find: fixMode ? 'fix' : 'break' } };
+  const push = (text) => {
+    job.output += text;
+    if (job.output.length > 4 * 1024 * 1024) job.output = job.output.slice(-2 * 1024 * 1024);
+    debugSend({ kind: 'bisect', text });
+  };
+  const runGit = (args) => new Promise((resolve) => {
+    const p = spawn('git', args, { cwd: repo, env, windowsHide: true, detached: process.platform !== 'win32' });
+    job.proc = p;
+    p.stdout.on('data', d => push(String(d)));
+    p.stderr.on('data', d => push(String(d)));
+    p.on('error', (e) => { push(`\n${e.message}\n`); resolve(-1); });
+    p.on('close', code => resolve(code));
+  });
+
+  let result = null;
+  try {
+    // Old = the older commit, new = the newer. Breaking: old is "good", new is "bad".
+    // Fixing: custom terms, so git's own messages read right ("first fixed commit").
+    const startArgs = ['bisect', 'start'];
+    if (fixMode) startArgs.push('--term-old=broken', '--term-new=fixed');
+    startArgs.push(f.newer, f.older);
+    push(`$ git ${startArgs.join(' ')}\n`);
+    const sc = await runGit(startArgs);
+    if (sc !== 0 && !job.canceled) throw new Error('git bisect start failed:\n' + job.output.slice(-2000));
+    if (!job.canceled) {
+      push(`$ git bisect run <GitGood step: ${unityMode ? 'Unity ' + unityMode : command}>\n`);
+      await runGit(['bisect', 'run', process.execPath, script, cfgFile]);
+    }
+    const parsed = ud.parseBisectOutput(job.output);
+    result = { status: job.canceled ? 'canceled' : parsed.status, steps: parsed.steps, term: parsed.term,
+      count: f.count, older: f.older, newer: f.newer, find: fixMode ? 'fix' : 'break' };
+    if (parsed.status === 'found') {
+      result.commit = await debugCommitInfo(parsed.hash);
+      result.stat = (await gitCapture(['show', '--stat=140,100', '--format=', parsed.hash], 256 * 1024)).out;
+    } else if (parsed.status === 'ambiguous') {
+      result.candidates = [];
+      for (const h of parsed.candidates.slice(0, 30)) result.candidates.push(await debugCommitInfo(h));
+    }
+    result.log = (await gitRun(['bisect', 'log'])).out;
+  } finally {
+    // Always back to the branch the user was on. Staying put would leave HEAD on whichever
+    // commit was tested LAST, which is not necessarily the one found — the result card
+    // offers a checkout of the found commit instead.
+    if (fs.existsSync(path.join(busy.gitDir, 'BISECT_START'))) {
+      const r = await gitRun(['bisect', 'reset']);
+      if (result) result.reset = r.code === 0 ? 'done' : ('failed: ' + r.err.trim());
+    } else if (result) {
+      result.reset = 'done';
+    }
+    debugJob = null;
+  }
+  return result;
+}));

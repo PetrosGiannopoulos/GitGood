@@ -633,7 +633,10 @@ function relativeTime(date) {
 // MODAL SYSTEM
 // ============================================
 const modal = {
-  show({ title, body, footer }) {
+  // `cls` sizes one dialog (e.g. the wide Debug Toolkit); every show resets it, so the
+  // next ordinary dialog is back to the default width.
+  show({ title, body, footer, cls }) {
+    $('#modal').className = 'modal' + (cls ? ' ' + cls : '');
     $('#modal-title').textContent = title || '';
     const bodyEl = $('#modal-body');
     bodyEl.innerHTML = '';
