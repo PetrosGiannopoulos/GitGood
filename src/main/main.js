@@ -9265,7 +9265,14 @@ ipcMain.handle('update:install', wrap(async () => {
   const { spawn, execFile } = require('child_process');
 
   if (info.mode === 'source') {
-    const g = updateSourceGit();
+    // A progress-reporting instance for the pull only, relabelled so the About panel's bar
+    // (which listens for method 'Update') shows it as one step of the update.
+    const g = simpleGit({
+      baseDir: app.getAppPath(), ...SG_OPTS,
+      progress({ stage, progress, processed, total }) {
+        emitOpProgress({ method: 'Update', stage: `Pulling main (${stage})`, progress, processed, total, active: true });
+      }
+    });
     const before = (await g.revparse(['HEAD'])).trim();
     emitOpProgress({ method: 'Update', stage: 'Pulling main' });
     // --ff-only: a clone with local commits on main is refused rather than merged into.
@@ -9297,6 +9304,7 @@ ipcMain.handle('update:install', wrap(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, path.basename(a.name));
+  emitOpProgress({ method: 'Update', stage: 'Connecting' });
   const res = await fetch(a.url, { headers: { 'User-Agent': 'GitGood' } });
   if (!res.ok || !res.body) throw new Error(`Downloading ${a.name} failed (${res.status}).`);
   const total = Number(res.headers.get('content-length')) || a.size || 0;
@@ -9332,6 +9340,7 @@ ipcMain.handle('update:install', wrap(async () => {
     installer = findInstallerIn(found);
     if (!installer) throw new Error(`No installer was found inside ${a.name}.`);
   }
+  emitOpProgress({ method: 'Update', stage: 'Starting installer', progress: 100 });
   emitOpProgress({ active: false, done: true });
 
   // The installer replaces files this process holds open, so GitGood quits once it has

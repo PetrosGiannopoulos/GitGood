@@ -3632,3 +3632,14 @@ body.resizing-panes * {
   .dbg-range { grid-template-columns: 1fr; }
   .dbg-swap { margin-top: 0; justify-self: start; }
 }
+
+/* Self-update progress (Settings > About), wireUpdateButton in 08-lfs-settings.js */
+.update-progress { width: 320px; max-width: 100%; display: flex; flex-direction: column; gap: 4px; }
+.update-progress[hidden] { display: none; }
+.update-progress-track { position: relative; height: 8px; background: var(--bg); border: 1px solid var(--border-strong); overflow: hidden; }
+.update-progress-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--crusader-red-deep), var(--accent-bright)); transition: width 0.25s ease; }
+.update-progress.indeterminate .update-progress-fill { position: absolute; width: 35%; animation: update-progress-slide 1.2s ease-in-out infinite; }
+@keyframes update-progress-slide { from { left: -35%; } to { left: 100%; } }
+.update-progress-label { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-dim); }
+.update-progress-detail { color: var(--text-muted); font-family: var(--font-mono); font-size: 10.5px; text-align: right; }
+@media (prefers-reduced-motion: reduce) { .update-progress.indeterminate .update-progress-fill { animation: none; left: 0; width: 100%; opacity: 0.5; } }

@@ -1508,17 +1508,69 @@ function wireUpdateButton(btn, status) {
     }
   };
 
+  // Inline progress bar under the status text, fed by the op:progress events main emits
+  // with method 'Update'. A stage with no percentage (extracting, npm install, connecting)
+  // shows an indeterminate bar rather than one stuck at 0%.
+  const bar = document.createElement('div');
+  bar.className = 'update-progress';
+  bar.hidden = true;
+  bar.innerHTML = `<div class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+      <div class="update-progress-fill"></div></div>
+    <div class="update-progress-label"><span class="update-progress-stage"></span><span class="update-progress-detail"></span></div>`;
+  status.after(bar);
+  const track = bar.querySelector('.update-progress-track');
+  const fill = bar.querySelector('.update-progress-fill');
+  const stageEl = bar.querySelector('.update-progress-stage');
+  const detailEl = bar.querySelector('.update-progress-detail');
+  let rate = null;   // { t, bytes, speed } — smoothed download speed for the time estimate
+
+  const showProgress = (p) => {
+    bar.hidden = false;
+    const pct = typeof p.progress === 'number' ? Math.max(0, Math.min(100, p.progress)) : null;
+    bar.classList.toggle('indeterminate', pct === null);
+    fill.style.width = pct === null ? '' : pct + '%';
+    if (pct === null) track.removeAttribute('aria-valuenow'); else track.setAttribute('aria-valuenow', String(pct));
+    stageEl.textContent = (p.stage || 'Working') + (pct === null ? '…' : ` — ${pct}%`);
+    let detail = '';
+    if (p.stage === 'Downloading' && p.total) {
+      const now = Date.now();
+      if (!rate) rate = { t: now, bytes: p.processed, speed: 0 };
+      else if (now - rate.t >= 500) {
+        const inst = (p.processed - rate.bytes) * 1000 / (now - rate.t);
+        rate = { t: now, bytes: p.processed, speed: rate.speed ? rate.speed * 0.7 + inst * 0.3 : inst };
+      }
+      detail = `${(p.processed / 1048576).toFixed(1)} of ${fmtMB(p.total)}`;
+      if (rate.speed > 0) {
+        const left = Math.max(0, Math.round((p.total - p.processed) / rate.speed));
+        detail += ` · ${(rate.speed / 1048576).toFixed(1)} MB/s · ${left < 60 ? left + 's' : Math.ceil(left / 60) + ' min'} left`;
+      }
+    }
+    detailEl.textContent = detail;
+  };
+
   const install = async () => {
     btn.disabled = true;
+    rate = null;
+    showProgress({ stage: 'Starting' });
+    const off = gs.onOpProgress((p) => { if (p && p.method === 'Update') showProgress(p); });
     try {
       const r = await withLoading('Updating GitGood', () => gs.updateInstall());
-      if (!r || !r.ok) { btn.disabled = false; showToast('Update failed: ' + (r && r.error), 'error', 8000); return; }
+      if (!r || !r.ok) {
+        btn.disabled = false;
+        bar.hidden = true;
+        showToast('Update failed: ' + (r && r.error), 'error', 8000);
+        return;
+      }
+      showProgress({ stage: r.data.mode === 'installer' ? 'Installer started' : 'Updated', progress: 100 });
       status.textContent = r.data.mode === 'installer'
         ? `The v${r.data.version} installer has started. GitGood is closing so it can replace the app.`
         : `Updated to v${r.data.version}. Restarting…`;
     } catch (e) {
       btn.disabled = false;
+      bar.hidden = true;
       showToast('Update failed: ' + (e.message || e), 'error', 8000);
+    } finally {
+      off();
     }
   };
 
