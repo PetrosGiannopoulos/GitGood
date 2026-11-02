@@ -60,7 +60,11 @@ function flattenDocument(lines) {
     const key = colon >= 0 ? text.slice(0, colon) : (text.endsWith(':') ? text.slice(0, -1) : null);
     if (key === null) {
       // A bare scalar: the continuation of a value wrapped onto a new line.
-      if (lastKey !== null) props.set(lastKey, props.get(lastKey) + ' ' + text);
+      // A double-quoted line ending in `\` escapes its line break: joined with no space.
+      if (lastKey !== null) {
+        const prev = props.get(lastKey);
+        props.set(lastKey, /^"/.test(prev) && /(^|[^\\])(\\\\)*\\$/.test(prev) ? prev.slice(0, -1) + text : prev + ' ' + text);
+      }
       return;
     }
     const value = colon >= 0 ? text.slice(colon + 2) : '';
@@ -93,7 +97,44 @@ function flattenDocument(lines) {
     }
     keyLine(indent, text);
   }
+  for (const [k, v] of props) props.set(k, decodeYamlScalar(v));
   return props;
+}
+
+// Unity writes any string holding non-ASCII text (Greek, CJK, emoji…) as a double-quoted
+// YAML scalar of escapes: `m_Text: "Αθήνα"`. Decode quoted scalars
+// so the smart view shows the text itself, as the rest of the app does. Plain scalars and
+// flow maps are returned untouched; an empty string stays visible as "".
+const YAML_ESCAPES = { '0': '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n', v: '\v', f: '\f',
+  r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/', '\\': '\\', N: '\x85', _: '\xa0', L: ' ', P: ' ' };
+function decodeYamlScalar(v) {
+  if (typeof v !== 'string' || v.length < 2) return v;
+  if (v[0] === "'" && v[v.length - 1] === "'") {
+    const s = v.slice(1, -1).replace(/''/g, "'");
+    return s === '' ? "''" : s;
+  }
+  if (v[0] !== '"' || v[v.length - 1] !== '"') return v;
+  const body = v.slice(1, -1);
+  if (body === '') return '""';
+  let out = '';
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c !== '\\' || i === body.length - 1) { out += c; continue; }
+    const e = body[++i];
+    const width = e === 'x' ? 2 : e === 'u' ? 4 : e === 'U' ? 8 : 0;
+    if (width) {
+      const hex = body.substr(i + 1, width);
+      if (hex.length === width && /^[0-9a-fA-F]+$/.test(hex)) {
+        const cp = parseInt(hex, 16);
+        // A lone surrogate half (\uD83D then \uDE00) still pairs up once concatenated.
+        out += cp <= 0x10ffff ? String.fromCodePoint(cp) : '�';
+        i += width;
+        continue;
+      }
+    }
+    out += Object.prototype.hasOwnProperty.call(YAML_ESCAPES, e) ? YAML_ESCAPES[e] : '\\' + e;
+  }
+  return out;
 }
 
 const fileIdOf = (v) => { const m = /fileID:\s*(-?\d+)/.exec(v || ''); return m && m[1] !== '0' ? m[1] : null; };
@@ -423,4 +464,4 @@ function changedValueGuids(result) {
   return Array.from(out);
 }
 
-module.exports = { LFS_POINTER_PREFIX, smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, referencedGuids, changedValueGuids, diffUnity };
+module.exports = { LFS_POINTER_PREFIX, smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, decodeYamlScalar, referencedGuids, changedValueGuids, diffUnity };

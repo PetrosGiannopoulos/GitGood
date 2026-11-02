@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, referencedGuids, changedValueGuids, diffUnity } = require('../src/main/lib/smart-diff');
+const { smartKind, parseLfsPointer, parseUnityYaml, flattenDocument, decodeYamlScalar, referencedGuids, changedValueGuids, diffUnity } = require('../src/main/lib/smart-diff');
 
 const HEAD = '%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n';
 const scene = (playerX, extra = '') => HEAD + `--- !u!1 &100
@@ -302,4 +302,25 @@ MonoBehaviour:
   assert.strictEqual(named.objectNames['11'], 'Door (Transform)');
   assert.strictEqual(named.groups[0].components[0].type, 'Door');
   assert.strictEqual(named.groups[0].components[0].labelGuid, undefined);
+});
+
+test('quoted scalars are decoded: Unity escapes non-ASCII text', () => {
+  const r = String.raw;
+  assert.equal(decodeYamlScalar(r`"\u0391\u03B8\u03AE\u03BD\u03B1"`), 'Αθήνα');
+  assert.equal(decodeYamlScalar(r`"\uD83D\uDE00 \U0001F600"`), '😀 😀');
+  assert.equal(decodeYamlScalar(r`"say \"hi\"\n"`), 'say "hi"\n');
+  assert.equal(decodeYamlScalar("'it''s'"), "it's");
+  assert.equal(decodeYamlScalar('""'), '""');
+  assert.equal(decodeYamlScalar('{fileID: 0}'), '{fileID: 0}');
+  assert.equal(decodeYamlScalar('plain'), 'plain');
+  // A long string wrapped onto continuation lines, one of them with an escaped line break.
+  const props = flattenDocument([
+    'MonoBehaviour:',
+    r`  m_text: "\u0393\u03B5\u03B9\u03AC`,
+    r`    \u03C3\u03BF\u03C5 \u03BA\u03CC` + '\\',
+    r`    \u03C3\u03BC\u03B5"`,
+    r`  m_Name: "\u0399\u03C0\u03C0\u03CC\u03C4\u03B7\u03C2"`,
+  ]);
+  assert.equal(props.get('MonoBehaviour.m_text'), 'Γειά σου κόσμε');
+  assert.equal(props.get('MonoBehaviour.m_Name'), 'Ιππότης');
 });
