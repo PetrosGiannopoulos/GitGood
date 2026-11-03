@@ -267,7 +267,10 @@ function hierarchyOf(docs) {
 // Returns { groups, counts, truncated, tree } — one group per GameObject (or per
 // free-standing object, e.g. a material or an animation clip), each with the components
 // that changed — and, for a scene or prefab, the hierarchy both sides make together.
-function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges = 80, maxTreeNodes = 20000 } = {}) {
+//
+// `pending` (document ids) marks the hierarchy nodes those documents belong to: the merge
+// preview's unresolved conflicts, which must stay visible even where nothing changed.
+function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges = 80, maxTreeNodes = 20000, pending = [] } = {}) {
   before = before || new Map();
   after = after || new Map();
 
@@ -408,11 +411,17 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
     if (!treeIds.size) return null;
     const status = new Map();
     for (const g of groups.values()) if (treeIds.has(g.id)) status.set(g.id, g.status);
+    const pendingNodes = new Set();
+    for (const id of pending) {
+      const d = lookup(id);
+      const n = d ? ownerOf(d) : null;
+      if (n && treeIds.has(n)) pendingNodes.add(n);
+    }
     let keep = treeIds;
     const pruned = treeIds.size > maxTreeNodes;
     if (pruned) {
       keep = new Set();
-      for (const id of status.keys()) {
+      for (const id of [...status.keys(), ...pendingNodes]) {
         let p = id, guard = 0;
         while (p && !keep.has(p) && guard++ < 256) { keep.add(p); p = parentOf(p); }
       }
@@ -443,6 +452,7 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
         status: status.get(id) || null, inactive: active === '0',
         children: (kids.get(id) || []).sort(order),
       };
+      if (pendingNodes.has(id)) node.pending = true;
       const pb = hb.nodes.get(id), pa = ha.nodes.get(id);
       if (pb && pa && (pb.parent || null) !== (pa.parent || null)) {
         const from = pb.parent ? pathOf(pb.parent, (x) => { const n = hb.nodes.get(x); return n && n.parent; }) : '';
@@ -450,7 +460,14 @@ function diffUnity(before, after, { guidPaths = {}, maxGroups = 400, maxChanges 
       }
       nodes.push(node);
     }
-    return { roots: roots.sort(order), nodes, total: treeIds.size, pruned };
+    // Unresolved documents with no place in the hierarchy (RenderSettings, an embedded
+    // mesh): named, so the preview can say they are still open.
+    const pendingOther = [];
+    for (const id of new Set(pending)) {
+      const d = lookup(id);
+      if (d && !treeIds.has(ownerOf(d)) && pendingOther.length < 20) pendingOther.push(nameOf(ownerOf(d)) || label(d));
+    }
+    return { roots: roots.sort(order), nodes, total: treeIds.size, pruned, pendingOther: [...new Set(pendingOther)] };
   }
 }
 

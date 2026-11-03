@@ -5648,19 +5648,51 @@ ipcMain.handle('repo:smartDiff', wrap(async (_, { path: filePath, oldRev, newRev
   };
   const ta = text(a), tb = text(b);
   if (ta === null || tb === null) return out;
+  out.unity = await unityDiffPayload(ta, tb);
+  return out;
+}));
+
+// Two Unity YAML texts → the object-level diff the renderer draws, with every GUID it can
+// name already named. Shared by the diff panes and the conflict resolver's merge preview.
+async function unityDiffPayload(ta, tb, opts = {}) {
   const before = parseUnityYaml(ta), after = parseUnityYaml(tb);
   const refGuids = referencedGuids(before, after);
   const guidPaths = withPackageGuids(await resolveGuids(refGuids), refGuids);
-  out.unity = diffUnity(before, after, { guidPaths });
+  const unity = diffUnity(before, after, Object.assign({}, opts, { guidPaths }));
   // Every asset a changed value points at (a material slot, a sprite, an override's
   // objectReference), so the inspector shows "Rock.mat" rather than a GUID.
-  const valueGuids = changedValueGuids(out.unity);
+  const valueGuids = changedValueGuids(unity);
   const assetPaths = withPackageGuids(await resolveGuids(valueGuids), valueGuids);
   Object.assign(assetPaths, guidPaths);
-  out.unity.assetPaths = assetPaths;
+  unity.assetPaths = assetPaths;
   // Whatever is left may live in a package; the renderer asks repo:unityPackageGuids for
   // those after drawing, because indexing the package cache cold can take many seconds.
-  out.unity.unresolvedGuids = [...new Set([...refGuids, ...valueGuids])].filter(g => !assetPaths[g] && !BUILTIN_GUID.test(g));
+  unity.unresolvedGuids = [...new Set([...refGuids, ...valueGuids])].filter(g => !assetPaths[g] && !BUILTIN_GUID.test(g));
+  return unity;
+}
+
+// The conflict resolver's "how will this scene end up" preview. `text` is the file as the
+// renderer would save it with the picks made so far (an unresolved hunk filled with Ours,
+// and its document ids sent as `pending`); it is diffed against one of the conflict's own
+// index stages, so the hierarchy shows what the merge does to that side. Nothing is
+// written: the working tree still holds the markers until Save.
+ipcMain.handle('repo:unityMergePreview', wrap(async (_, { path: filePath, text, against, pending }) => {
+  ensureGit();
+  if (!filePath) throw new Error('A file path is required');
+  if (typeof text !== 'string') throw new Error('No merge result to preview');
+  const stage = { base: ':1', ours: ':2', theirs: ':3' }[against] || ':2';
+  const r = await readRevBytes(stage, filePath, MAX_UNITY_BYTES);
+  const bytes = Buffer.byteLength(text, 'utf8');
+  const out = {
+    kind: 'unity',
+    before: { exists: !!r.exists, bytes: r.bytes || 0, lfs: r.lfs || null, lfsMissing: !!r.lfsMissing, tooLarge: !!r.tooLarge },
+    after: { exists: true, bytes, lfs: null, lfsMissing: false, tooLarge: bytes > MAX_UNITY_BYTES },
+  };
+  if (out.after.tooLarge || (r.exists && !r.buf)) return out;
+  const isBinary = (s) => s.slice(0, 8000).includes('\u0000');
+  const ta = r.exists ? r.buf.toString('utf8') : '';
+  if ((r.exists && r.buf.subarray(0, 8000).includes(0)) || isBinary(text)) { out.unityBinary = true; return out; }
+  out.unity = await unityDiffPayload(ta, text, { pending: Array.isArray(pending) ? pending.map(String) : [] });
   return out;
 }));
 

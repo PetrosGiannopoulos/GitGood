@@ -43,6 +43,7 @@ const api = {
   fileBlob: (opts) => ipcRenderer.invoke('repo:fileBlob', opts),
   fileText: (opts) => ipcRenderer.invoke('repo:fileText', opts),
   smartDiff: (opts) => ipcRenderer.invoke('repo:smartDiff', opts),
+  unityMergePreview: (opts) => ipcRenderer.invoke('repo:unityMergePreview', opts),
   unityPackageGuids: (guids) => ipcRenderer.invoke('repo:unityPackageGuids', { guids }),
   textureImport: (opts) => ipcRenderer.invoke('repo:textureImport', opts),
 

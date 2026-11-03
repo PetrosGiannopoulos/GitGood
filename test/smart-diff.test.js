@@ -270,6 +270,25 @@ test('diffUnity tree: a removed subtree stays in place; past maxTreeNodes only t
   assert.deepStrictEqual(treeOf(p).shape, [{ Root: [{ Gone: ['GoneChild'] }] }, 'Other']);
 });
 
+test('diffUnity tree: pending documents (the merge preview) flag their node, survive pruning, and name the rest', () => {
+  const text = HEAD + go(10, 'Root', 11, 0, [21, 31]) + go(20, 'Lamp', 21, 11) + go(30, 'Door', 31, 11) + `--- !u!104 &2
+RenderSettings:
+  m_Fog: 0
+`;
+  // Nothing changed — the preview compares a side that already looks like the result —
+  // yet the unresolved Transform 21 must still put Lamp on the map.
+  const r = diffUnity(parseUnityYaml(text), parseUnityYaml(text), { pending: ['21', '2', '999'] });
+  const { by } = treeOf(r);
+  assert.strictEqual(by.get('20').pending, true);
+  assert.strictEqual(by.get('20').status, null);
+  assert.strictEqual(by.get('30').pending, undefined);
+  assert.deepStrictEqual(r.tree.pendingOther, ['RenderSettings']);
+
+  const p = diffUnity(parseUnityYaml(text), parseUnityYaml(text), { pending: ['21'], maxTreeNodes: 1 });
+  assert.strictEqual(p.tree.pruned, true);
+  assert.deepStrictEqual(treeOf(p).shape, [{ Root: ['Lamp'] }]);
+});
+
 test('diffUnity tree: an asset without Transforms has no hierarchy', () => {
   const mat = (c) => HEAD + `--- !u!21 &2100000
 Material:

@@ -235,6 +235,44 @@ function _refreshResolverFileList(container, currentPath, onPick) {
   return files;
 }
 
+// ---- Unity merge preview ----
+// The file as Save would write it with the picks made so far. An unresolved hunk is filled
+// with Ours (a marker would make the YAML unreadable) and the ids of the Unity documents it
+// touches are returned as `pending`, so the preview can flag them instead of passing Ours
+// off as a decision. A hunk that opens on a document header is a whole-document conflict
+// and does not implicate the document before it.
+const CR_UNITY_DOC = /^--- !u!\d+ &(-?\d+)/;
+function _crAssembleForPreview(hunks, resolutions) {
+  const out = [];
+  const pending = new Set();
+  let docId = null, unresolved = 0;
+  const take = (lines) => {
+    for (const l of lines) {
+      out.push(l);
+      const m = CR_UNITY_DOC.exec(l);
+      if (m) docId = m[1];
+    }
+  };
+  const ids = (lines) => { for (const l of lines) { const m = CR_UNITY_DOC.exec(l); if (m) pending.add(m[1]); } };
+  const first = (lines) => lines.find(l => l.trim()) || '';
+  hunks.forEach((h, idx) => {
+    if (h.type === 'common') { take(h.lines); return; }
+    const r = resolutions.get(idx);
+    if (r) { take(r.type === 'custom' ? (r.custom || []) : _conflictResolutionLines(h, r.type)); return; }
+    unresolved++;
+    const ours = h.ours || [], theirs = h.theirs || [];
+    if (docId && !CR_UNITY_DOC.test(first(ours)) && !CR_UNITY_DOC.test(first(theirs))) pending.add(docId);
+    ids(ours);
+    ids(theirs);
+    take(ours);
+  });
+  return { lines: out, pending: [...pending], unresolved };
+}
+
+// Remembered for the session, so moving to the next file keeps the preview as it was.
+let _crPreviewOpen = false;
+let _crPreviewAgainst = 'ours';
+
 // The resolver is a single modal that stays open across files. We track the currently-
 // loaded file's path so post-resolution we can advance to the next.
 let _resolverOpen = false;
@@ -405,6 +443,7 @@ async function openConflictResolver(initialPath) {
     const fileEol = eol || '\n';
 
     const resolutions = new Map();
+    const firstConflict = hunks.find(h => h.type !== 'common') || {};
 
     editorPaneEl.innerHTML = `
       <div class="conflict-resolver-toolbar">
@@ -412,11 +451,27 @@ async function openConflictResolver(initialPath) {
         <span class="text-mono cr-current-path">${escapeHtml(filePath)}</span>
         <span class="conflict-resolver-progress" id="cr-progress"></span>
         <span class="cr-toolbar-spacer"></span>
+        <button class="mini-btn" id="cr-preview-toggle" hidden title="Preview the hierarchy as it will be saved with the picks made so far">▤ Preview result</button>
         <button class="mini-btn" id="cr-all-ours" title="Take ours for every hunk">All Ours</button>
         <button class="mini-btn" id="cr-all-theirs" title="Take theirs for every hunk">All Theirs</button>
         <button class="mini-btn primary" id="cr-save" disabled>✓ Save &amp; Mark Resolved</button>
       </div>
-      <div class="conflict-resolver-body" id="cr-body"></div>
+      <div class="cr-work">
+        <div class="conflict-resolver-body" id="cr-body"></div>
+        <div class="cr-preview" id="cr-preview" hidden>
+          <div class="cr-preview-bar">
+            <span class="cr-preview-title">▤ Merge result</span>
+            <label class="cr-preview-against">compared with
+              <select id="cr-preview-against" class="branch-select">
+                <option value="ours">Ours · ${escapeHtml(firstConflict.oursLabel || 'HEAD')}</option>
+                <option value="theirs">Theirs · ${escapeHtml(firstConflict.theirsLabel || 'incoming')}</option>
+                <option value="base"${conflictEntry && !conflictEntry.base ? ' disabled' : ''}>Base (common ancestor)</option>
+              </select></label>
+            <span class="cr-preview-state" id="cr-preview-state"></span>
+          </div>
+          <div class="cr-preview-view smartdiff" data-oldrev="WORKTREE" data-newrev="WORKTREE"><div class="smartdiff-loaded"></div></div>
+        </div>
+      </div>
     `;
     const bodyEl = editorPaneEl.querySelector('#cr-body');
     const progressEl = editorPaneEl.querySelector('#cr-progress');
@@ -528,12 +583,70 @@ async function openConflictResolver(initialPath) {
       bodyEl.insertBefore(notice, bodyEl.firstChild);
     }
 
+    // ---- Unity merge preview (scenes, prefabs and other Unity YAML assets) ----
+    // Rebuilt by main on every pick (debounced, for typing in ✎ Edit); a newer request
+    // supersedes one still in flight, so a slow parse never paints stale picks.
+    const previewBtn = editorPaneEl.querySelector('#cr-preview-toggle');
+    const previewEl = editorPaneEl.querySelector('#cr-preview');
+    const previewView = previewEl.querySelector('.cr-preview-view > div');
+    const previewStateEl = editorPaneEl.querySelector('#cr-preview-state');
+    const againstSel = editorPaneEl.querySelector('#cr-preview-against');
+    const canPreview = SMART_UNITY_EXT.has(fileExt(filePath));
+    let previewSeq = 0, previewTimer = null;
+    if (againstSel.querySelector(`option[value="${_crPreviewAgainst}"]:not([disabled])`)) againstSel.value = _crPreviewAgainst;
+    const refreshPreview = async () => {
+      if (!canPreview || previewEl.hidden || !previewEl.isConnected) return;
+      const seq = ++previewSeq;
+      const { lines, pending, unresolved } = _crAssembleForPreview(hunks, resolutions);
+      previewStateEl.textContent = 'updating…';
+      const r = await gs.unityMergePreview({ path: filePath, text: lines.join(fileEol), against: againstSel.value, pending });
+      if (seq !== previewSeq || !previewEl.isConnected) return;
+      previewStateEl.innerHTML = unresolved
+        ? `<span class="cr-preview-open">⚠ ${unresolved} unresolved — shown as Ours</span>`
+        : '<span class="cr-preview-done">✓ every conflict picked</span>';
+      if (!r.ok) { previewView.innerHTML = `<div class="imgdiff-error">${escapeHtml(r.error || 'Could not build the preview')}</div>`; return; }
+      // Keep the user's place: the selected object and how far the hierarchy was scrolled.
+      const prevSel = previewView.querySelector('.sdu-hier .sdu-row.sel');
+      const prevHier = previewView.querySelector('.sdu-hier');
+      const keep = { id: prevSel && prevSel.dataset.id, top: prevHier ? prevHier.scrollTop : 0 };
+      renderUnityDiff(previewView, filePath, r.data, previewView.dataset.mode !== 'changes');
+      const hier = previewView.querySelector('.sdu-hier');
+      if (hier) {
+        if (keep.id) { const row = hier.querySelector(`.sdu-row[data-id="${keep.id}"]`); if (row) row.click(); }
+        hier.scrollTop = keep.top;
+      }
+    };
+    const schedulePreview = (delay) => {
+      clearTimeout(previewTimer);
+      previewTimer = setTimeout(refreshPreview, delay == null ? 250 : delay);
+    };
+    // The view's own Changed only / Whole toggle, remembered so a re-render keeps it. The
+    // preview opens on the whole hierarchy: what the asset will be, not only what moved.
+    previewView.dataset.mode = 'whole';
+    previewView.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-hmode]');
+      if (b && !b.disabled) previewView.dataset.mode = b.dataset.hmode;
+    });
+    const setPreviewOpen = (on) => {
+      _crPreviewOpen = on;
+      previewEl.hidden = !on;
+      previewBtn.classList.toggle('active', on);
+      if (on) schedulePreview(0);
+    };
+    if (canPreview) {
+      previewBtn.hidden = false;
+      previewBtn.onclick = () => setPreviewOpen(previewEl.hidden);
+      againstSel.onchange = () => { _crPreviewAgainst = againstSel.value; schedulePreview(0); };
+      if (_crPreviewOpen) setPreviewOpen(true);
+    }
+
     function renderProgress() {
       const total = conflictHunkIndices.length;
       const done = conflictHunkIndices.filter(i => resolutions.has(i)).length;
       progressEl.innerHTML = `Resolved <strong>${done}</strong> / ${total} hunks`;
       saveBtn.disabled = done < total;
       saveBtn.title = done < total ? `${total - done} hunk(s) remain` : 'Save and mark as resolved';
+      schedulePreview();
     }
     renderProgress();
 

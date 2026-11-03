@@ -2289,8 +2289,10 @@ function renderUnityDiff(node, filePath, d, fullFile) {
   const others = u.groups.filter(g => !byId.has(g.id));
   // How many changed objects sit under each node: what keeps a path visible in "changed
   // only", what starts it expanded, and the count a collapsed row shows.
+  // A pending node (the merge preview's unresolved conflict) counts as a change here: it
+  // must be findable even when the side it is compared with already looks like this.
   const below = new Map();
-  for (const n of tree.nodes) if (n.status) {
+  for (const n of tree.nodes) if (n.status || n.pending) {
     let p = parentOf.get(n.id), guard = 0;
     while (p && guard++ < 256) { below.set(p, (below.get(p) || 0) + 1); p = parentOf.get(p); }
   }
@@ -2307,7 +2309,7 @@ function renderUnityDiff(node, filePath, d, fullFile) {
     for (const id of ids) {
       if (selected) return;
       const n = byId.get(id);
-      if (n.status) { selected = id; return; }
+      if (n.status || n.pending) { selected = id; return; }
       if (below.get(id)) firstChange(n.children);
     }
   })(tree.roots);
@@ -2326,14 +2328,16 @@ function renderUnityDiff(node, filePath, d, fullFile) {
   };
   const visible = (id) => {
     if (matchPath) return matchPath.has(id);
-    return mode === 'whole' || !!byId.get(id).status || !!below.get(id);
+    const n = byId.get(id);
+    return mode === 'whole' || !!n.status || !!n.pending || !!below.get(id);
   };
   const isOpen = (id) => matchPath ? byId.get(id).children.some(c => matchPath.has(c)) : open.has(id);
 
   const rowHtml = (n, depth, kids) => {
     const cls = ['sdu-row'];
     if (n.status) cls.push('st-' + n.status);
-    else cls.push(below.get(n.id) ? 'ctx' : 'quiet');
+    else cls.push(below.get(n.id) || n.pending ? 'ctx' : 'quiet');
+    if (n.pending) cls.push('pending');
     if (n.inactive) cls.push('inactive');
     if (n.prefab) cls.push('prefab');
     if (n.id === selected) cls.push('sel');
@@ -2342,8 +2346,9 @@ function renderUnityDiff(node, filePath, d, fullFile) {
     const nb = below.get(n.id);
     const tags = (n.movedFrom ? `<span class="sdu-moved" title="Moved from ${escapeHtml(n.movedFrom)}">↪</span>` : '') +
       (n.status ? `<span class="sdu-mark ${n.status}">${SDU_MARK[n.status]}</span>` : '') +
+      (n.pending ? '<span class="sdu-pending" title="Unresolved conflict — previewed with Ours until you pick">⚠</span>' : '') +
       (nb && !opened ? `<span class="sdu-below" title="${nb} changed object${nb === 1 ? '' : 's'} inside">${nb}</span>` : '');
-    const tip = n.name + (n.prefab ? ' (prefab instance)' : '') + (n.inactive ? ' — inactive' : '') + (n.status ? ' — ' + n.status : '');
+    const tip = n.name + (n.prefab ? ' (prefab instance)' : '') + (n.inactive ? ' — inactive' : '') + (n.status ? ' — ' + n.status : '') + (n.pending ? ' — unresolved conflict' : '');
     return `<div class="${cls.join(' ')}" data-id="${n.id}" style="--d:${depth}" title="${escapeHtml(tip)}">${tw}${SDU_CUBE}` +
       `<span class="sdu-rname">${escapeHtml(n.name)}</span>${tags}</div>`;
   };
@@ -2407,7 +2412,8 @@ function renderUnityDiff(node, filePath, d, fullFile) {
     return `<div class="sdu-insp-head${n.prefab ? ' prefab' : ''}${n.inactive ? ' inactive' : ''}">${SDU_CUBE}<span class="sdu-name">${escapeHtml(n.name)}</span>` +
         (n.prefab ? '<span class="sdu-kind">Prefab instance</span>' : '') + (n.inactive ? '<span class="sdu-kind">inactive</span>' : '') + status + `</div>` +
       (path ? `<div class="sdu-insp-path">${escapeHtml(path)}</div>` : '') +
-      (n.movedFrom ? `<div class="sdu-insp-moved">↪ Moved from <b>${escapeHtml(n.movedFrom)}</b></div>` : '') + body;
+      (n.movedFrom ? `<div class="sdu-insp-moved">↪ Moved from <b>${escapeHtml(n.movedFrom)}</b></div>` : '') +
+      (n.pending ? `<div class="sdu-insp-pending">⚠ A conflict on this object is still unresolved. It is previewed with <b>Ours</b> until you pick a side.</div>` : '') + body;
   };
 
   const modeBtn = (m, label, title, disabled) =>
@@ -2424,6 +2430,8 @@ function renderUnityDiff(node, filePath, d, fullFile) {
       `<div class="sdu-pane"><div class="sdu-pane-title">Hierarchy</div><div class="sdu-hier" tabindex="0"></div></div>` +
       `<div class="sdu-pane"><div class="sdu-pane-title">Inspector</div><div class="sdu-insp"></div></div>` +
     `</div></div>` + truncNote +
+    (tree.pendingOther && tree.pendingOther.length
+      ? `<div class="sdiff-note sdu-pending-other">⚠ Still unresolved outside the hierarchy (previewed with Ours): ${tree.pendingOther.map(escapeHtml).join(', ')}</div>` : '') +
     (others.length
       ? `<details class="sdu-others" open><summary>${isScene ? 'Scene settings &amp; objects outside the hierarchy' : 'Objects outside the hierarchy'} (${others.length})</summary>` +
           `<div class="sdu-groups">${unityGroupListHtml(others, 3, refs)}</div></details>`
@@ -2520,7 +2528,7 @@ function renderUnityDiff(node, filePath, d, fullFile) {
     if (terms.length) {
       matchPath = new Set();
       for (const n of tree.nodes) {
-        if (mode !== 'whole' && !n.status) continue;
+        if (mode !== 'whole' && !n.status && !n.pending) continue;
         const s = searchText(n);
         if (!terms.every(t => s.includes(t))) continue;
         matchPath.add(n.id);

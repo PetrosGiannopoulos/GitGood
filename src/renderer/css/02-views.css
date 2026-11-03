@@ -2420,6 +2420,11 @@ body.diff-popout-open .toast-container { z-index: 9710; }
 .sdu-insp-head .sdu-chip { margin-left: auto; font-size: 10px; padding: 1px 6px; }
 .sdu-insp-path { margin: 2px 0 0 20px; font-family: var(--font-mono); font-size: 11px; color: var(--muted-text); word-break: break-all; }
 .sdu-insp-moved { margin: 4px 0 0 20px; font-size: 11px; color: var(--text-dim); }
+/* The merge preview's unresolved conflicts: shown with Ours, flagged until picked. */
+.sdu-pending { margin-left: 3px; font-size: 11px; color: var(--crusader-red-bright); }
+.sdu-row.pending { box-shadow: inset 3px 0 0 var(--crusader-red-bright); }
+.sdu-insp-pending { margin: 6px 0 0 20px; font-size: 11px; color: var(--crusader-red-bright); }
+.sdu-pending-other { color: var(--crusader-red-bright); }
 .sdu-insp .sdu-comps { padding: 6px 0 0; }
 .sdu-insp-sub { margin: 12px 0 4px; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-text); }
 .sdu-goto { display: flex; align-items: center; gap: 6px; padding: 2px 4px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
