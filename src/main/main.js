@@ -9498,8 +9498,13 @@ ipcMain.handle('debug:query', wrap(async (_, o) => {
     fs.writeFileSync(attrFile, '*.cs diff=csharp\n', 'utf8');
     p.attributesFile = attrFile.replace(/\\/g, '/');
   }
-  const args = ud.debugQueryArgs(p.kind, p);
-  const r = await gitCapture(args, 3 * 1024 * 1024);
+  let args = ud.debugQueryArgs(p.kind, p);
+  let r = await gitCapture(args, 3 * 1024 * 1024);
+  // A git built without PCRE refuses -P outright; POSIX ERE is the next best thing.
+  if (p.kind === 'grep' && r.code !== 0 && /USE_LIBPCRE|Perl-compatible/i.test(r.err || '')) {
+    args = ud.debugQueryArgs(p.kind, Object.assign({}, p, { engine: 'E' }));
+    r = await gitCapture(args, 3 * 1024 * 1024);
+  }
   // grep exits 1 for "nothing found" and says nothing; anything else on stderr is an error.
   if (r.code !== 0 && !r.out && !(p.kind === 'grep' && r.code === 1 && !r.err.trim())) {
     throw new Error(r.err.trim() || `git exited ${r.code}`);

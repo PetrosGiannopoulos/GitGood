@@ -111,8 +111,21 @@ function ansiToHtml(text, opts) {
   return out;
 }
 
+// Does this search text only make sense as a regex? Plain C# is full of . ( ) < > ? and
+// even ||, so only unambiguous regex tells count: a backslash escape (code never has one
+// outside a string literal), .* / .+, a leading ^, a range class like [A-Z], or an
+// alternation inside a group. "Debug.LogError(" stays literal; "Debug\.LogError\b" does not.
+function looksLikeRegex(text) {
+  const t = String(text || '');
+  return /\\[bBdDwWsS.()[\]{}*+?|^$\\]/.test(t) ||
+    /\.[*+]/.test(t) ||
+    /^\^/.test(t) ||
+    /\[[^\]]*(?:[a-z]-[a-z]|[A-Z]-[A-Z]|\d-\d)[^\]]*\]/.test(t) ||   // [A-Z], not arr[i-1]
+    /\([^()|]*[^()|]\|[^()|][^()]*\)/.test(t);   // (a|b), but not C#'s (a || b)
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { ansiToHtml };
+  module.exports = { ansiToHtml, looksLikeRegex };
 }
 
 // escapeHtml leaves quotes alone; anything inside an attribute goes through this.
@@ -189,17 +202,15 @@ function dbgBuildBody() {
     <div class="dbg-range">
       <div class="dbg-range-field">
         <label for="dbg-start">Start <span class="text-muted">(the commit you picked)</span></label>
-        <input id="dbg-start" class="modal-input dbg-start" list="dbg-refs" value="${dbgAttr(short)}" autocomplete="off" spellcheck="false" />
+        <input id="dbg-start" class="modal-input dbg-start" data-suggest="refs" value="${dbgAttr(short)}" autocomplete="off" spellcheck="false" />
         <div class="dbg-commit" data-role="start"></div>
       </div>
       <button type="button" class="dbg-swap" title="Swap Start and End">⇄</button>
       <div class="dbg-range-field">
         <label for="dbg-end">End <span class="text-muted">(a commit, branch or tag)</span></label>
-        <input id="dbg-end" class="modal-input dbg-end" list="dbg-refs" value="${dbgAttr(dbg.end || 'HEAD')}" autocomplete="off" spellcheck="false" />
+        <input id="dbg-end" class="modal-input dbg-end" data-suggest="refs" value="${dbgAttr(dbg.end || 'HEAD')}" autocomplete="off" spellcheck="false" />
         <div class="dbg-commit" data-role="end"></div>
       </div>
-      <datalist id="dbg-refs"></datalist>
-      <datalist id="dbg-scripts"></datalist>
     </div>
     <div class="dbg-range-info" aria-live="polite"></div>
     <div class="dbg-main">
@@ -212,6 +223,9 @@ function dbgBuildBody() {
     </div>`;
 
   dbgApplyPrefs(body);
+  dbgEnhanceSelects(body);
+  dbg.regexAuto = false;      // Pattern (regex) was ticked by dbgRecogniseRegex, not by hand
+  dbg.regexUserOff = false;   // ...and the user has since unticked it themselves
   body.addEventListener('change', (e) => {
     if (e.target.dataset && e.target.dataset.pref) dbgSavePref(e.target);
     if (e.target.name && /^dbg-.*-kind$/.test(e.target.name)) dbgSyncChoices(body);
@@ -220,14 +234,24 @@ function dbgBuildBody() {
       if (e.target.matches('.dbg-log-which')) dbg.customLog = null;
       dbgRunLogs();
     }
+    // A hand-made choice beats the guess: untick it and the guess stops re-ticking.
+    if (e.target.matches('.dbg-s-regex') && e.isTrusted) {
+      dbg.regexAuto = false;
+      dbg.regexUserOff = !e.target.checked;
+      dbgRegexNote('');
+    }
   });
   body.addEventListener('input', (e) => {
+    if (e.target.dataset && e.target.dataset.suggest && !dbgSuggestMute) dbgSuggest(e.target);
+    if (e.target.matches('.dbg-s-custom')) dbgRecogniseRegex(e.target.value);
     if (e.target.matches('.dbg-start, .dbg-end')) {
       clearTimeout(dbg.rangeTimer);
       dbg.rangeTimer = setTimeout(dbgRefreshRange, 350);
     }
   });
+  body.addEventListener('focusout', (e) => { if (dbgPop && dbgPop.owner === e.target) dbgPopClose(); });
   body.addEventListener('keydown', (e) => {
+    if (e.target.dataset && e.target.dataset.suggest && dbgSuggestKey(e)) return;
     // Enter in a field runs that pane's main action.
     if (e.key === 'Enter' && e.target.matches('input[type="text"], input[type="search"], input:not([type])')) {
       const pane = e.target.closest('.dbg-pane');
@@ -301,11 +325,207 @@ async function dbgRefreshRange() {
   dbgBisectEstimate();
 }
 
+// The catalog arrives after the form is drawn; a box typed into meanwhile gets its list now.
 function dbgFillPickers() {
   if (!dbgOpen() || !dbg.catalog) return;
-  const refs = ['HEAD'].concat(dbg.catalog.refs || []);
-  dbgEl('#dbg-refs').innerHTML = refs.map(r => `<option value="${dbgAttr(r)}"></option>`).join('');
-  dbgEl('#dbg-scripts').innerHTML = (dbg.catalog.scripts || []).map(f => `<option value="${dbgAttr(f)}"></option>`).join('');
+  const el = document.activeElement;
+  if (el && el.dataset && el.dataset.suggest && el.closest('.dbg')) dbgSuggest(el);
+}
+
+// ---------------------------------------------------------------------------------------
+// Themed pickers. A native <select> popup and a <datalist> are drawn by the OS — white,
+// whatever the theme — and a datalist lists every entry the moment its box is clicked.
+// Both are replaced by one popup in the app's colours. It lives on <body> with a fixed
+// position so the pane's scroll box cannot clip it. Suggestions appear only once
+// something is typed; an empty box is just a box.
+// ---------------------------------------------------------------------------------------
+const DBG_SUGGEST_MAX = 60;
+let dbgPop = null;          // { el, owner, items: [{ value, html }], index, pick }
+let dbgSuggestMute = false; // set while a pick writes the value back, so it doesn't reopen
+
+function dbgPopClose() {
+  if (!dbgPop) return;
+  dbgPop.el.remove();
+  dbgPop.owner.classList.remove('dbg-pop-open');
+  dbgPop = null;
+}
+
+function dbgPopShow(owner, items, index, pick, foot) {
+  if (!items.length) { dbgPopClose(); return; }
+  if (!dbgPop || dbgPop.owner !== owner) {
+    dbgPopClose();
+    const el = document.createElement('div');
+    el.className = 'dbg-pop';
+    el.setAttribute('role', 'listbox');
+    el.addEventListener('mousedown', e => e.preventDefault());   // keep focus in the field
+    el.addEventListener('click', e => {
+      const row = e.target.closest('.dbg-pop-item');
+      if (row && dbgPop) dbgPop.pick(dbgPop.items[+row.dataset.i].value);
+    });
+    document.body.appendChild(el);
+    dbgPop = { el, owner };
+    owner.classList.add('dbg-pop-open');
+  }
+  Object.assign(dbgPop, { items, index, pick });
+  dbgPop.el.innerHTML = items.map((it, i) =>
+    `<div class="dbg-pop-item${i === index ? ' active' : ''}" role="option" data-i="${i}">${it.html}</div>`).join('') +
+    (foot ? `<div class="dbg-pop-foot">${escapeHtml(foot)}</div>` : '');
+  dbgPopPlace();
+  const act = dbgPop.el.querySelector('.dbg-pop-item.active');
+  if (act) act.scrollIntoView({ block: 'nearest' });
+}
+
+function dbgPopPlace() {
+  if (!dbgPop) return;
+  const owner = dbgPop.owner;
+  const r = owner.getBoundingClientRect();
+  if (!owner.isConnected || !r.width) { dbgPopClose(); return; }
+  const el = dbgPop.el;
+  const maxW = Math.max(r.width, Math.min(640, window.innerWidth - 8));
+  el.style.minWidth = r.width + 'px';
+  el.style.maxWidth = maxW + 'px';
+  el.style.left = Math.max(4, Math.min(r.left, window.innerWidth - el.offsetWidth - 4)) + 'px';
+  const below = window.innerHeight - r.bottom - 8, above = r.top - 8;
+  const want = Math.min(el.scrollHeight, 320);
+  if (below < want && above > below) {
+    el.style.top = ''; el.style.bottom = (window.innerHeight - r.top + 2) + 'px';
+    el.style.maxHeight = Math.min(320, above) + 'px';
+  } else {
+    el.style.bottom = ''; el.style.top = (r.bottom + 2) + 'px';
+    el.style.maxHeight = Math.min(320, below) + 'px';
+  }
+}
+
+function dbgPopMove(delta) {
+  const n = dbgPop.items.length;
+  dbgPop.index = dbgPop.index < 0 ? (delta > 0 ? 0 : n - 1) : (dbgPop.index + delta + n) % n;
+  dbgPop.el.querySelectorAll('.dbg-pop-item').forEach((row, i) => row.classList.toggle('active', i === dbgPop.index));
+  const act = dbgPop.el.querySelector('.dbg-pop-item.active');
+  if (act) act.scrollIntoView({ block: 'nearest' });
+}
+
+// Capturing, so a scroll in any pane carries the popup along with its field. Guarded:
+// the tests require this file in Node, where there is no document.
+if (typeof document !== 'undefined') {
+  document.addEventListener('scroll', (e) => { if (dbgPop && e.target !== dbgPop.el) dbgPopPlace(); }, true);
+  window.addEventListener('resize', () => dbgPopClose());
+  document.addEventListener('mousedown', (e) => {
+    if (dbgPop && !dbgPop.el.contains(e.target) && !dbgPop.owner.contains(e.target)) dbgPopClose();
+  }, true);
+}
+
+// ---- Suggestions for typed fields (refs, script paths) ----
+
+function dbgSuggestList(kind) {
+  const c = dbg.catalog || {};
+  return kind === 'refs' ? ['HEAD'].concat(c.refs || []) : (c.scripts || []);
+}
+
+// Every space-separated term must appear (the app's usual filter idiom). Ranked by where
+// the first term lands: start of the file name, inside it, start of the path, anywhere.
+function dbgSuggestMatches(kind, text) {
+  const terms = String(text || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return { hits: [], more: 0 };
+  const hits = [];
+  for (const v of dbgSuggestList(kind)) {
+    const low = v.toLowerCase();
+    if (!terms.every(t => low.includes(t))) continue;
+    const base = low.slice(low.lastIndexOf('/') + 1);
+    const t0 = terms[0];
+    hits.push({ v, rank: base.startsWith(t0) ? 0 : base.includes(t0) ? 1 : low.startsWith(t0) ? 2 : 3 });
+  }
+  hits.sort((a, b) => a.rank - b.rank || a.v.length - b.v.length || a.v.localeCompare(b.v));
+  return { hits: hits.slice(0, DBG_SUGGEST_MAX).map(h => h.v), more: Math.max(0, hits.length - DBG_SUGGEST_MAX) };
+}
+
+function dbgSuggestHtml(v) {
+  const cut = v.lastIndexOf('/') + 1;
+  return `<span class="dbg-pop-dir">${escapeHtml(v.slice(0, cut))}</span>${escapeHtml(v.slice(cut))}`;
+}
+
+function dbgSuggest(input) {
+  const text = input.value;
+  const { hits, more } = dbgSuggestMatches(input.dataset.suggest, text);
+  // Nothing typed, nothing found, or the box already holds the one answer: no popup.
+  if (!hits.length || (hits.length === 1 && hits[0] === text.trim())) {
+    if (dbgPop && dbgPop.owner === input) dbgPopClose();
+    return;
+  }
+  dbgPopShow(input, hits.map(v => ({ value: v, html: dbgSuggestHtml(v) })), -1, (v) => {
+    dbgPopClose();
+    dbgSuggestMute = true;
+    try {
+      input.value = v;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } finally { dbgSuggestMute = false; }
+  }, more ? `…and ${more.toLocaleString()} more — keep typing` : '');
+}
+
+// Arrow keys walk the list, Enter takes the highlighted row, Escape closes only the popup
+// (not the dialog). Returns true when the key was the popup's, so Enter-runs-the-pane waits.
+function dbgSuggestKey(e) {
+  const open = dbgPop && dbgPop.owner === e.target;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!open) { dbgSuggest(e.target); if (!dbgPop || dbgPop.owner !== e.target) return false; }
+    e.preventDefault();
+    dbgPopMove(e.key === 'ArrowDown' ? 1 : -1);
+    return true;
+  }
+  if (!open) return false;
+  if (e.key === 'Enter' && dbgPop.index >= 0) {
+    e.preventDefault();
+    dbgPop.pick(dbgPop.items[dbgPop.index].value);
+    return true;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dbgPopClose(); return true; }
+  if (e.key === 'Tab' || e.key === 'Enter') dbgPopClose();
+  return false;
+}
+
+// ---- Selects ----
+// The <select> stays in the DOM, hidden, as the value: prefs, dbgVal and the change
+// handlers keep working on it untouched. A button in its place shows and picks the value.
+function dbgEnhanceSelects(root) {
+  root.querySelectorAll('select.modal-input:not([data-enhanced])').forEach(sel => {
+    sel.dataset.enhanced = '1';
+    sel.hidden = true;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'modal-input dbg-select-btn';
+    btn.innerHTML = '<span class="dbg-select-text"></span><span class="cs-caret">▼</span>';
+    const sync = () => {
+      const o = sel.options[sel.selectedIndex];
+      btn.querySelector('.dbg-select-text').textContent = o ? o.textContent : '';
+    };
+    sync();
+    sel.addEventListener('change', sync);
+    const open = () => {
+      const items = Array.from(sel.options).map(o => ({ value: o.value, html: escapeHtml(o.textContent) }));
+      dbgPopShow(btn, items, sel.selectedIndex, (v) => {
+        dbgPopClose();
+        btn.focus();
+        if (sel.value === v) return;
+        sel.value = v;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    };
+    btn.addEventListener('click', () => { if (dbgPop && dbgPop.owner === btn) dbgPopClose(); else open(); });
+    btn.addEventListener('blur', () => { if (dbgPop && dbgPop.owner === btn) dbgPopClose(); });
+    btn.addEventListener('keydown', (e) => {
+      const isOpen = dbgPop && dbgPop.owner === btn;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!isOpen) open(); else dbgPopMove(e.key === 'ArrowDown' ? 1 : -1);
+      } else if ((e.key === 'Enter' || e.key === ' ') && isOpen) {
+        e.preventDefault();
+        if (dbgPop.index >= 0) dbgPop.pick(dbgPop.items[dbgPop.index].value);
+      } else if (e.key === 'Escape' && isOpen) {
+        e.preventDefault(); e.stopPropagation(); dbgPopClose();
+      }
+    });
+    sel.after(btn);
+  });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -321,8 +541,8 @@ function dbgCheck(cls, label, pref, checked, extra, attrs) {
 function dbgField(label, inner, forKinds, hint) {
   return `<div class="modal-field dbg-field"${forKinds ? ` data-for="${forKinds}"` : ''}><label>${label}</label>${inner}${hint ? `<div class="dbg-hint">${hint}</div>` : ''}</div>`;
 }
-function dbgInput(cls, pref, placeholder, value, list) {
-  return `<input type="text" class="modal-input ${cls}" data-pref="${pref}" placeholder="${dbgAttr(placeholder || '')}" value="${dbgAttr(value || '')}"${list ? ` list="${list}"` : ''} autocomplete="off" spellcheck="false" />`;
+function dbgInput(cls, pref, placeholder, value, suggest) {
+  return `<input type="text" class="modal-input ${cls}" data-pref="${pref}" placeholder="${dbgAttr(placeholder || '')}" value="${dbgAttr(value || '')}"${suggest ? ` data-suggest="${suggest}"` : ''} autocomplete="off" spellcheck="false" />`;
 }
 function dbgWhere(name, pref, forKinds) {
   return `<div class="dbg-inline"${forKinds ? ` data-for="${forKinds}"` : ''}><span class="dbg-inline-label">Look in:</span>
@@ -347,7 +567,7 @@ function dbgPaneTrace() {
       ${dbgCheck('dbg-trace-regex', 'It\'s a pattern (regex), and also find commits that only <em>edited</em> lines containing it', 'trace.regex', false)}
       ${dbgCheck('dbg-trace-case', 'Ignore upper/lower case', 'trace.case', false)}
     </div>
-    ${dbgField('Script file', dbgInput('dbg-trace-file', 'trace.file', 'Start typing a path…', '', 'dbg-scripts'), 'method blame follow')}
+    ${dbgField('Script file', dbgInput('dbg-trace-file', 'trace.file', 'Start typing a path…', '', 'scripts'), 'method blame follow')}
     ${dbgField('Method name', dbgInput('dbg-trace-func', 'trace.func', 'e.g. TakeDamage'), 'method')}
     <div class="dbg-inline" data-for="blame"><span class="dbg-inline-label">Only lines</span>
       <input type="number" min="1" class="modal-input dbg-num dbg-trace-from" placeholder="from" />
@@ -370,7 +590,7 @@ function dbgPaneCompare() {
       ${dbgChoice('dbg-compare-kind', 'words', 'Word-by-word changes', 'Makes a flipped sign or a swapped argument stand out.', 'compare.kind')}
       ${dbgChoice('dbg-compare-kind', 'moved', 'Moved vs. really changed', 'Code that was only moved is coloured differently, so a real edit hidden in a refactor stands out.', 'compare.kind')}
     </div>
-    ${dbgField('One file only (optional)', dbgInput('dbg-compare-file', 'compare.file', 'Leave empty for all matching files', '', 'dbg-scripts'), 'words')}
+    ${dbgField('One file only (optional)', dbgInput('dbg-compare-file', 'compare.file', 'Leave empty for all matching files', '', 'scripts'), 'words')}
     ${dbgField('In files', dbgInput('dbg-compare-paths', 'compare.paths', '*.cs', '*.cs'), 'stat commits words moved', 'Comma-separated. Use * for every file.')}
     <div class="dbg-inline"><span class="dbg-inline-label">Compare:</span>
       <label class="dbg-pill"><input type="radio" name="dbg-compare-mode" value="direct" data-pref="compare.mode" checked /> Everything between them</label>
@@ -393,7 +613,7 @@ function dbgPaneUnity() {
     ${dbgActions('Check', 'unity')}
     <details class="dbg-sub">
       <summary>Who uses this script?</summary>
-      <div class="dbg-inline">${dbgInput('dbg-u-script', 'unity.script', 'Assets/Scripts/Player.cs', '', 'dbg-scripts')}
+      <div class="dbg-inline">${dbgInput('dbg-u-script', 'unity.script', 'Assets/Scripts/Player.cs', '', 'scripts')}
         <button type="button" class="btn-medieval" data-action="script-users">Find scenes &amp; prefabs</button></div>
       <div class="dbg-hint">Looks up the script's GUID in its .meta at End and lists every scene, prefab and asset that references it.</div>
       <div class="dbg-out dbg-out-users"></div>
@@ -409,7 +629,8 @@ function dbgPaneSearch() {
       ${DBG_SEARCHES.map(([k, label, desc]) => dbgCheck('dbg-s-preset', `<strong>${label}</strong>`, `search.${k}`, k === 'logging', desc, ` data-preset="${k}"`)).join('')}
     </div>
     ${dbgField('And/or your own search', dbgInput('dbg-s-custom', 'search.custom', 'e.g. health -=') +
-      `<div class="dbg-checks dbg-checks-row">${dbgCheck('dbg-s-regex', 'Pattern (regex)', 'search.regex', false)}${dbgCheck('dbg-s-case', 'Ignore case', 'search.case', false)}</div>`)}
+      `<div class="dbg-checks dbg-checks-row">${dbgCheck('dbg-s-regex', 'Pattern (regex)', 'search.regex', false)}${dbgCheck('dbg-s-case', 'Ignore case', 'search.case', false)}<span class="dbg-regex-note" aria-live="polite"></span></div>` +
+      '<div class="dbg-hint">Patterns are Perl-compatible, as in C#: <code>\\b</code>, <code>\\d</code>, <code>\\s</code>, <code>(a|b)</code>, <code>.*?</code>. Typing one ticks Pattern (regex) for you.</div>')}
     ${dbgField('In files', dbgInput('dbg-s-paths', 'search.paths', '*.cs', '*.cs'))}
     <div class="dbg-inline"><span class="dbg-inline-label">Search:</span>
       <label class="dbg-pill"><input type="radio" name="dbg-s-where" value="worktree" data-pref="search.where" checked /> The files on disk now</label>
@@ -632,14 +853,66 @@ function dbgRunCompare() {
   }, 'Comparing', 'No differences in those files.');
 }
 
-function dbgRunSearch() {
+function dbgRegexNote(text) {
+  const n = dbgEl('.dbg-regex-note');
+  if (n) n.textContent = text;
+}
+
+// Tick Pattern (regex) as soon as the text can only be a regex, and untick it again if it
+// stops being one — but only a tick this made; a choice made by hand is left alone.
+function dbgRecogniseRegex(text) {
+  const box = dbgEl('.dbg-s-regex');
+  if (!box) return;
+  if (!text.trim()) dbg.regexUserOff = false;
+  const isRegex = looksLikeRegex(text);
+  if (isRegex && !box.checked && !dbg.regexUserOff) {
+    box.checked = true;
+    dbg.regexAuto = true;
+    dbgSavePref(box);
+    dbgRegexNote('✓ Recognised as a regex');
+  } else if (!isRegex && box.checked && dbg.regexAuto) {
+    box.checked = false;
+    dbg.regexAuto = false;
+    dbgSavePref(box);
+    dbgRegexNote('');
+  }
+}
+
+// Each ticked search is its own git grep, drawn under its own heading. One combined
+// `grep -e A -e B` can't say which pattern a line matched, so a custom search for
+// "Debug.LogError\b" was buried among the default preset's Debug.Log hits and read as
+// if the regex had been ignored.
+async function dbgRunSearch() {
   const presets = dbgAll('.dbg-s-preset').filter(c => c.checked).map(c => c.dataset.preset);
   const custom = dbgVal('.dbg-s-custom');
   if (!presets.length && !custom.trim()) { showToast('Tick a search or type something to look for', 'error'); return; }
-  dbgRunQuery('search', {
-    kind: 'grep', presets, custom, regex: dbgChecked('.dbg-s-regex'), ignoreCase: dbgChecked('.dbg-s-case'),
+  const regex = dbgChecked('.dbg-s-regex');
+  const common = {
+    kind: 'grep', regex, ignoreCase: dbgChecked('.dbg-s-case'),
     atEnd: dbgRadio('dbg-s-where') === 'end', end: dbgRefs().end, paths: dbgVal('.dbg-s-paths')
-  }, 'Searching', 'No matches.');
+  };
+  const runs = [];
+  if (custom.trim()) runs.push({ label: `Your search: ${custom.trim()}`, params: Object.assign({}, common, { presets: [], custom }), custom: true });
+  presets.forEach(k => {
+    const def = DBG_SEARCHES.find(d => d[0] === k);
+    runs.push({ label: def ? def[1] : k, params: Object.assign({}, common, { presets: [k], custom: '' }) });
+  });
+
+  const out = dbgOut('search');
+  dbgBusy(out, 'Searching');
+  const results = await Promise.all(runs.map(r => gs.debugQuery(r.params)));
+  if (!dbgOpen()) return;
+  out.innerHTML = runs.map((run, i) => {
+    const r = results[i];
+    const head = (count) => `<div class="dbg-group-head">${escapeHtml(run.label)}${count == null ? '' : `<span class="dbg-group-count">${count.toLocaleString()} match${count === 1 ? '' : 'es'}</span>`}</div>`;
+    if (!r.ok) return `<div class="dbg-group">${head(null)}<div class="dbg-error">⚔ ${escapeHtml(r.error || 'Failed')}</div></div>`;
+    const count = String(r.data.text || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').filter(l => /^\d+:/.test(l)).length;
+    // Unticked, the text is searched literally — "\b" then means a backslash and a b.
+    const literalNote = run.custom && !regex && /\\[bBsSwWdD]/.test(custom)
+      ? '<div class="dbg-hint">Searched for this text literally. Tick <strong>Pattern (regex)</strong> for <code>\\b</code>, <code>\\s</code> and friends to mean what they do in a regex.</div>' : '';
+    return `<div class="dbg-group">${head(count)}${literalNote}${dbgCommandHtml(r.data.command)}${dbgTextHtml(r.data.text, { truncated: r.data.truncated, empty: 'No matches.' })}</div>`;
+  }).join('');
+  dbgReveal(out);
 }
 
 // ---- Unity suspects --------------------------------------------------------------------
@@ -798,6 +1071,7 @@ function dbgFillUnityCard(card, u) {
       ${u.override ? '<button type="button" class="dbg-mini" data-action="reset-unity">Use Unity Hub\'s</button>' : ''}</span></div>
     ${p.locked === 'yes' ? '<div class="dbg-warn">Unity has this project open. Close the Editor before running.</div>'
       : p.locked === 'maybe' ? '<div class="dbg-hint">Temp/UnityLockfile exists — if the Editor is open on this project, close it first.</div>' : ''}`;
+  dbgEnhanceSelects(card);
   const sel = card.querySelector('.dbg-project');
   if (sel) sel.onchange = () => { dbg.prefix = sel.value; dbgRenderUnityCard(); };
 }

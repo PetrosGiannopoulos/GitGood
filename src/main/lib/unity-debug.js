@@ -50,7 +50,8 @@ const SETTINGS_FILES = [
   'ProjectSettings/EditorBuildSettings.asset', 'ProjectSettings/AudioManager.asset'
 ];
 
-// The ready-made code searches. Extended regexes (git grep -E): \b and \s work there.
+// The ready-made code searches. Written to mean the same under -P (the default) and -E
+// (the fallback for a git built without PCRE): \b, \s and \w only, never \d.
 const SEARCH_PRESETS = {
   logging: {
     label: 'Leftover logging',
@@ -161,7 +162,11 @@ function debugQueryArgs(kind, p) {
         patterns.push(p.regex ? custom : custom.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       }
       if (!patterns.length) throw new Error('Tick a search or type something to look for.');
-      const args = ['grep', COLOR, '-n', '-I', '--heading', '--break', '-E'];
+      // Perl-compatible, because that is the regex people write (C#, JS, editors). git's -E
+      // is POSIX ERE, where \d, \D, lazy quantifiers and lookarounds are not errors — they
+      // just never match, so a correct pattern silently finds nothing (verified, 2.47).
+      // main retries with engine 'E' when git was built without PCRE.
+      const args = ['grep', COLOR, '-n', '-I', '--heading', '--break', p.engine === 'E' ? '-E' : '-P'];
       if (p.ignoreCase) args.push('-i');
       patterns.forEach(pt => args.push('-e', pt));
       if (p.atEnd) args.push(safeRef(p.end));

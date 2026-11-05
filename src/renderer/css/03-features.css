@@ -3552,7 +3552,40 @@ body.resizing-panes * {
 .dbg-pill:has(input:checked) { border-color: var(--accent-bright); background: var(--bg-raised); color: var(--bone-white); }
 .dbg-pill input { accent-color: var(--accent); }
 .dbg .modal-input.dbg-num { width: 80px; flex: 0 0 auto; min-width: 0; padding: 5px 8px; }
-.dbg-logs-bar select.modal-input { width: auto; flex: 0 0 auto; padding: 6px 8px; }
+.dbg-logs-bar .dbg-select-btn { width: auto; flex: 0 0 auto; padding: 6px 8px; }
+
+/* Themed stand-ins for <select> and <datalist> (dbgEnhanceSelects / dbgSuggest). The popup
+   is on <body>, above the modal overlay, styled like .custom-select-dropdown. */
+.dbg-select-btn { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; text-align: left; min-width: 0; }
+.dbg-select-btn:hover { border-color: var(--crusader-red); }
+.dbg-select-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbg-select-btn .cs-caret { margin-left: 0; font-size: 10px; }
+.dbg-select-btn.dbg-pop-open .cs-caret { transform: rotate(180deg); }
+.dbg-pop-open { border-color: var(--crusader-red); box-shadow: 0 0 0 1px var(--crusader-red); }
+.dbg-pop {
+  position: fixed; z-index: 1000; overflow-y: auto; overflow-x: hidden;
+  background: var(--bg-panel); border: 1px solid var(--crusader-red);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.75);
+}
+.dbg-pop-item {
+  padding: 6px 12px; font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-bottom: 1px solid rgba(58, 48, 42, 0.3);
+}
+.dbg-pop-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--bone-white); }
+.dbg-pop-item.active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--bone-white);
+  border-left: 3px solid var(--crusader-red); padding-left: 9px;
+}
+.dbg-pop-dir { color: var(--text-muted); }
+.dbg-pop-foot { padding: 5px 12px; font-size: 11px; font-style: italic; color: var(--text-muted); }
+.dbg-group { margin-bottom: 14px; }
+.dbg-group-head {
+  display: flex; align-items: baseline; gap: 10px; margin: 0 0 6px; padding-bottom: 3px;
+  border-bottom: 1px solid var(--border); color: var(--parchment-dim);
+  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.04em;
+}
+.dbg-group-count { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0; }
 .dbg-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0 12px; }
 .dbg-mini { font-family: var(--font-display); font-size: 10px; letter-spacing: 0.04em; padding: 2px 9px; background: var(--bg-raised); color: var(--parchment-dim); border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer; margin-left: 6px; }
 .dbg-mini:hover { background: var(--accent); color: var(--bone-white); }
@@ -3608,7 +3641,7 @@ body.resizing-panes * {
 .dbg-kv { display: flex; gap: 10px; align-items: center; padding: 2px 0; min-width: 0; }
 .dbg-kv > span:first-child { width: 56px; flex-shrink: 0; color: var(--parchment-dim); font-family: var(--font-display); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; }
 .dbg-kv > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dbg-kv select.modal-input { width: auto; padding: 2px 6px; font-size: 12px; }
+.dbg-kv .dbg-select-btn { width: auto; padding: 2px 6px; font-size: 12px; }
 .dbg-path { font-size: 11.5px; }
 
 .dbg-plan { font-size: 12.5px; padding: 8px 10px; background: var(--bg-raised); border-left: 3px solid var(--border-strong); margin-bottom: 8px; display: flex; flex-direction: column; gap: 3px; }

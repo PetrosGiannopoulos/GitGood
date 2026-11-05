@@ -38,6 +38,13 @@ test('grep escapes plain text and ORs every pattern', () => {
   assert.throws(() => u.debugQueryArgs('grep', { presets: [], custom: '' }));
 });
 
+test('grep is Perl-compatible unless told otherwise, so \\d means a digit', () => {
+  const a = u.debugQueryArgs('grep', { presets: [], custom: 'Debug\\.LogError\\d+', regex: true });
+  assert.ok(a.includes('-P') && !a.includes('-E'));
+  assert.ok(a.includes('Debug\\.LogError\\d+'), 'a ticked pattern is passed through untouched');
+  const e = u.debugQueryArgs('grep', { presets: [], custom: 'x', engine: 'E' });
+  assert.ok(e.includes('-E') && !e.includes('-P'));
+});
 test('Unity project facts', () => {
   assert.strictEqual(u.parseProjectVersion('m_EditorVersion: 2022.3.10f1\nm_EditorVersionWithRevision: x'), '2022.3.10f1');
   assert.deepStrictEqual(u.parseProjectIdentity('  companyName: Crusade Co\n  productName: Git Good\n'),
