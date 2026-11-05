@@ -522,20 +522,41 @@ function currentStashBranch() {
   return st.detached ? '(no branch)' : (st.current || null);
 }
 
-// What to call a stash in a list. GitHub Desktop names the stashes it makes
-// "!!GitHub_Desktop<branch>" — a marker for its own lookup, not something to read — and the
-// branch is already shown beside it, so say where it came from instead.
+// GitHub Desktop names the stashes it makes "!!GitHub_Desktop<branch>" — a marker for its own
+// lookup, not something to read. Returns the branch inside the marker, or null.
+function githubDesktopStashBranch(stash) {
+  const m = (stash.text || '').match(/^!!GitHub_Desktop<(.*)>$/);
+  return m ? (m[1] || stashBranchOf(stash)) : null;
+}
+
+// What to call a stash in a list: a GitHub Desktop stash is called by its branch.
 function stashDisplayText(stash) {
-  const text = stash.text || stash.message || stash.hash || 'stash';
-  if (/^!!GitHub_Desktop<.*>$/.test(text)) return 'GitHub Desktop stash';
-  return text;
+  const ghd = githubDesktopStashBranch(stash);
+  if (ghd) return ghd;
+  return stash.text || stash.message || stash.hash || 'stash';
+}
+
+// Hover text for a stash row. Built from the parsed fields rather than the raw subject, which
+// for GitHub Desktop reads "On x: !!GitHub_Desktop<x>".
+function stashTooltip(stash, i, hint) {
+  const ghd = githubDesktopStashBranch(stash);
+  const lines = [ghd ? `${ghd} (GitHub Desktop stash)` : stashDisplayText(stash)];
+  lines.push(`Branch: ${stashBranchOf(stash)}`);
+  const meta = [`stash@{${i}}`];
+  if (stash.date) meta.push(new Date(stash.date).toLocaleString());
+  if (stash.hash) meta.push(stash.hash.slice(0, 7));
+  lines.push(meta.join(' · '));
+  if (hint) lines.push(hint);
+  return lines.join('\n');
 }
 
 function stashIndexOf(stash, fallback) {
   return (typeof stash.index === 'number') ? stash.index : fallback;
 }
 
-function stashContextMenu(e, i) {
+// `onDrop` replaces the plain drop — the branch picker passes one so it can reopen itself
+// after the confirmation dialog (there is only one modal) has taken its place.
+function stashContextMenu(e, i, onDrop) {
   e.preventDefault();
   e.stopPropagation();
   showContextMenu([
@@ -544,7 +565,7 @@ function stashContextMenu(e, i) {
     { label: 'Apply (keep stash)', icon: '⌥', action: () => stashApply(i) },
     { label: 'Pop (apply & remove)', icon: '⌃', action: () => stashPop(i) },
     'sep',
-    { label: 'Drop', icon: '✗', danger: true, action: () => stashDrop(i) }
+    { label: 'Drop', icon: '✗', danger: true, action: () => (onDrop ? onDrop(i) : stashDrop(i)) }
   ], e.pageX, e.pageY);
 }
 
@@ -569,7 +590,7 @@ function renderStashes() {
     const li = document.createElement('li');
     li.className = 'sidebar-item stash-item';
     li.textContent = `[${i}] ${stashDisplayText(stash)}`;
-    li.title = `${stash.message}\nClick to browse files in this stash`;
+    li.title = stashTooltip(stash, i, 'Click to browse files in this stash');
     li.onclick = () => showStashBrowser(i);
     li.oncontextmenu = (e) => stashContextMenu(e, i);
     list.appendChild(li);
@@ -586,7 +607,9 @@ function renderStashes() {
 }
 
 // Popup: pick a branch (or narrow with the filter) to see the stashes made on it.
-function showStashBranchPicker() {
+// `restore` ({ selected, filter, scroll }) reopens it as it was — used after a drop, whose
+// confirmation dialog replaces this one in the single modal.
+function showStashBranchPicker(restore) {
   const all = state.stashes || [];
   const current = currentStashBranch();
   const localBranches = new Set((state.branches && state.branches.local && state.branches.local.all) || []);
@@ -597,6 +620,8 @@ function showStashBranchPicker() {
   const names = [...counts.keys()].sort((a, b) =>
     (b === current) - (a === current) || a.localeCompare(b));
   let selected = counts.has(current) ? current : null;   // null = every branch
+  // A restored branch whose last stash was just dropped falls back to every branch.
+  if (restore && 'selected' in restore) selected = counts.has(restore.selected) ? restore.selected : null;
 
   const body = document.createElement('div');
   body.innerHTML = `
@@ -617,12 +642,12 @@ function showStashBranchPicker() {
   const stashUl = body.querySelector('#sp-stashes');
   const stashLabel = body.querySelector('#sp-stash-label');
 
-  const row = (text, extraText) => {
+  const row = (text, extraText, columns = 'minmax(0,1fr) auto') => {
     const li = document.createElement('li');
     li.className = 'file-item';
     // .file-item is a 4-column grid (checkbox, status, path, actions); these rows have
-    // only the last two.
-    li.style.gridTemplateColumns = 'minmax(0,1fr) auto';
+    // only the last two (stash rows add a third, the drop button).
+    li.style.gridTemplateColumns = columns;
     const path = document.createElement('div');
     path.className = 'file-path';
     // .file-path is direction:rtl so long file paths elide at the start; for this text that
@@ -683,14 +708,35 @@ function showStashBranchPicker() {
       const i = stashIndexOf(s, all.indexOf(s));
       const when = s.date ? new Date(s.date).toLocaleDateString() : '';
       const li = row(`[${i}] ${stashDisplayText(s)}`,
-        selected === null ? `${stashBranchOf(s)}${when ? ' · ' + when : ''}` : when);
-      li.title = `${s.message}\nClick to browse files · right-click for actions`;
+        selected === null ? `${stashBranchOf(s)}${when ? ' · ' + when : ''}` : when,
+        'minmax(0,1fr) auto auto');
+      li.title = stashTooltip(s, i, 'Click to browse files · right-click for actions');
       li.onclick = () => showStashBrowser(i);
-      li.oncontextmenu = (e) => stashContextMenu(e, i);
+      li.oncontextmenu = (e) => stashContextMenu(e, i, dropAndReopen);
+      // Always a third cell, even when there is no date, so the button stays in its column.
+      if (!li.querySelector('.file-actions')) li.appendChild(document.createElement('div'));
+      const actions = document.createElement('div');
+      actions.className = 'file-actions';
+      const dropBtn = document.createElement('button');
+      dropBtn.className = 'file-action-btn';
+      dropBtn.textContent = '✕';
+      dropBtn.title = `Drop stash@{${i}}`;
+      dropBtn.onclick = (e) => { e.stopPropagation(); dropAndReopen(i); };
+      actions.appendChild(dropBtn);
+      li.appendChild(actions);
       stashUl.appendChild(li);
     });
   }
 
+  // The confirmation takes over the modal; whatever the answer, come back to this view
+  // with the same branch, filter and scroll position, built from the refreshed list.
+  async function dropAndReopen(i) {
+    const snapshot = { selected, filter: filterInput.value, scroll: stashUl.scrollTop };
+    await stashDrop(i);
+    showStashBranchPicker(snapshot);
+  }
+
+  if (restore && restore.filter) filterInput.value = restore.filter;
   filterInput.oninput = render;
   render();
 
@@ -699,6 +745,7 @@ function showStashBranchPicker() {
   closeBtn.textContent = 'Close';
   closeBtn.onclick = () => modal.hide();
   modal.show({ title: 'Stashes by Branch', body, footer: [closeBtn] });
+  if (restore && restore.scroll) stashUl.scrollTop = restore.scroll;
 }
 
 {

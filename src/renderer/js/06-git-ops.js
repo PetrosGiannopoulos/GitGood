@@ -550,11 +550,13 @@ async function stashDrop(i) {
     danger: true,
     confirmText: 'Drop'
   });
-  if (!confirmed) return;
+  if (!confirmed) return false;
   const r = await gs.stashDrop(i);
   if (handleResult(r, 'Stash dropped')) {
     await refreshStashes();
+    return true;
   }
+  return false;
 }
 
 // ============================================
