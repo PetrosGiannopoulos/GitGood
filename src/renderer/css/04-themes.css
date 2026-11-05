@@ -894,45 +894,36 @@ html.theme-hero.hero-comic .screen {
 #disk-refresh.stale::after { content: ' •'; }
 
 /* ============================================
-   GRAPH: collapsed-history summary row
+   GRAPH: folded runs ("⋯ N" after a folded row's message)
    ============================================ */
-.graph-hidden-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px 8px 8px;
-  margin-left: 6px;
+.graph-fold-badge {
+  flex-shrink: 0;
+  margin: 0 8px 0 6px;
+  padding: 0 6px;
+  border: 1px dashed var(--gold-accent);
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--gold-accent);
   cursor: pointer;
-  color: var(--parchment-dim);
-  border-top: 1px dashed var(--border-strong);
-  border-bottom: 1px dashed var(--border-strong);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-bright) 5%, transparent), transparent);
-  transition: background 0.12s, color 0.12s;
   user-select: none;
+  white-space: nowrap;
 }
-.graph-hidden-row:hover {
-  background: color-mix(in srgb, var(--accent-bright) 12%, transparent);
-  color: var(--bone-white);
-}
-.graph-hidden-dots {
-  font-size: 18px;
-  line-height: 1;
-  color: var(--crusader-red-bright);
-  letter-spacing: 2px;
-}
-.graph-hidden-label {
-  font-family: var(--font-display);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.graph-fold-badge:hover {
+  background: var(--gold-accent);
+  color: var(--ink-black);
+  border-style: solid;
 }
 
-/* Collapse toggle active state */
-#graph-collapse-toggle.active {
+/* Compress all: lit while the mode is on */
+#graph-compress-all.active {
   background: var(--crusader-red);
   color: var(--bone-white);
   border-color: var(--crusader-red-bright);
 }
+#graph-compress-all:disabled,
+#graph-expand-all:disabled { opacity: 0.45; cursor: default; }
 
 /* ============================================
    COMMIT SEARCH / FILTER (graph + history)

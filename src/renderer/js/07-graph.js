@@ -58,6 +58,11 @@ function layoutGraph(commits, opts) {
   // beyond the loaded window and the line is drawn on to the bottom edge.)
   const present = filtered ? new Set(commits.map(c => c.hash)) : null;
   const holdsLane = (hash) => !filtered || present.has(hash);
+  // parentsOverride: a folded commit's parents, its first parent skipping the folded run
+  // (computeGraphFolds); foldedAnchors: those commits, whose first-parent line is drawn dashed.
+  const parentsOverride = (opts && opts.parentsOverride) || null;
+  const foldedAnchors = (opts && opts.foldedAnchors) || null;
+  const parentsOf = (c) => (parentsOverride && parentsOverride.get(c.hash)) || c.parents || [];
   const positions = new Map();
   const edges = [];
 
@@ -105,7 +110,7 @@ function layoutGraph(commits, opts) {
 
   for (let row = 0; row < commits.length; row++) {
     const c = commits[row];
-    const parents = c.parents || [];
+    const parents = parentsOf(c);
 
     // 1. Which lane is this commit on? The lane that was routing toward it.
     let myLane = findLane(c.hash);
@@ -208,8 +213,9 @@ function layoutGraph(commits, opts) {
     const c = commits[row];
     const pos = positions.get(c.hash);
     if (!pos) continue;
-    const parents = c.parents || [];
+    const parents = parentsOf(c);
     if (!parents.length) continue;
+    const folded = !!(foldedAnchors && foldedAnchors.has(c.hash));
 
     const firstParent = parents[0];
     const fpPos = positions.get(firstParent);
@@ -236,9 +242,9 @@ function layoutGraph(commits, opts) {
     // into the parent's column (a no-op vertical when the lane doesn't change).
     const bendRow = fpPos.row - 1;
     if (bendRow > row) {
-      edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: bendRow, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry' });
+      edges.push({ fromLane: pos.lane, toLane: pos.lane, fromRow: row, toRow: bendRow, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry', folded });
     }
-    edges.push({ fromLane: pos.lane, toLane: fpPos.lane, fromRow: bendRow, toRow: fpPos.row, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry' });
+    edges.push({ fromLane: pos.lane, toLane: fpPos.lane, fromRow: bendRow, toRow: fpPos.row, colorLane: pos.lane, colorIdx: pos.colorIdx, owner: c.hash, type: 'carry', folded });
   }
 
   // ----- Pass 2c: draw merge-parent (side branch) connections -----
@@ -250,7 +256,7 @@ function layoutGraph(commits, opts) {
     const c = commits[row];
     const pos = positions.get(c.hash);
     if (!pos) continue;
-    const parents = c.parents || [];
+    const parents = parentsOf(c);
     if (parents.length < 2) continue;
 
     for (let p = 1; p < parents.length; p++) {
@@ -748,7 +754,10 @@ function scrollGraphToSelectedCommit() {
 function renderGraph() {
   const container = $('#graph-container');
   if (!container) return;
-  const { commits, head, positions, edges, laneCount, hiddenCount, collapsedSet } = state.graph;
+  const { commits, head, positions, edges, laneCount, collapsedSet } = state.graph;
+  const folds = state.graph.folds || new Map();
+  const parentsOverride = state.graph.parentsOverride || null;
+  const parentsOf = (c) => (parentsOverride && parentsOverride.get(c.hash)) || c.parents || [];
 
   if (!commits || !commits.length) {
     container.innerHTML = `
@@ -841,22 +850,19 @@ function renderGraph() {
       const d = x1 === x2 ? `M ${x1} ${y1} L ${x2} ${y2}` : graphCrossEdgePath(lineStyle, x1, y1, x2, y2);
       return graphStyledEdge(lineStyle, d, shades[idx], idx, `graph-edge styled${relCls}`, owner);
     }
+    // A line across a fold is dashed: commits are hidden between its two ends.
+    const dash = e.folded ? ' stroke-dasharray="2 4"' : '';
     if (x1 === x2) {
-      return `<line class="graph-edge${relCls}"${owner} x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`;
+      return `<line class="graph-edge${relCls}${e.folded ? ' folded' : ''}"${owner} x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"${dash}/>`;
     }
     const midY = y1 + (y2 - y1) / 2;
-    return `<path class="graph-edge${relCls}"${owner} d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"/>`;
+    return `<path class="graph-edge${relCls}${e.folded ? ' folded' : ''}"${owner} d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"${dash}/>`;
   };
 
-  // Is `c` collapsible? (ANY parent present and sitting below it — there's a chain to fold.)
-  const isCollapsibleCommit = (c, pos) => {
-    if (collapsedSet && collapsedSet.has(c.hash)) return true;
-    for (const ph of (c.parents || [])) {
-      const pp = positions.get(ph);
-      if (pp && pp.row > pos.row) return true;
-    }
-    return false;
-  };
+  // Is `c` collapsible? Only when it has a run below it to fold (computeGraphFolds) —
+  // a toggle that hides nothing is noise.
+  const isCollapsibleCommit = (c) => folds.has(c.hash);
+  const foldCountText = (n) => `${n.toLocaleString()} commit${n === 1 ? '' : 's'}`;
 
   // Build the SVG circle for one commit's dot.
   const buildDot = (c, pos) => {
@@ -866,7 +872,7 @@ function renderGraph() {
     const isMerge = (c.parents || []).length > 1;
     const isHead = c.hash === head;
     const isCollapsed = collapsedSet && collapsedSet.has(c.hash);
-    const collapsible = isCollapsibleCommit(c, pos);
+    const collapsible = isCollapsibleCommit(c);
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
     const cls = 'commit-dot'
       + (isMerge ? ' merge' : '')
@@ -881,8 +887,10 @@ function renderGraph() {
     const lineLabel = pos.branchLine
       ? `Branch line: ${pos.branchLine}`
       : 'Branch line: unknown (branch deleted or outside view)';
+    const foldN = collapsible ? folds.get(c.hash).count : 0;
     const foldHint = collapsible
-      ? (isCollapsed ? ' — right-click to expand this branch line' : ' — right-click to collapse this branch line')
+      ? (isCollapsed ? ` — ${foldCountText(foldN)} folded below; right-click to expand`
+        : ` — right-click to fold the ${foldCountText(foldN)} below`)
       : '';
     dot += `<title style="pointer-events:none">${escapeHtml(lineLabel + foldHint)}</title>`;
     return dot + `</circle>`;
@@ -931,7 +939,7 @@ function renderGraph() {
   const buildRow = (c, pos) => {
     const isHead = c.hash === head;
     const isCollapsed = collapsedSet && collapsedSet.has(c.hash);
-    const collapsible = isCollapsibleCommit(c, pos);
+    const collapsible = isCollapsibleCommit(c);
 
     const shortHash = (c.hash || '').slice(0, 7);
     const dateStr = c.date ? relativeTime(c.date) : '';
@@ -942,9 +950,16 @@ function renderGraph() {
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
     // The fold toggle is hidden by default and revealed on row hover/selection (CSS); the
     // spacer keeps the message indent stable for non-foldable rows.
+    const foldN = collapsible ? folds.get(c.hash).count : 0;
+    const foldTitle = isCollapsed ? `Expand: show the ${foldCountText(foldN)} folded below`
+      : `Fold the ${foldCountText(foldN)} below, up to the next branch point`;
     const foldToggle = collapsible
-      ? `<button class="graph-fold-btn${isCollapsed ? ' collapsed' : ''}" data-fold="${c.hash}" title="${isCollapsed ? 'Expand branch line' : 'Collapse branch line'}" tabindex="-1">${isCollapsed ? '▸' : '▾'}</button>`
+      ? `<button class="graph-fold-btn${isCollapsed ? ' collapsed' : ''}" data-fold="${c.hash}" title="${foldTitle}" tabindex="-1">${isCollapsed ? '▸' : '▾'}</button>`
       : `<span class="graph-fold-spacer"></span>`;
+    // A folded row says how much it hides, right after the message; clicking it expands.
+    const foldBadge = isCollapsed
+      ? `<span class="graph-fold-badge" data-fold="${c.hash}" title="Show the ${foldCountText(foldN)} folded below">⋯ ${foldN.toLocaleString()}</span>`
+      : '';
     const msgHtml = highlightSearchTerms(c.message || '', highlightRe);
     const authorHtml = highlightSearchTerms(c.author_name || '', highlightRe);
     // Message hover tooltip also names the branch line (#lanelabel) so the wide row is a hover
@@ -955,19 +970,12 @@ function renderGraph() {
     return `<div class="graph-row${selectedCls}${headCls}${relCls}" data-hash="${c.hash}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">` +
         foldToggle +
         `<span class="graph-row-msg" title="${escapeHtml((c.message || '') + lineNote)}">${msgHtml}</span>` +
+        foldBadge +
         `<span class="graph-row-author">${authorHtml}</span>` +
         `<span class="graph-row-date" title="${escapeHtml(dateTitle)}">${escapeHtml(dateStr)}</span>` +
         `<span class="graph-row-hash">${escapeHtml(shortHash)}</span>` +
       `</div>`;
   };
-
-  // When collapsed, append a clickable summary row showing how many commits are hidden.
-  const hiddenRowHtml = (hiddenCount && hiddenCount > 0)
-    ? `<div class="graph-hidden-row" id="graph-hidden-row" title="Click to expand and show all commits">` +
-        `<span class="graph-hidden-dots">⋯</span>` +
-        `<span class="graph-hidden-label">${hiddenCount.toLocaleString()} earlier commit${hiddenCount === 1 ? '' : 's'} hidden — click to expand</span>` +
-      `</div>`
-    : '';
 
   // Skeleton. Column layout (left → right):
   //   [branches] (gap) [lane graph SVG] [message rows]
@@ -996,8 +1004,7 @@ function renderGraph() {
         `</svg>` +
       `</div>` +
       `<div class="graph-rows" style="height:${totalHeight}px"></div>` +
-    `</div>` +
-    hiddenRowHtml;
+    `</div>`;
   container.classList.remove('graph-highlight-active');
 
   const edgesG = container.querySelector('.graph-edges');
@@ -1069,7 +1076,7 @@ function renderGraph() {
   // Child→parent adjacency, so we can highlight a commit's full lineage (#3).
   const childrenByHash = new Map();
   for (const c of commits) {
-    for (const p of (c.parents || [])) {
+    for (const p of parentsOf(c)) {
       let arr = childrenByHash.get(p);
       if (!arr) { arr = []; childrenByHash.set(p, arr); }
       arr.push(c.hash);
@@ -1084,7 +1091,7 @@ function renderGraph() {
     while (up.length) {
       const c = commitByHash.get(up.pop());
       if (!c) continue;
-      for (const p of (c.parents || [])) {
+      for (const p of parentsOf(c)) {
         if (commitByHash.has(p) && !related.has(p)) { related.add(p); up.push(p); }
       }
     }
@@ -1152,15 +1159,8 @@ function renderGraph() {
   };
 
   const onClick = (e) => {
-    // Click on the "hidden commits" summary row expands the global collapse.
-    if (e.target.closest('.graph-hidden-row')) {
-      state.graphCollapsed = false;
-      updateGraphCollapseButton();
-      relayoutGraph();
-      return;
-    }
-    // Click on the inline fold toggle button folds/unfolds the commit's branch line.
-    const foldBtn = e.target.closest('.graph-fold-btn');
+    // The inline fold toggle, or a folded row's "⋯ N" badge, folds/unfolds its run.
+    const foldBtn = e.target.closest('.graph-fold-btn, .graph-fold-badge');
     if (foldBtn && foldBtn.dataset.fold) {
       e.preventDefault();
       e.stopPropagation();
@@ -1203,8 +1203,7 @@ function renderGraph() {
     const row = e.target.closest('.graph-row');
     const hash = (dot && dot.dataset.hash) || (row && row.dataset.hash);
     if (!hash) return;
-    const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(hash);
-    if (isCollapsed || commitIsFoldable(hash)) {
+    if (commitIsFoldable(hash)) {
       e.preventDefault();
       toggleCommitFold(hash);
     }
@@ -1224,8 +1223,7 @@ function renderGraph() {
     const dot = e.target.closest('circle.commit-dot');
     if (dot && dot.dataset.hash) {
       const h = dot.dataset.hash;
-      const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(h);
-      if (isCollapsed || commitIsFoldable(h)) {
+      if (commitIsFoldable(h)) {
         e.preventDefault();
         e.stopPropagation();
         toggleCommitFold(h);
@@ -1574,8 +1572,10 @@ async function renderGraphDetail(commit) {
 // ============================================
 function showCommitContextMenu(hash, x, y) {
   const shortHash = hash.slice(0, 7);
-  const isCollapsed = state.collapsedCommits && state.collapsedCommits.has(hash);
-  const foldable = isCollapsed || commitIsFoldable(hash);
+  const fold = state.graph && state.graph.folds && state.graph.folds.get(hash);
+  const isCollapsed = !!(fold && fold.collapsed);
+  const foldable = !!fold;
+  const foldN = fold ? `${fold.count.toLocaleString()} commit${fold.count === 1 ? '' : 's'}` : '';
   const items = [
     { label: 'Copy hash', icon: '⎘', action: () => copyText(hash, 'Hash copied') },
     { label: 'Copy short hash', icon: '⎘', action: () => copyText(shortHash, 'Short hash copied') },
@@ -1598,7 +1598,7 @@ function showCommitContextMenu(hash, x, y) {
   if (foldable) {
     items.push('sep');
     items.push({
-      label: isCollapsed ? 'Expand branch line below' : 'Collapse branch line below',
+      label: isCollapsed ? `Expand the ${foldN} folded below` : `Fold the ${foldN} below`,
       icon: isCollapsed ? '⊞' : '⊟',
       action: () => toggleCommitFold(hash)
     });
@@ -1606,30 +1606,39 @@ function showCommitContextMenu(hash, x, y) {
   showContextMenu(items, x, y);
 }
 
-// Is the commit currently foldable? Foldable when ANY of its parents is present in the
-// view and sits below it (there's a chain we can fold away). We check all parents — not
-// just the first — so merge commits whose first parent happens to be drawn above still
-// fold via their other (below) parent. Lanes are not required to match.
+// Does the commit have a run below it to fold (or one folded already)? See computeGraphFolds.
 function commitIsFoldable(hash) {
   const g = state.graph;
-  if (!g || !g.positions) return false;
-  const pos = g.positions.get(hash);
-  if (!pos) return false;
-  const c = (g.commits || []).find(x => x.hash === hash);
-  if (!c) return false;
-  const parents = c.parents || [];
-  for (const ph of parents) {
-    const pp = g.positions.get(ph);
-    if (pp && pp.row > pos.row) return true;
-  }
-  return false;
+  return !!(g && g.folds && g.folds.has(hash));
 }
 
-// Toggle the per-commit fold for a given hash and re-render the graph.
+// Fold or unfold one commit's run. While compressed, opening a fold records an exception
+// (expandedFolds) instead, so "Compress all" stays in force for the rest of the graph.
 function toggleCommitFold(hash) {
   if (!state.collapsedCommits) state.collapsedCommits = new Set();
-  if (state.collapsedCommits.has(hash)) state.collapsedCommits.delete(hash);
-  else state.collapsedCommits.add(hash);
+  if (!state.expandedFolds) state.expandedFolds = new Set();
+  const fold = state.graph && state.graph.folds && state.graph.folds.get(hash);
+  if (fold && fold.collapsed) {
+    state.collapsedCommits.delete(hash);
+    if (state.graphCompressed) state.expandedFolds.add(hash);
+  } else {
+    state.collapsedCommits.add(hash);
+    state.expandedFolds.delete(hash);
+  }
+  relayoutGraph();
+}
+
+// Toolbar: fold every run in the graph, or open every fold.
+function compressGraph() {
+  state.graphCompressed = true;
+  state.collapsedCommits = new Set();
+  state.expandedFolds = new Set();
+  relayoutGraph();
+}
+function expandGraph() {
+  state.graphCompressed = false;
+  state.collapsedCommits = new Set();
+  state.expandedFolds = new Set();
   relayoutGraph();
 }
 
@@ -3066,13 +3075,11 @@ function wireGraphTab() {
     refreshGraph();
   };
 
-  const collapseBtn = $('#graph-collapse-toggle');
-  if (collapseBtn) collapseBtn.onclick = () => {
-    state.graphCollapsed = !state.graphCollapsed;
-    updateGraphCollapseButton();
-    relayoutGraph();
-  };
-  updateGraphCollapseButton();
+  const compressBtn = $('#graph-compress-all');
+  if (compressBtn) compressBtn.onclick = () => compressGraph();
+  const expandBtn = $('#graph-expand-all');
+  if (expandBtn) expandBtn.onclick = () => expandGraph();
+  updateGraphFoldButtons();
 
   // Graph display-options gear: branch-display toggles (hide local pills / strip remote prefix).
   const gearBtn = $('#graph-settings-btn');
@@ -3202,19 +3209,27 @@ function wireGraphTab() {
   }
 }
 
-// Reflect the collapse state on the toolbar button.
-function updateGraphCollapseButton() {
-  const btn = document.getElementById('graph-collapse-toggle');
-  if (!btn) return;
-  if (state.graphCollapsed) {
-    btn.innerHTML = '⊞ Expand';
-    btn.title = 'Show all commits';
-    btn.classList.add('active');
-  } else {
-    btn.innerHTML = '⊟ Collapse';
-    btn.title = `Collapse the middle of long history, showing only the newest ${GRAPH_COLLAPSE_VISIBLE} commits`;
-    btn.classList.remove('active');
-  }
+// Reflect the fold state on the toolbar's Compress all / Expand all buttons. Each is
+// disabled when it would change nothing; a filter turns folding off, so both are then.
+function updateGraphFoldButtons() {
+  const compressBtn = document.getElementById('graph-compress-all');
+  const expandBtn = document.getElementById('graph-expand-all');
+  if (!compressBtn || !expandBtn) return;
+  const g = state.graph || {};
+  const folds = g.folds || new Map();
+  const filtered = !!g.filtered;
+  let open = 0, closed = 0;
+  for (const f of folds.values()) { if (f.collapsed) closed++; else open++; }
+  const hidden = g.perCommitHidden || 0;
+  compressBtn.disabled = filtered || open === 0;
+  compressBtn.classList.toggle('active', !!state.graphCompressed && !filtered);
+  compressBtn.title = filtered ? 'Folding is off while the graph is filtered'
+    : open ? 'Fold every branch line down to its newest commit (tips, merges and branch points stay visible)'
+    : 'Everything that can be folded is folded';
+  expandBtn.disabled = filtered || closed === 0;
+  expandBtn.title = filtered ? 'Folding is off while the graph is filtered'
+    : closed ? `Show all ${hidden.toLocaleString()} folded commit${hidden === 1 ? '' : 's'}`
+    : 'Nothing is folded';
 }
 
 // Reflect whether more history can be loaded on the "Load more" button (#9). When the last

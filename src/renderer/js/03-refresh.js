@@ -232,9 +232,6 @@ async function refreshLog() {
   renderHistory();
 }
 
-// Number of newest commits to keep visible when the graph is collapsed.
-const GRAPH_COLLAPSE_VISIBLE = 5;
-
 async function refreshGraph() {
   const requestedLimit = state.graphLimit || 300;
   state.graphLoading = true;
@@ -267,17 +264,15 @@ async function refreshGraph() {
   relayoutGraph();
 }
 
-// Build the layout from the current commit list, applying the collapse settings.
-// Two independent collapses can apply:
-//   1. Global collapse (state.graphCollapsed): only the newest GRAPH_COLLAPSE_VISIBLE
-//      commits are shown, the rest summarized by one clickable "hidden" row.
-//   2. Per-commit collapse (state.collapsedCommits): clicking a commit's circle folds
-//      its same-lane descendant chain (the commits below it on that branch line).
+// Build the layout from the current commit list, applying the folds (computeGraphFolds):
+// a commit's linear run below it — the commits that only continue its own branch line — can
+// be folded behind it, by hand (state.collapsedCommits) or everywhere at once
+// (state.graphCompressed, minus the folds opened by hand in state.expandedFolds).
 function relayoutGraph() {
   const all = state.graphAllCommits || [];
   const head = state.graphHead || '';
   let commits = all;
-  let hiddenCount = 0;
+  const hiddenCount = 0;
 
   // 0. Text filter (search bar): keep only commits matching the query. This narrows
   //    the graph to matches; structural lines to filtered-out parents simply fade off.
@@ -299,35 +294,39 @@ function relayoutGraph() {
     }
   }
 
-  // 1. Global collapse (only when not filtering — filtering already narrows the view)
-  if (!query && state.graphCollapsed && commits.length > GRAPH_COLLAPSE_VISIBLE) {
-    hiddenCount = commits.length - GRAPH_COLLAPSE_VISIBLE;
-    commits = commits.slice(0, GRAPH_COLLAPSE_VISIBLE);
-  }
-
-  // 2. Per-commit collapse: lay out once to learn lanes, then hide same-lane
-  //    descendant chains of any collapsed commit, and re-lay-out.
-  let perCommitHidden = 0;
-  const collapsedSet = state.collapsedCommits;
-  if (!query && collapsedSet && collapsedSet.size) {
-    const probe = layoutGraph(commits);
-    const hide = computeFoldedHashes(commits, probe.positions, collapsedSet);
-    if (hide.size) {
-      commits = commits.filter(c => !hide.has(c.hash));
-      perCommitHidden = hide.size;
+  // Folds. Not while filtering: a filtered list is already a subset, and a run of matches
+  // is not a run of history.
+  let folds = new Map();
+  let parentsOverride = null;
+  let foldedTotal = 0;
+  if (!query) {
+    const f = computeGraphFolds(commits, {
+      head,
+      collapsed: state.collapsedCommits,
+      compressed: !!state.graphCompressed,
+      expanded: state.expandedFolds
+    });
+    folds = f.folds;
+    if (f.hidden.size) {
+      commits = commits.filter(c => !f.hidden.has(c.hash));
+      parentsOverride = f.parents;
+      foldedTotal = f.hidden.size;
     }
   }
+  const collapsedSet = new Set([...folds].filter(([, v]) => v.collapsed).map(([h]) => h));
 
-  const layout = layoutGraph(commits, { filtered: !!query });
+  const layout = layoutGraph(commits, { filtered: !!query, parentsOverride, foldedAnchors: collapsedSet });
   state.graph = {
     commits, head, hiddenCount,
-    perCommitHidden,
+    perCommitHidden: foldedTotal,
     filtered: !!query,
-    // expose which collapsed commits are currently active so the renderer can mark them
-    collapsedSet: collapsedSet || new Set(),
+    folds,               // Map<hash, { count, collapsed }>: every commit with a run to fold
+    parentsOverride,     // Map<hash, parents>: a folded commit's first parent skips its run
+    collapsedSet,        // the anchors currently folded
     ...layout
   };
   renderGraph();
+  if (typeof updateGraphFoldButtons === 'function') updateGraphFoldButtons();
 
   // Reflect "no matches" on the graph search box — but not while a diff-content search is
   // still streaming (`searching`), where 0 matches so far just means "not found yet".
@@ -336,43 +335,72 @@ function relayoutGraph() {
     !!query && commits.length === 0 && !searchBox.classList.contains('searching'));
 }
 
-// Given the laid-out commits and a set of collapsed commit hashes, return the set of
-// hashes that should be HIDDEN. For each collapsed commit we walk its FIRST-PARENT
-// chain (the mainline of that branch) and hide each ancestor as long as it stays on
-// the same lane. We stop at: a lane change, a merge commit, a commit bearing a ref
-// (branch tip / tag), or another collapse anchor — so important markers stay visible.
-// Walking the first-parent chain (rather than adjacent rows) makes this work for
-// merge commits, whose immediately-following row belongs to the merged-in branch.
-function computeFoldedHashes(commits, positions, collapsedSet) {
-  const hidden = new Set();
+// Which commits a fold hides. A commit's *run* is the chain of first parents below it that
+// only continue its line: each has no ref (branch tip, tag), is not HEAD, is not a merge, is
+// not a root, and has exactly one child in view — the commit above it. The run therefore
+// ends at the fork point where this branch left another one (that commit has two children),
+// so folding a feature branch never swallows the history of the branch it came from.
+// What stays visible is exactly the structure: tips, merges, forks, roots.
+//
+// A folded commit's first parent is rewritten (`parents`) to the commit under its run, so
+// the layout draws one line straight across the fold instead of a line that runs off the
+// bottom as if history ended there. A run that reaches past the loaded window keeps the
+// hidden parent, which the layout already draws as "continues below".
+//
+// opts: head, collapsed (Set, folded by hand), compressed (fold every run), expanded (Set,
+// opened by hand while compressed). In compressed mode the members of an opened run are
+// not folded again on their own — otherwise opening a fold would just fold one row lower.
+function computeGraphFolds(commits, opts) {
+  const { head = '', collapsed = null, compressed = false, expanded = null } = opts || {};
   const byHash = new Map();
-  for (const c of commits) byHash.set(c.hash, c);
-
-  for (const anchor of commits) {
-    if (!collapsedSet.has(anchor.hash)) continue;
-    const startPos = positions.get(anchor.hash);
-    if (!startPos) continue;
-
-    // Walk the first-parent chain downward, hiding each ancestor. We rely on row order
-    // (parent below child) rather than lanes, which is robust for merge commits that
-    // sit on a different lane than their mainline. Stop at structural boundaries so the
-    // fold leaves meaningful anchors visible.
-    let cur = anchor;
-    let guard = 0;
-    while (guard++ < commits.length + 1) {
-      const fpHash = (cur.parents && cur.parents[0]) ? cur.parents[0] : null;
-      if (!fpHash) break;
-      const fp = byHash.get(fpHash);
-      const fpPos = positions.get(fpHash);
-      if (!fp || !fpPos) break;                 // parent not in view — stop (line fades)
-      if (fpPos.row <= positions.get(cur.hash).row) break; // not below — stop
-      if ((fp.parents || []).length > 1) break; // reached a merge — keep it visible, stop
-      if (collapsedSet.has(fpHash)) break;       // another fold anchor — stop
-      hidden.add(fpHash);
-      cur = fp;
-    }
+  const childCount = new Map();
+  for (const c of commits) {
+    byHash.set(c.hash, c);
+    for (const p of (c.parents || [])) childCount.set(p, (childCount.get(p) || 0) + 1);
   }
-  return hidden;
+  const plain = (c) => c.hash !== head
+    && !(c.refs && c.refs.length)
+    && (c.parents || []).length === 1
+    && childCount.get(c.hash) === 1;
+  // The next commit of c's run, or null.
+  const runNext = (c) => {
+    const fp = (c.parents || [])[0];
+    const p = fp ? byHash.get(fp) : null;
+    return p && plain(p) ? p : null;
+  };
+
+  // Run lengths, memoised: run(c) = 1 + run(next) — so long linear history costs O(n).
+  const runLen = new Map();
+  const lenOf = (start) => {
+    const stack = [];
+    let c = start;
+    while (c && !runLen.has(c.hash)) { stack.push(c); c = runNext(c); }
+    // Walked off the end: the last commit has no next, run 0. Hit a memo: one more than it.
+    let n = c ? runLen.get(c.hash) : -1;
+    for (let i = stack.length - 1; i >= 0; i--) runLen.set(stack[i].hash, ++n);
+    return runLen.get(start.hash);
+  };
+
+  const hidden = new Set();
+  const covered = new Set();   // inside a run opened by hand while compressed
+  const folds = new Map();
+  const parents = new Map();
+  for (const c of commits) {    // newest first, so an anchor is seen before its run
+    if (hidden.has(c.hash)) continue;
+    const count = lenOf(c);
+    if (!count) continue;
+    const byHand = !!(collapsed && collapsed.has(c.hash));
+    const isCollapsed = byHand
+      || (compressed && !covered.has(c.hash) && !(expanded && expanded.has(c.hash)));
+    folds.set(c.hash, { count, collapsed: isCollapsed });
+    let cur = c;
+    for (let i = 0; i < count; i++) {
+      cur = byHash.get(cur.parents[0]);
+      (isCollapsed ? hidden : covered).add(cur.hash);
+    }
+    if (isCollapsed) parents.set(c.hash, [cur.parents[0], ...c.parents.slice(1)]);
+  }
+  return { hidden, folds, parents };
 }
 
 async function refreshStashes() {

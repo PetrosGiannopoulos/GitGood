@@ -169,7 +169,8 @@ async function closeCurrentRepo() {
   state.remoteTagsRemote = null;
   clearCommitCache();
   state.collapsedCommits = null;
-  state.graphCollapsed = false;
+  state.graphCompressed = false;
+  state.expandedFolds = null;
   state.graphFilter = '';
   state.historyFilter = '';
   state.detachedFrom = null;

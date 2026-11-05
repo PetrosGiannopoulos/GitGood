@@ -52,12 +52,13 @@ const state = {
   graphLimit: 300,
   selectedGraphHash: null,
   graphLoading: false,
-  graphCollapsed: false,   // when true, hide the middle of long history (show newest few)
+  graphCompressed: false,  // "Compress all": every linear run of a branch line folds behind its newest commit
+  expandedFolds: null,     // Set<hash>: folds opened by hand while compressed
   graphHideLocal: false,   // when true, don't draw local-branch ref pills in the graph
   graphStripRemotePrefix: false, // when true, show remote branches without their "<remote>/" prefix
   graphHideLocalCommits: false,  // when true, hide commits not reachable from any remote (unpushed)
   graphLineStyle: 'default', // 'default' | 'dragon' | 'gears' | 'constellations'
-  collapsedCommits: null,  // Set<hash>: commits whose same-lane descendant chain is folded
+  collapsedCommits: null,  // Set<hash>: commits whose linear run below is folded by hand
   graphFilter: '',         // text filter for the graph tab
   graphFilterMode: 'message', // 'message' | 'files' | 'all'
   historyFilter: '',       // text filter for the history tab

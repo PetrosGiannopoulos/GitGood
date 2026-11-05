@@ -93,7 +93,8 @@ async function openRepoByPath(p) {
   if (typeof noteRepoOpened === 'function') noteRepoOpened(result.data);
   clearCommitCache();
   state.collapsedCommits = null;
-  state.graphCollapsed = false;
+  state.graphCompressed = false;
+  state.expandedFolds = null;
   state.graphFilter = "";
   state.historyFilter = "";
   state.detachedFrom = null;
