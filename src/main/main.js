@@ -2612,28 +2612,38 @@ ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
     diff = '(failed to load diff: ' + (e.message || e) + ')';
   }
 
-  return { show, diff, files, diffTruncated, diffBytes };
+  // The renderer builds its file list from the diff text, so a cut diff would lose every
+  // file below the cut. Name the whole set (same diff machinery and rename detection as the
+  // `git show` above, so paths and order agree) and let the renderer load the rest on demand.
+  // -z because a quoted path would not match the one the renderer decodes from the diff.
+  let fileList = null;
+  if (diffTruncated) {
+    try {
+      fileList = ud.parseNameStatusZ(await g.raw(['show', '--name-status', '-z', '--format=', hash]));
+    } catch (e) { /* the browser falls back to the files the cut diff names */ }
+  }
+
+  return { show, diff, files, diffTruncated, diffBytes, fileList };
 }));
 
 // Get the diff for a single file from a commit. Used for lazy-loading per-file
 // diffs when the full commit diff is too large to render at once.
-ipcMain.handle('repo:showCommitFileDiff', wrap(async (_, { hash, path: filePath, maxBytes, ignoreWhitespace }) => {
+// - A rename needs `oldPath` too: limited to the new path alone, git sees no source to pair
+//   it with and reports the file as added (verified).
+// - Pathspecs are `:(literal)`: Unity paths contain `[ ]`, and as a glob `a[1].txt` also
+//   matches `a1.txt`, so the "one file" diff would carry a second one (verified).
+ipcMain.handle('repo:showCommitFileDiff', wrap(async (_, { hash, path: filePath, oldPath, maxBytes, ignoreWhitespace }) => {
   const g = ensureGit();
   if (!hash || !filePath) throw new Error('hash and path required');
   const cap = maxBytes || 1024 * 1024;
-  let diff = '';
-  let truncated = false;
-  try {
-    diff = await g.show([...wsArgs({ ignoreWhitespace }), hash, '--', filePath]);
-    if (Buffer.byteLength(diff, 'utf8') > cap) {
-      const cut = diff.lastIndexOf('\n', cap);
-      diff = diff.slice(0, cut > 0 ? cut : cap);
-      truncated = true;
-    }
-  } catch (e) {
-    diff = '(failed to load: ' + (e.message || e) + ')';
+  const paths = (oldPath && oldPath !== filePath) ? [oldPath, filePath] : [filePath];
+  const diff = await g.show([...wsArgs({ ignoreWhitespace }), hash, '--', ...paths.map(p => ':(literal)' + p)]);
+  const bytes = Buffer.byteLength(diff, 'utf8');
+  if (bytes > cap) {
+    const cut = diff.lastIndexOf('\n', cap);
+    return { diff: diff.slice(0, cut > 0 ? cut : cap), truncated: true, bytes };
   }
-  return { diff, truncated };
+  return { diff, truncated: false, bytes };
 }));
 
 ipcMain.handle('repo:rawCommand', wrap(async (_, args) => {

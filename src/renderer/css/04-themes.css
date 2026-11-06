@@ -1338,6 +1338,16 @@ p.cpick-why { margin: -2px 0 6px 24px; }
   text-align: left;
 }
 .cfile-item.active .cfile-path { color: var(--bone-white); }
+/* A commit too large to load at once: the files below the cut are fetched when opened. */
+.cfile-note {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.cfile-item.cfile-lazy .cfile-path { font-style: italic; }
 .cfile-diff {
   flex: 1;
   min-height: 120px;

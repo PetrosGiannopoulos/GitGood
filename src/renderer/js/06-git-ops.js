@@ -1600,15 +1600,17 @@ function buildPopoutModel() {
       kind: 'commit',
       hash: opts.hash,
       label: opts.hash ? `Commit ${String(opts.hash).slice(0,7)}` : 'Commit changes',
-      files: owner._cfiles.map(f => ({ path: f.path, status: f.status, _diff: f.diff })),
+      // `_cf` is the browser's own file object: in a commit too large to load at once, a
+      // file may not have its diff yet, and fetching it fills the browser's copy as well.
+      files: owner._cfiles.map(f => ({ path: f.path, status: f.status, _cf: f })),
       render: async (file, into) => {
         try {
+          if (file._cf.lazy) into.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+          await ensureCommitFileDiff(file._cf, opts.hash);
           const full = opts.hash
             ? await popoutFullFile(opts.hash, opts.hash + '^', file.path)
             : { lines: null, oldLines: null, notice: '' };
-          into.innerHTML = full.notice + renderDiff(file._diff, Object.assign({}, opts, {
-            filePath: file.path,
-            imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
+          into.innerHTML = full.notice + renderDiff(file._cf.diff, Object.assign(commitFileRenderOpts(opts, file._cf), {
             fullFileLines: full.lines,
             fullFileOldLines: full.oldLines,
             fullFile: _popoutFullFile

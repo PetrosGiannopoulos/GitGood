@@ -1239,6 +1239,35 @@ async function runPartialApply(keys, action, what) {
 // clicking a file renders only that file's diff (so we don't paint everything at once).
 // ============================================
 
+// git C-quotes a path holding non-ASCII or control characters (core.quotePath):
+// `"b/caf\303\251.txt"`. The octal escapes are UTF-8 bytes. An unquoted path is returned
+// as is.
+function unquoteGitPath(s) {
+  if (!s || s.length < 2 || s[0] !== '"' || s[s.length - 1] !== '"') return s;
+  const SIMPLE = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+  const bytes = [];
+  for (let i = 1; i < s.length - 1; i++) {
+    const c = s[i];
+    if (c !== '\\') {
+      // Anything unescaped is ASCII or already-decoded text; re-encode it as UTF-8.
+      for (const b of new TextEncoder().encode(c)) bytes.push(b);
+      continue;
+    }
+    const n = s[++i];
+    if (/[0-7]/.test(n)) {
+      bytes.push(parseInt(s.substr(i, 3), 8) & 0xff);
+      i += 2;
+    } else if (n in SIMPLE) bytes.push(SIMPLE[n]);
+    else bytes.push(n.charCodeAt(0));
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+// A path from a diff header line, with git's quoting undone and the a/ or b/ prefix dropped.
+function diffHeaderPath(p) {
+  return unquoteGitPath(p).replace(/^[ab]\//, '');
+}
+
 // Split a unified diff into [{path, status, diff}] chunks, one per file.
 function splitDiffByFile(diffText) {
   if (!diffText) return [];
@@ -1251,9 +1280,10 @@ function splitDiffByFile(diffText) {
       if (cur) files.push(cur);
       // Best-effort path from the "diff --git a/X b/Y" header. This can be ambiguous
       // when paths contain " b/", so we refine it below from the +++ / --- lines, which
-      // carry a single unambiguous path.
+      // carry a single unambiguous path. A quoted path is quoted on both sides.
+      const q = raw.match(/ ("b\/(?:[^"\\]|\\.)*")$/);
       const m = raw.match(/ b\/(.+)$/);
-      const path = m ? m[1] : raw.replace('diff --git ', '');
+      const path = q ? diffHeaderPath(q[1]) : m ? m[1] : raw.replace('diff --git ', '');
       cur = { path, status: 'modified', lines: [], pathLocked: false };
       continue;
     }
@@ -1269,12 +1299,13 @@ function splitDiffByFile(diffText) {
     else if (raw.startsWith('Binary files')) cur.binary = true;
     // Refine the path unambiguously: prefer "+++ b/path"; fall back to "--- a/path"
     // for deletions (where +++ is /dev/null).
+    // (git appends a tab after a path containing a space, hence the trim.)
     else if (!cur.pathLocked && raw.startsWith('+++ ')) {
-      const p = raw.slice(4).replace(/^b\//, '').trim();
-      if (p && p !== '/dev/null') { cur.path = p; cur.pathLocked = true; }
+      const p = raw.slice(4).trim();
+      if (p && p !== '/dev/null') { cur.path = diffHeaderPath(p); cur.pathLocked = true; }
     } else if (!cur.pathLocked && raw.startsWith('--- ')) {
-      const p = raw.slice(4).replace(/^a\//, '').trim();
-      if (p && p !== '/dev/null') cur.path = p; // may be overridden by +++ next line
+      const p = raw.slice(4).trim();
+      if (p && p !== '/dev/null') cur.path = diffHeaderPath(p); // may be overridden by +++ next line
     }
     cur.lines.push(raw);
   }
@@ -1282,6 +1313,105 @@ function splitDiffByFile(diffText) {
   return files
     .filter(f => !f.synthetic)
     .map(f => ({ path: f.path, status: f.status, binary: !!f.binary, diff: f.lines.join('\n') }));
+}
+
+// name-status letters → the status classes the file list styles.
+const NAME_STATUS_CLASS = { A: 'added', D: 'deleted', R: 'renamed', C: 'renamed' };
+
+// The commit browser's file list. A commit's diff is cut at a byte budget in main, so the
+// chunks split from it stop at the cut: every file below it is missing, and the last one
+// is incomplete. `fileList` (main's name-status of the whole commit, sent only when the
+// diff was cut) restores the rest. Files that must be fetched on their own are `lazy`:
+// the cut one and everything after it. Without a cut the chunks are the whole story.
+// Matching is by path, not position — with -w git leaves whitespace-only files out of the
+// diff entirely, so the two lists do not line up.
+function commitBrowserFiles(chunks, fileList, diffTruncated) {
+  if (!diffTruncated) return chunks;
+  const out = chunks.map(c => Object.assign({}, c));
+  if (out.length) out[out.length - 1].lazy = true;
+  if (!Array.isArray(fileList) || !fileList.length) return out;
+  const byPath = new Map(fileList.map(r => [r.path, r]));
+  const have = new Set();
+  for (const c of out) {
+    have.add(c.path);
+    const r = byPath.get(c.path);
+    if (!r) continue;
+    if (r.oldPath) c.oldPath = r.oldPath; // a lazy rename is fetched by both paths
+    // The cut can fall before a chunk's "rename from"/"new file mode" line; the list's
+    // letter does not depend on where the text stopped.
+    if (NAME_STATUS_CLASS[r.status]) c.status = NAME_STATUS_CLASS[r.status];
+  }
+  for (const r of fileList) {
+    if (!r || !r.path || have.has(r.path)) continue;
+    have.add(r.path);
+    out.push({ path: r.path, oldPath: r.oldPath || undefined,
+               status: NAME_STATUS_CLASS[r.status] || 'modified', binary: false, diff: '', lazy: true });
+  }
+  return out;
+}
+
+// Per-file diffs fetched for a cut commit, so re-rendering the same commit (the auto-refresh
+// on window focus, the unified/split toggle, the pop-out) does not fetch them again. A diff
+// here can be megabytes, hence the small cap. Keyed by hash + whitespace mode + path.
+const _lazyCommitDiffCache = new Map();
+const _LAZY_COMMIT_DIFF_MAX = 12;
+// The byte budget for one file fetched on its own: the same as a whole commit's.
+const COMMIT_FILE_DIFF_MAX_BYTES = 2 * 1024 * 1024;
+
+// Make sure a commit-browser file has its diff, fetching it if it is `lazy`. Mutates `f`
+// (diff, binary, diffTruncated, diffBytes), so every view holding the same object sees it.
+// Throws with git's message if the fetch fails.
+async function ensureCommitFileDiff(f, hash) {
+  if (!f || !f.lazy) return f;
+  if (f._loading) return f._loading;
+  const ws = !!(typeof state !== 'undefined' && state.diffIgnoreWhitespace);
+  const key = `${hash}\u0000${ws ? 1 : 0}\u0000${f.oldPath || ''}\u0000${f.path}`;
+  const apply = (d) => {
+    // The fetched text still has its "diff --git" line; split it the same way as the
+    // commit's own chunks so both kinds look alike to renderDiff.
+    const c = splitDiffByFile(d.diff)[0];
+    f.diff = c ? c.diff : '';
+    if (c) { f.binary = c.binary; if (c.status !== 'modified') f.status = c.status; }
+    f.diffTruncated = !!d.truncated;
+    f.diffBytes = d.bytes || 0;
+    f.lazy = false;
+    return f;
+  };
+  const cached = _lazyCommitDiffCache.get(key);
+  if (cached) {
+    _lazyCommitDiffCache.delete(key);
+    _lazyCommitDiffCache.set(key, cached);
+    return apply(cached);
+  }
+  f._loading = (async () => {
+    try {
+      const r = await gs.showCommitFileDiff({ hash, path: f.path, oldPath: f.oldPath,
+        ignoreWhitespace: ws, maxBytes: COMMIT_FILE_DIFF_MAX_BYTES });
+      if (!r.ok) throw new Error(r.error || 'Could not load this file\'s diff');
+      _lazyCommitDiffCache.set(key, r.data);
+      while (_lazyCommitDiffCache.size > _LAZY_COMMIT_DIFF_MAX) {
+        _lazyCommitDiffCache.delete(_lazyCommitDiffCache.keys().next().value);
+      }
+      return apply(r.data);
+    } finally {
+      f._loading = null;
+    }
+  })();
+  return f._loading;
+}
+
+// renderDiff options for one commit-browser file. The truncation notice is per file: in a
+// cut commit, a file that arrived whole must not say "the diff was truncated".
+function commitFileRenderOpts(opts, f) {
+  return Object.assign({}, opts, {
+    // A commit's image is compared against its first parent.
+    imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
+    // The chunk has lost its "diff --git" line, and a binary has no +++/--- lines to
+    // recover the name from — so the list's own path is the only one there is.
+    filePath: f.path,
+    diffTruncated: !!f.diffTruncated,
+    diffBytes: f.diffBytes || 0
+  });
 }
 
 const FILE_STATUS_LETTER = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' };
@@ -1300,14 +1430,22 @@ const _CFILE_STATE_MAX = 60;
 function renderCommitFileBrowser(panelEl, diffText, opts) {
   opts = opts || {};
   if (!panelEl) return;
-  const files = splitDiffByFile(diffText);
+  // `opts.fileList` names every file of a commit whose diff was cut (see commitBrowserFiles).
+  const files = commitBrowserFiles(splitDiffByFile(diffText), opts.fileList, opts.diffTruncated);
   if (!files.length) {
     panelEl.innerHTML = '<div class="empty-state"><p>No differences.</p></div>';
     return;
   }
 
+  // Say why some files take a moment to open, rather than letting the wait read as a hang.
+  const lazyCount = files.filter(f => f.lazy).length;
+  const lazyNote = lazyCount
+    ? `<div class="cfile-note">This commit's diff is ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB — ` +
+      `too large to load at once. ${lazyCount === 1 ? 'One file loads' : `${lazyCount.toLocaleString()} files load`} when opened.</div>`
+    : '';
+
   const listHtml = files.map((f, idx) =>
-    `<div class="cfile-item${idx === 0 ? ' active' : ''}" data-cfile="${idx}" title="${escapeHtml(f.path)}">` +
+    `<div class="cfile-item${idx === 0 ? ' active' : ''}${f.lazy ? ' cfile-lazy' : ''}" data-cfile="${idx}" title="${escapeHtml(f.path)}${f.lazy ? ' — loads when opened' : ''}">` +
       `<input type="checkbox" class="cfile-check" data-cfile-check="${idx}" title="Select file">` +
       `<span class="cfile-status ${f.status}">${FILE_STATUS_LETTER[f.status] || 'M'}</span>` +
       `<span class="cfile-path">${escapeHtml(f.path)}</span>` +
@@ -1327,6 +1465,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
       `<div class="cfile-searchbar">` +
         `<input type="search" class="cfile-search" placeholder="Filter by path or content…" title="Filter files in this commit by path or diff content" />` +
       `</div>` +
+      lazyNote +
       `<div class="cfile-list">${listHtml}</div>` +
       `<div class="cfile-diff diff-content" id="cfile-diff"></div>` +
     `</div>`;
@@ -1358,24 +1497,36 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
     store.scroll = diffEl ? diffEl.scrollTop : 0;
   };
 
-  const renderOne = (idx) => {
-    const f = files[idx];
-    if (!f || !diffEl) return;
-    panelEl._cfileActive = idx;
+  const paint = (f) => {
     try {
-      diffEl.innerHTML = renderDiff(f.diff, Object.assign({}, opts, {
-        // A commit's image is compared against its first parent.
-        imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
-        // The chunk has lost its "diff --git" line, and a binary has no +++/--- lines to
-        // recover the name from — so the list's own path is the only one there is.
-        filePath: f.path
-      }));
+      diffEl.innerHTML = renderDiff(f.diff, commitFileRenderOpts(opts, f));
       hydrateImageDiffs(diffEl);
     } catch (err) {
       diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to render diff: ${escapeHtml(err.message || String(err))}</p></div>`;
     }
     diffEl.scrollTop = 0; // new file → start at top
     persist();
+  };
+
+  // Synchronous for a file already in hand; returns a promise when the file has to be
+  // fetched first (a cut commit), so the caller can restore scroll once it is drawn.
+  const renderOne = (idx) => {
+    const f = files[idx];
+    if (!f || !diffEl) return;
+    panelEl._cfileActive = idx;
+    if (!f.lazy) { paint(f); return; }
+    diffEl.innerHTML = '<div class="empty-state"><span class="loading"></span></div>';
+    persist();
+    return ensureCommitFileDiff(f, opts.hash).then(() => {
+      // Another file was picked, or the pane was re-rendered, while this one loaded.
+      if (panelEl._cfileActive !== idx || !diffEl.isConnected) return;
+      const item = panelEl.querySelector(`.cfile-item[data-cfile="${idx}"]`);
+      if (item) { item.classList.remove('cfile-lazy'); item.title = f.path; }
+      paint(f);
+    }, (err) => {
+      if (panelEl._cfileActive !== idx || !diffEl.isConnected) return;
+      diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ Failed to load diff: ${escapeHtml(err.message || String(err))}</p></div>`;
+    });
   };
 
   // --- checkbox / selection plumbing ---
@@ -1511,8 +1662,11 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
   // Highlight and render the active file (restored, or the first one by default).
   panelEl.querySelectorAll('.cfile-item').forEach(el =>
     el.classList.toggle('active', parseInt(el.dataset.cfile, 10) === initialIdx));
-  renderOne(initialIdx);
-  if (savedScroll) diffEl.scrollTop = savedScroll;
+  const pending = renderOne(initialIdx);
+  if (savedScroll) {
+    if (pending) pending.then(() => { if (panelEl._cfileActive === initialIdx) diffEl.scrollTop = savedScroll; });
+    else diffEl.scrollTop = savedScroll;
+  }
   syncSelectionUI();
 
   // Track the diff scroll position as the user scrolls so a later refresh restores it.
@@ -1607,13 +1761,11 @@ function rerenderActiveCommitFile(panelEl) {
   if (!diffEl) return false;
   const f = panelEl._cfiles[panelEl._cfileActive || 0];
   if (!f) return false;
+  // Still loading: it is drawn when it arrives, and renderDiff reads the mode then.
+  if (f.lazy) return true;
   const prevScroll = diffEl.scrollTop;
   try {
-    const rrOpts = panelEl._cfileOpts || {};
-    diffEl.innerHTML = renderDiff(f.diff, Object.assign({}, rrOpts, {
-      imageRevs: rrOpts.hash ? { oldRev: rrOpts.hash + '^', newRev: rrOpts.hash } : undefined,
-      filePath: f.path
-    }));
+    diffEl.innerHTML = renderDiff(f.diff, commitFileRenderOpts(panelEl._cfileOpts || {}, f));
     hydrateImageDiffs(diffEl);
   } catch (err) {
     diffEl.innerHTML = `<div class="empty-state"><p style="color:var(--crusader-red-bright)">⚔ ${escapeHtml(err.message || String(err))}</p></div>`;
@@ -2834,5 +2986,6 @@ function unityWireImagePreviews(root) {
 // tested (test/partial-patch.test.js). In the browser `module` is undefined, which makes
 // this a no-op: the functions stay plain globals like every other renderer script.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseUnifiedDiff, buildPartialPatch, hunkLineKeys, decodeTga, decodePsd, unityImportedSize };
+  module.exports = { parseUnifiedDiff, buildPartialPatch, hunkLineKeys, decodeTga, decodePsd, unityImportedSize,
+                     splitDiffByFile, unquoteGitPath, commitBrowserFiles };
 }
