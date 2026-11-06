@@ -2568,6 +2568,23 @@ ipcMain.handle('repo:zipCommitFiles', wrap(async (_, { hash, paths } = {}) => {
   }
 }));
 
+// A commit's parents, from one rev-list. More than one means a merge.
+async function commitParents(g, hash) {
+  const out = await g.raw(['rev-list', '--parents', '-n', '1', hash, '--']);
+  return out.trim().split(/\s+/).slice(1);
+}
+
+// How a commit preview diffs a commit. A merge is shown against its FIRST parent — what the
+// merge brought into the branch it was made on — because `git show`'s default for a merge is
+// a combined diff (`diff --cc`, `@@@` hunks, a column per parent) that the renderer cannot
+// parse: every merge read "No differences". First parent is also what everything else in
+// the preview already assumes (image and Unity smart diffs read `hash^`, the partial
+// cherry-pick replays `-m 1`). `-m --first-parent` rather than `--diff-merges=`, which
+// needs git 2.31.
+function commitDiffArgs(parents) {
+  return parents.length > 1 ? ['-m', '--first-parent'] : [];
+}
+
 ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
   const g = ensureGit();
   // Accept either a hash string (legacy) or an options object { hash, maxBytes, includeDiff }
@@ -2575,13 +2592,16 @@ ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
   const maxBytes = (typeof opts === 'object' && opts && opts.maxBytes) || 2 * 1024 * 1024; // 2 MB default
   if (!hash) throw new Error('Hash required');
 
+  const parents = await commitParents(g, hash);
+  const mArgs = commitDiffArgs(parents);
+
   // Stat summary (lightweight)
-  const show = await g.show([hash, '--stat']);
+  const show = await g.show([...mArgs, hash, '--stat']);
 
   // Per-file changes summary (cheap — just file names and add/del counts)
   let files = [];
   try {
-    const raw = await g.raw(['show', '--numstat', '--format=', hash]);
+    const raw = await g.raw(['show', ...mArgs, '--numstat', '--format=', hash]);
     files = raw.split('\n').filter(Boolean).map(line => {
       const parts = line.split('\t');
       if (parts.length < 3) return null;
@@ -2600,7 +2620,7 @@ ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
   let diffTruncated = false;
   let diffBytes = 0;
   try {
-    diff = await g.show([...wsArgs(opts), hash]);
+    diff = await g.show([...mArgs, ...wsArgs(opts), hash]);
     diffBytes = Buffer.byteLength(diff, 'utf8');
     if (diffBytes > maxBytes) {
       // Truncate at a line boundary
@@ -2619,11 +2639,25 @@ ipcMain.handle('repo:showCommit', wrap(async (_, opts) => {
   let fileList = null;
   if (diffTruncated) {
     try {
-      fileList = ud.parseNameStatusZ(await g.raw(['show', '--name-status', '-z', '--format=', hash]));
+      fileList = ud.parseNameStatusZ(await g.raw(['show', ...mArgs, '--name-status', '-z', '--format=', hash]));
     } catch (e) { /* the browser falls back to the files the cut diff names */ }
   }
 
-  return { show, diff, files, diffTruncated, diffBytes, fileList };
+  // What the first-parent view cannot show: which files the merge itself changed. The
+  // combined diff's file list is exactly that — a path differing from every parent, in a
+  // way not taken whole from one side: a conflict resolution, or an edit made in the merge.
+  // It costs what `git show` on a merge always cost, since the combined diff was its default.
+  let merge = null;
+  if (parents.length > 1) {
+    let resolved = [];
+    try {
+      resolved = (await g.raw(['show', '--cc', '--name-only', '-z', '--format=', hash]))
+        .split('\0').filter(Boolean);
+    } catch (e) { /* the list still renders; it just marks nothing */ }
+    merge = { parents, resolved };
+  }
+
+  return { show, diff, files, diffTruncated, diffBytes, fileList, merge };
 }));
 
 // Get the diff for a single file from a commit. Used for lazy-loading per-file
@@ -2637,7 +2671,9 @@ ipcMain.handle('repo:showCommitFileDiff', wrap(async (_, { hash, path: filePath,
   if (!hash || !filePath) throw new Error('hash and path required');
   const cap = maxBytes || 1024 * 1024;
   const paths = (oldPath && oldPath !== filePath) ? [oldPath, filePath] : [filePath];
-  const diff = await g.show([...wsArgs({ ignoreWhitespace }), hash, '--', ...paths.map(p => ':(literal)' + p)]);
+  // Same view as repo:showCommit, or a merge's file would come back as a combined diff.
+  const mArgs = commitDiffArgs(await commitParents(g, hash));
+  const diff = await g.show([...mArgs, ...wsArgs({ ignoreWhitespace }), hash, '--', ...paths.map(p => ':(literal)' + p)]);
   const bytes = Buffer.byteLength(diff, 'utf8');
   if (bytes > cap) {
     const cut = diff.lastIndexOf('\n', cap);

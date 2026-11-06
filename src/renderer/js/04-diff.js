@@ -1444,11 +1444,28 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
       `too large to load at once. ${lazyCount === 1 ? 'One file loads' : `${lazyCount.toLocaleString()} files load`} when opened.</div>`
     : '';
 
+  // A merge is diffed against its first parent (see commitDiffArgs in main). That view
+  // cannot tell a file the merge merely carried in from one it changed itself, so main also
+  // names those (`merge.resolved`, the combined diff's file list) and they are marked.
+  const merge = opts.merge && Array.isArray(opts.merge.parents) && opts.merge.parents.length > 1 ? opts.merge : null;
+  const resolved = new Set(merge ? merge.resolved || [] : []);
+  const RESOLVED_TITLE = 'Changed by the merge itself: differs from every parent — a conflict resolution, or an edit made while merging';
+  const mergeNote = merge
+    ? `<div class="cfile-note">Merge commit — changes against its first parent ` +
+      `<span class="text-mono">${escapeHtml(String(merge.parents[0]).slice(0, 7))}</span>, ` +
+      `i.e. what the merge brought into the branch.` +
+      (resolved.size
+        ? ` <span class="cfile-resolved">⚔</span> marks ${resolved.size === 1 ? 'the file' : `the ${resolved.size.toLocaleString()} files`} the merge changed itself.`
+        : ' No file was changed by the merge itself.') +
+      `</div>`
+    : '';
+
   const listHtml = files.map((f, idx) =>
     `<div class="cfile-item${idx === 0 ? ' active' : ''}${f.lazy ? ' cfile-lazy' : ''}" data-cfile="${idx}" title="${escapeHtml(f.path)}${f.lazy ? ' — loads when opened' : ''}">` +
       `<input type="checkbox" class="cfile-check" data-cfile-check="${idx}" title="Select file">` +
       `<span class="cfile-status ${f.status}">${FILE_STATUS_LETTER[f.status] || 'M'}</span>` +
       `<span class="cfile-path">${escapeHtml(f.path)}</span>` +
+      (resolved.has(f.path) ? `<span class="cfile-resolved" title="${escapeHtml(RESOLVED_TITLE)}">⚔</span>` : '') +
     `</div>`
   ).join('');
 
@@ -1465,6 +1482,7 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
       `<div class="cfile-searchbar">` +
         `<input type="search" class="cfile-search" placeholder="Filter by path or content…" title="Filter files in this commit by path or diff content" />` +
       `</div>` +
+      mergeNote +
       lazyNote +
       `<div class="cfile-list">${listHtml}</div>` +
       `<div class="cfile-diff diff-content" id="cfile-diff"></div>` +

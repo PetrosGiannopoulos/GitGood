@@ -1348,6 +1348,14 @@ p.cpick-why { margin: -2px 0 6px 24px; }
   border-bottom: 1px solid var(--border);
 }
 .cfile-item.cfile-lazy .cfile-path { font-style: italic; }
+/* A merge's file that the merge itself changed (conflict resolution / edit while merging). */
+.cfile-resolved {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--crusader-red-bright);
+  font-size: 11px;
+}
+.cfile-note .cfile-resolved { margin-left: 0; }
 .cfile-diff {
   flex: 1;
   min-height: 120px;
