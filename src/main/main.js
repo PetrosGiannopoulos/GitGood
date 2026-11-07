@@ -17,6 +17,7 @@ const { mergeUnityYaml } = require('./lib/unity-merge');
 const { lfsOptOutPattern, appendLfsOptOuts } = require('./lib/lfs-optout');
 const { trimDiffForPrompt, buildCommitSuggestPrompt, parseCommitSuggestion } = require('./lib/commit-suggest');
 const { lastPushFromReflog, recentPushedBranches, parseMergeTargets, mergedIntoTarget } = require('./lib/recent-pushes');
+const ce = require('./lib/change-export');
 
 // Disable hardware acceleration issues on some systems
 app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
@@ -2680,6 +2681,104 @@ ipcMain.handle('repo:showCommitFileDiff', wrap(async (_, { hash, path: filePath,
     return { diff: diff.slice(0, cut > 0 ? cut : cap), truncated: true, bytes };
   }
   return { diff, truncated: false, bytes };
+}));
+
+// ---- Export changes (commit preview → ✉ Export changes…) ------------------------------
+// Some files of a commit written out as Markdown and plain text, for a teammate who cannot
+// take the commit and has to redo the edits by hand. Parsing and formatting are pure, in
+// lib/change-export.js; this half runs git.
+//
+// - Diffed fresh rather than reusing the preview's text: the preview may be cut at 2 MB, and
+//   the export wants its own context size (or -W, the whole function).
+// - C# goes through git's `csharp` diff driver so a hunk header names the method; git's
+//   default function finder only sees unindented lines and C# methods never are (the same
+//   trick, and the same caveat, as the Debug Toolkit's method history).
+// - Same first-parent view as the preview, :(literal) pathspecs for Unity's `[ ]` paths,
+//   --no-textconv/--no-ext-diff so an LFS file reads as its pointer and is reported as such.
+const EXPORT_MAX_BYTES = 3 * 1024 * 1024;
+
+ipcMain.handle('repo:exportCommitChanges', wrap(async (_, opts) => {
+  const o = opts || {};
+  const g = ensureGit();
+  const hash = String(o.hash || '').trim();
+  if (!/^[0-9a-f]{4,64}$/i.test(hash)) throw new Error('Commit hash required');
+  const selected = Array.from(new Set((o.paths || []).filter(p => typeof p === 'string' && p)));
+  const context = o.context === 'function' ? 'function' : Math.max(0, Math.min(50, parseInt(o.context, 10) || 3));
+
+  const parents = await commitParents(g, hash);
+  const mArgs = commitDiffArgs(parents);
+  const nameStatus = ud.parseNameStatusZ(await g.raw(['show', ...mArgs, '--name-status', '-z', '--format=', hash]));
+  // Nothing ticked means the whole commit.
+  const wanted = selected.length ? selected : nameStatus.map(r => r.path);
+  const specs = ce.exportPathspecs(wanted, nameStatus).map(p => ':(literal)' + p);
+
+  const sep = '\u0001';
+  const meta = (await g.raw(['log', '-1', `--format=%H${sep}%h${sep}%an${sep}%aI${sep}%s`, hash, '--'])).trim().split(sep);
+
+  const attrFile = path.join(os.tmpdir(), `gitgood-csharp-attr-${process.pid}`);
+  fs.writeFileSync(attrFile, '*.cs diff=csharp\n', 'utf8');
+  const flags = ['--format=', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames',
+    context === 'function' ? '--function-context' : `-U${context}`, ...wsArgs(o)];
+
+  let text = '';
+  let truncated = false;
+  if (specs.length) {
+    await forEachPathChunk(specs, async (chunk) => {
+      if (truncated) return;
+      const budget = EXPORT_MAX_BYTES - Buffer.byteLength(text, 'utf8');
+      const r = await gitCapture(['-c', `core.attributesFile=${attrFile.replace(/\\/g, '/')}`,
+        'show', ...mArgs, ...flags, hash, '--', ...chunk], budget);
+      if (r.code !== 0 && !r.truncated) throw new Error((r.err || '').trim() || `git show exited ${r.code}`);
+      let out = r.out;
+      if (r.truncated) {
+        truncated = true;
+        const cut = out.lastIndexOf('\n');
+        out = cut > 0 ? out.slice(0, cut + 1) : '';
+      }
+      text += out;
+    });
+  }
+
+  const files = ce.parseExportDiff(text);
+  if (truncated && files.length) files[files.length - 1].cut = true;
+  const shown = new Set();
+  for (const f of files) { shown.add(f.path); if (f.oldPath) shown.add(f.oldPath); }
+  const exp = {
+    commit: { hash: meta[0] || hash, short: meta[1] || hash.slice(0, 7), author: meta[2] || '',
+              date: meta[3] || '', subject: meta[4] || '' },
+    files,
+    missing: wanted.filter(p => !shown.has(p)),
+    truncated,
+    ignoreWhitespace: !!o.ignoreWhitespace,
+    totalInCommit: nameStatus.length
+  };
+  return {
+    markdown: ce.formatMarkdown(exp),
+    text: ce.formatText(exp),
+    fileCount: files.length,
+    truncated,
+    short: exp.commit.short
+  };
+}));
+
+// Save an export (or any text the renderer produced) through a save dialog. The text is
+// written as given, UTF-8 — nothing to translate.
+ipcMain.handle('repo:saveTextExport', wrap(async (_, opts) => {
+  const o = opts || {};
+  const name = String(o.defaultName || 'changes.md').replace(/[\\/:*?"<>|]/g, '_');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: o.title || 'Save Changes',
+    defaultPath: path.join(app.getPath('documents'), name),
+    // The filter matching the default name first, or the dialog would swap its extension.
+    filters: (/\.txt$/i.test(name)
+      ? [{ name: 'Text', extensions: ['txt'] }, { name: 'Markdown', extensions: ['md'] }]
+      : [{ name: 'Markdown', extensions: ['md'] }, { name: 'Text', extensions: ['txt'] }])
+      .concat([{ name: 'All Files', extensions: ['*'] }]),
+    properties: ['showOverwriteConfirmation']
+  });
+  if (result.canceled || !result.filePath) return { saved: false, canceled: true };
+  fs.writeFileSync(result.filePath, String(o.content || ''), 'utf8');
+  return { saved: true, path: result.filePath };
 }));
 
 ipcMain.handle('repo:rawCommand', wrap(async (_, args) => {

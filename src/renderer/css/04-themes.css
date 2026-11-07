@@ -1194,7 +1194,8 @@ html.theme-hero.hero-comic .screen {
 .cfile-selall:hover { color: var(--bone-white); }
 .cfile-selcount { color: var(--accent-bright); flex: 1; }
 .cfile-restore-btn,
-.cfile-pick-btn {
+.cfile-pick-btn,
+.cfile-export-btn {
   font-family: var(--font-display);
   font-size: 10px;
   letter-spacing: 0.05em;
@@ -1207,13 +1208,33 @@ html.theme-hero.hero-comic .screen {
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .cfile-restore-btn:hover:not(:disabled),
-.cfile-pick-btn:hover:not(:disabled) {
+.cfile-pick-btn:hover:not(:disabled),
+.cfile-export-btn:hover:not(:disabled) {
   background: var(--accent);
   color: var(--bone-white);
   border-color: var(--accent-bright);
 }
 .cfile-restore-btn:disabled,
-.cfile-pick-btn:disabled { opacity: 0.4; cursor: default; }
+.cfile-pick-btn:disabled,
+.cfile-export-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Export changes dialog — options row, then the text as it will be pasted. */
+.modal.chx-modal { width: min(1000px, 94vw); max-width: 94vw; min-width: 0; }
+.chx-opts { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin: 10px 0; }
+.chx-opts > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--parchment-dim); }
+.chx-opts select.modal-input { padding: 5px 8px; width: auto; }
+.chx-opts > label.chx-check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 6px; cursor: pointer; }
+.chx-out {
+  width: 100%;
+  height: 52vh;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 4;
+}
+.chx-status { font-size: 12px; margin-top: 6px; min-height: 1.2em; }
 .cfile-check { cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
 
 /* Partial cherry-pick dialog — the file list you untick to leave a file behind. */

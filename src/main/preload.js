@@ -298,6 +298,8 @@ const api = {
   zipCommitFiles: (hash, paths) => ipcRenderer.invoke('repo:zipCommitFiles', { hash, paths }),
   showCommit: (opts) => ipcRenderer.invoke('repo:showCommit', opts),
   showCommitFileDiff: (opts) => ipcRenderer.invoke('repo:showCommitFileDiff', opts),
+  exportCommitChanges: (opts) => ipcRenderer.invoke('repo:exportCommitChanges', opts),
+  saveTextExport: (opts) => ipcRenderer.invoke('repo:saveTextExport', opts),
   rawCommand: (args) => ipcRenderer.invoke('repo:rawCommand', args),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 

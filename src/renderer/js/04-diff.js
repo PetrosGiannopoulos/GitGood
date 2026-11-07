@@ -1478,6 +1478,8 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
         // Cherry-pick is offered whether or not anything is ticked: with a selection it
         // seeds the dialog, without one the dialog opens on the whole commit.
         (opts.hash ? `<button class="cfile-pick-btn" type="button" title="Replay only some of this commit's files as a new commit on the current branch">⚒ Cherry-pick…</button>` : '') +
+        // Same rule as cherry-pick: the ticked files, or the whole commit when none are.
+        (opts.hash ? `<button class="cfile-export-btn" type="button" title="Write the ticked files' changes (or the whole commit's) as text to paste to your team">✉ Export changes…</button>` : '') +
       `</div>` +
       `<div class="cfile-searchbar">` +
         `<input type="search" class="cfile-search" placeholder="Filter by path or content…" title="Filter files in this commit by path or diff content" />` +
@@ -1605,6 +1607,11 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
     openPartialCherryPick(panelEl._cfileHash, checkedPaths());
   });
 
+  const exportBtn = panelEl.querySelector('.cfile-export-btn');
+  if (exportBtn) exportBtn.addEventListener('click', () => {
+    openExportChanges(panelEl._cfileHash, checkedPaths());
+  });
+
   // File filter — show only items whose path matches the query (all terms must match).
   const fileSearch = panelEl.querySelector('.cfile-search');
   let applyFileFilter = () => {};
@@ -1705,6 +1712,8 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y, op
     { label, icon: '↩', action: dialog(() => restoreFilesFromCommit(hash, targetPaths)) },
     { label: many ? `Cherry-pick these ${targetPaths.length} files onto current…` : 'Cherry-pick this file onto current…',
       icon: '⚒', action: dialog(() => openPartialCherryPick(hash, targetPaths)) },
+    { label: many ? `Export changes of these ${targetPaths.length} files as text…` : 'Export changes as text…',
+      icon: '✉', action: dialog(() => openExportChanges(hash, targetPaths)) },
     'sep',
     { label: 'File history…', icon: '⌛', action: dialog(() => openFileHistory(focus)) },
     { label: 'Blame at this commit…', icon: '⚔', action: dialog(() => openBlame(focus, { rev: hash })) },
@@ -1743,6 +1752,103 @@ async function zipCommitFiles(hash, paths) {
     ? ` — ${r.data.skipped.length} deleted in this commit, left out` : '';
   showToast(`Created ${name} (${r.data.count} file${r.data.count === 1 ? '' : 's'})${skipped}`,
             'success', 5000);
+}
+
+// ✉ Export changes: some files of a commit as readable text, for a teammate who cannot take
+// the commit and will redo the edits by hand. Main diffs and formats (lib/change-export.js)
+// and returns both Markdown and plain text, so switching format here costs nothing; context
+// and whitespace change the diff itself and ask again. The choices last the session.
+const _exportPrefs = { format: 'markdown', context: '3' };
+
+async function openExportChanges(hash, paths, opts = {}) {
+  if (!hash) return;
+  if (opts.beforeDialog) opts.beforeDialog();
+  paths = Array.from(new Set(paths || []));
+  const scope = paths.length
+    ? (paths.length === 1 ? `<code class="text-mono">${escapeHtml(paths[0])}</code>` : `${paths.length} selected files`)
+    : 'every file';
+  const body = document.createElement('div');
+  body.className = 'chx';
+  body.innerHTML = `
+    <p class="modal-text">Changes to ${scope} in <code class="text-mono text-red">${escapeHtml(hash.slice(0, 7))}</code>,
+      written out so they can be redone by hand.</p>
+    <div class="chx-opts">
+      <label>Format
+        <select class="modal-input chx-format">
+          <option value="markdown">Markdown — Teams, Slack, Discord, GitHub</option>
+          <option value="text">Plain text — email, anywhere</option>
+        </select>
+      </label>
+      <label>Context
+        <select class="modal-input chx-context">
+          <option value="3">3 lines around each change</option>
+          <option value="10">10 lines around each change</option>
+          <option value="function">The whole method / function</option>
+        </select>
+      </label>
+      <label class="chx-check"><input type="checkbox" class="chx-ws"> Ignore whitespace</label>
+    </div>
+    <textarea class="modal-input chx-out" readonly spellcheck="false" wrap="off"></textarea>
+    <div class="chx-status text-muted" aria-live="polite"></div>`;
+
+  const fmtSel = body.querySelector('.chx-format');
+  const ctxSel = body.querySelector('.chx-context');
+  const wsBox = body.querySelector('.chx-ws');
+  const out = body.querySelector('.chx-out');
+  const status = body.querySelector('.chx-status');
+  fmtSel.value = _exportPrefs.format;
+  ctxSel.value = _exportPrefs.context;
+  wsBox.checked = !!(typeof state !== 'undefined' && state.diffIgnoreWhitespace);
+
+  let result = null;
+  let seq = 0;
+  const current = () => result ? (fmtSel.value === 'text' ? result.text : result.markdown) : '';
+  const show = () => {
+    out.value = current();
+    if (!result) return;
+    const kb = Math.max(1, Math.round(out.value.length / 1024));
+    status.textContent = `${result.fileCount} file${result.fileCount === 1 ? '' : 's'} · ${kb} KB` +
+      (result.truncated ? ' · cut at the size limit — export fewer files for the rest' : '');
+  };
+  const load = async () => {
+    const my = ++seq;
+    result = null;
+    out.value = '';
+    status.textContent = 'Reading the commit…';
+    copyBtn.disabled = saveBtn.disabled = true;
+    const r = await gs.exportCommitChanges({ hash, paths, context: ctxSel.value, ignoreWhitespace: wsBox.checked });
+    if (my !== seq || !out.isConnected) return;
+    if (!r.ok) { status.textContent = '⚔ ' + (r.error || 'Could not export the changes'); return; }
+    result = r.data;
+    copyBtn.disabled = saveBtn.disabled = false;
+    show();
+  };
+
+  fmtSel.onchange = () => { _exportPrefs.format = fmtSel.value; show(); };
+  ctxSel.onchange = () => { _exportPrefs.context = ctxSel.value; load(); };
+  wsBox.onchange = load;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn-medieval';
+  closeBtn.textContent = 'Close';
+  closeBtn.onclick = () => modal.hide();
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn-medieval';
+  saveBtn.textContent = '⤓ Save…';
+  saveBtn.onclick = async () => {
+    if (!result) return;
+    const ext = fmtSel.value === 'text' ? 'txt' : 'md';
+    const r = await gs.saveTextExport({ content: current(), defaultName: `changes-${result.short}.${ext}`, title: 'Save Changes' });
+    if (!r.ok) { showToast(r.error || 'Could not save', 'error', 5000); return; }
+    if (r.data && r.data.saved) showToast(`Saved ${r.data.path.split(/[\\/]/).pop()}`, 'success', 3000);
+  };
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn-medieval primary';
+  copyBtn.textContent = '⎘ Copy';
+  copyBtn.onclick = () => { if (result) copyText(current(), 'Changes copied — paste them to your team'); };
+
+  modal.show({ title: '✉ Export Changes', body, footer: [closeBtn, saveBtn, copyBtn], cls: 'chx-modal' });
+  load();
 }
 
 function shortenPath(p) {
