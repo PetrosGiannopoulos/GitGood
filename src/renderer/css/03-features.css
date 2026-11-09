@@ -3706,3 +3706,9 @@ body.resizing-panes * {
 .update-progress-label { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-dim); }
 .update-progress-detail { color: var(--text-muted); font-family: var(--font-mono); font-size: 10.5px; text-align: right; }
 @media (prefers-reduced-motion: reduce) { .update-progress.indeterminate .update-progress-fill { animation: none; left: 0; width: 100%; opacity: 0.5; } }
+/* Settings → About: the two ways an installed copy can update, one row each. */
+.update-choices { width: 320px; max-width: 100%; display: flex; flex-direction: column; gap: 10px; }
+.update-choices[hidden] { display: none; }
+.update-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.update-choice-desc { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+.update-choice.blocked .update-choice-desc { color: var(--text-dim); font-style: italic; }

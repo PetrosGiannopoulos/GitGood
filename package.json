@@ -2,7 +2,7 @@
   "name": "gitgood",
   "version": "1.2.3",
   "description": "GitGood - A medieval-themed Git GUI client forged in the fires of the crusade",
-  "main": "src/main/main.js",
+  "main": "src/main/bootstrap.js",
   "author": "GitGood",
   "license": "MIT",
   "scripts": {

@@ -1467,9 +1467,10 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   llmIndexMaxCommits: 300
 };
 
-// Settings → About → Update GitGood. One button with three states: check, then (if main
-// is ahead) install, or open the releases page where this build can't update itself.
-// Installing quits the app (installer) or relaunches it (source checkout) from main.
+// Settings → About → Update GitGood. The button always checks. An installed copy then
+// lists its ways to update as separate choices (from main via the bootstrap, or the
+// installer) and the user picks; a source checkout turns the button into "Update and
+// restart"; anything else gets the releases page. See the self-update section in main.js.
 function wireUpdateButton(btn, status) {
   if (!btn || !status) return;
   const fmtMB = (n) => (n / 1048576).toFixed(0) + ' MB';
@@ -1482,6 +1483,9 @@ function wireUpdateButton(btn, status) {
     btn.disabled = false;
     if (!r || !r.ok) { status.textContent = ''; showToast('Update check failed: ' + (r && r.error), 'error', 6000); return; }
     info = r.data;
+    choices.hidden = true;
+    choices.innerHTML = '';
+    if (info.mode === 'app') { renderAppChoices(); return; }
     const ver = info.mode === 'source'
       ? `Source checkout at ${info.headShort}; main is at ${info.remoteShort} (v${info.latest}).`
       : `You have v${info.current}; main is at v${info.latest}.`;
@@ -1493,11 +1497,7 @@ function wireUpdateButton(btn, status) {
       status.textContent = ver + '\n' + info.blocked;
       return;
     }
-    if (info.mode === 'installer') {
-      status.textContent = ver + `\nDownloads ${info.asset.name} (${fmtMB(info.asset.size)}), starts the installer and closes GitGood.`;
-      btn.textContent = `⬇ Install v${info.latest}`;
-      btn.onclick = install;
-    } else if (info.mode === 'source') {
+    if (info.mode === 'source') {
       status.textContent = ver + '\nFast-forwards this checkout from main and restarts GitGood.';
       btn.textContent = '⬇ Update and restart';
       btn.onclick = install;
@@ -1506,6 +1506,70 @@ function wireUpdateButton(btn, status) {
       btn.textContent = '↗ Open releases page';
       btn.onclick = () => gs.openExternal(info.page);
     }
+  };
+
+  // An installed copy: the check button stays, and each way of updating is its own
+  // choice underneath — from main (bootstrap) or the installer — with the reason shown
+  // when one of them can't be used here.
+  const choices = document.createElement('div');
+  choices.className = 'update-choices';
+  choices.hidden = true;
+  status.after(choices);
+
+  const renderAppChoices = () => {
+    const bs = info.bootstrap, inst = info.installer;
+    const lines = [(info.running === 'source'
+      ? `Running main @${info.commitShort} (v${info.current}); the installed app is v${info.shellVersion}.`
+      : `You have v${info.current}.`) + ` main is at v${info.latest} (${info.remoteShort}).`];
+    if (info.bootNote) lines.push('⚠ ' + info.bootNote + (info.lastFailure && info.lastFailure.error ? '\n' + info.lastFailure.error : ''));
+    lines.push(info.updateAvailable ? 'An update is available. Choose how to install it:' : 'GitGood is up to date.');
+    status.textContent = lines.join('\n');
+
+    const opts = [];
+    if (bs.newer) {
+      opts.push({ key: 'bootstrap', label: '⚡ Update from main', ok: bs.ok,
+        desc: bs.blocked || `Fetches main's source with git (${bs.firstFetch ? 'about 35 MB the first time' : 'only what changed'}) and restarts. Nothing is reinstalled; the installed app stays as the fallback.` });
+    }
+    if (inst.newer) {
+      if (inst.manual) opts.push({ key: 'releases', label: '↗ Open releases page', ok: true, desc: inst.blocked });
+      else opts.push({ key: 'installer', label: `⬇ Installer v${info.latest}`, ok: inst.ok,
+        desc: inst.blocked || `Downloads ${inst.asset.name} (${fmtMB(inst.asset.size)}), runs the setup wizard and closes GitGood.`
+          + (info.running === 'source' ? ' Brings the installed fallback up to date.' : '') });
+    }
+    if (info.canUseInstalled) {
+      opts.push({ key: 'installed', label: `↩ Run installed v${info.shellVersion}`, ok: true, secondary: true,
+        desc: 'Stops running main\'s source and restarts on the installed app.' });
+    }
+    choices.innerHTML = opts.map(o => `<div class="update-choice${o.ok ? '' : ' blocked'}">
+        <button class="btn-medieval${o.secondary ? '' : ' primary'}" type="button" data-method="${o.key}" data-ok="${o.ok ? 1 : ''}"${o.ok ? '' : ' disabled'}>${escapeHtml(o.label)}</button>
+        <div class="update-choice-desc">${escapeHtml(o.desc || '')}</div>
+      </div>`).join('');
+    choices.hidden = !opts.length;
+    choices.querySelectorAll('button').forEach(b => {
+      b.onclick = () => {
+        if (b.dataset.method === 'releases') gs.openExternal(info.page);
+        else if (b.dataset.method === 'installed') useInstalled();
+        else install(b.dataset.method);
+      };
+    });
+  };
+
+  const setBusy = (busy) => {
+    btn.disabled = busy;
+    choices.querySelectorAll('button').forEach(b => { b.disabled = busy || !b.dataset.ok; });
+  };
+
+  const useInstalled = async () => {
+    const ok = await modal.confirm({
+      title: 'Run the installed version',
+      message: `GitGood will restart on the installed v${info.shellVersion}. The source of main stays on disk until the next update, and "Update from main" brings it back.`,
+      confirmText: 'Restart'
+    });
+    if (!ok) return;
+    setBusy(true);
+    const r = await gs.updateUseInstalled();
+    if (!r || !r.ok) { setBusy(false); showToast('Could not switch: ' + (r && r.error), 'error', 6000); return; }
+    status.textContent = `Restarting on the installed v${r.data.version}…`;
   };
 
   // Inline progress bar under the status text, fed by the op:progress events main emits
@@ -1517,7 +1581,7 @@ function wireUpdateButton(btn, status) {
   bar.innerHTML = `<div class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
       <div class="update-progress-fill"></div></div>
     <div class="update-progress-label"><span class="update-progress-stage"></span><span class="update-progress-detail"></span></div>`;
-  status.after(bar);
+  choices.after(bar);
   const track = bar.querySelector('.update-progress-track');
   const fill = bar.querySelector('.update-progress-fill');
   const stageEl = bar.querySelector('.update-progress-stage');
@@ -1548,15 +1612,17 @@ function wireUpdateButton(btn, status) {
     detailEl.textContent = detail;
   };
 
-  const install = async () => {
-    btn.disabled = true;
+  // `method` is 'bootstrap' or 'installer' for an installed copy; a source checkout has
+  // only one way and sends none.
+  const install = async (method) => {
+    setBusy(true);
     rate = null;
     showProgress({ stage: 'Starting' });
     const off = gs.onOpProgress((p) => { if (p && p.method === 'Update') showProgress(p); });
     try {
-      const r = await withLoading('Updating GitGood', () => gs.updateInstall());
+      const r = await withLoading('Updating GitGood', () => gs.updateInstall({ method: typeof method === 'string' ? method : undefined }));
       if (!r || !r.ok) {
-        btn.disabled = false;
+        setBusy(false);
         bar.hidden = true;
         showToast('Update failed: ' + (r && r.error), 'error', 8000);
         return;
@@ -1564,9 +1630,11 @@ function wireUpdateButton(btn, status) {
       showProgress({ stage: r.data.mode === 'installer' ? 'Installer started' : 'Updated', progress: 100 });
       status.textContent = r.data.mode === 'installer'
         ? `The v${r.data.version} installer has started. GitGood is closing so it can replace the app.`
-        : `Updated to v${r.data.version}. Restarting…`;
+        : r.data.mode === 'bootstrap'
+          ? `Updated to main @${r.data.commitShort} (v${r.data.version}). Restarting…`
+          : `Updated to v${r.data.version}. Restarting…`;
     } catch (e) {
-      btn.disabled = false;
+      setBusy(false);
       bar.hidden = true;
       showToast('Update failed: ' + (e.message || e), 'error', 8000);
     } finally {

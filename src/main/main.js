@@ -9366,22 +9366,39 @@ ipcMain.handle('soul:anchor', wrap(async (_, opts) => {
 }));
 
 // ============================================================================
-// SELF-UPDATE (Settings → About). Pure half: lib/self-update.js.
+// SELF-UPDATE (Settings → About). Pure halves: lib/self-update.js, lib/source-boot.js.
 // ============================================================================
-// "Latest" is the version `main`'s package.json declares. How to get there depends on
-// how this copy is running:
-//   installer — a packaged build. It cannot run main's source, so it downloads the
-//               release built from that version, starts the installer and quits.
-//   source    — `npm start` from a clone. Fast-forwards the clone from main, runs
-//               `npm install` if the dependencies moved, and relaunches. Only on a clean
-//               `main` checkout: this may be someone's working copy on another branch,
-//               and an update must never merge into, or move, their work.
-//   manual    — packaged, but not Windows: releases only carry the Windows installer,
-//               so the renderer offers the releases page instead.
+// "Latest" is the `main` branch. How this copy can get there depends on how it runs:
+//   app     — an installed copy (or a clone started with GITGOOD_BOOTSTRAP set). When an
+//             update is found the user picks one of two methods:
+//               bootstrap — shallow-fetch main into <userData>/app-source and relaunch on
+//                           it; src/main/bootstrap.js (the entry point) loads it from then
+//                           on. Tens of MB the first time, only the changes after. Possible
+//                           only while main wants this shell's Electron major and exactly
+//                           its dependencies — neither can come from source.
+//               installer — Windows only: download the release built from main's version,
+//                           start its wizard and quit. Replaces the installed app itself,
+//                           which is also what the bootstrap falls back to.
+//   source  — `npm start` from a clone. Fast-forwards the clone from main, runs
+//             `npm install` if the dependencies moved, and relaunches. Only on a clean
+//             `main` checkout: this may be someone's working copy on another branch,
+//             and an update must never merge into, or move, their work.
+//   manual  — anything else (an unpacked folder that is not a clone): the releases page.
 const { compareVersions, pickReleaseAsset, findInstallerIn } = require('./lib/self-update');
+const sboot = require('./lib/source-boot');
 const UPDATE_REPO = 'PetrosGiannopoulos/GitGood';
 const UPDATE_GIT_URL = `https://github.com/${UPDATE_REPO}.git`;
 const UPDATE_RELEASES_PAGE = `https://github.com/${UPDATE_REPO}/releases`;
+
+// What src/main/bootstrap.js decided at startup. Absent only if main.js was started
+// directly rather than through the bootstrap.
+function bootInfo() {
+  return global.__gitgoodBoot || { enabled: false, method: 'bundled', shellVersion: app.getVersion(), bundledDir: app.getAppPath(), root: null };
+}
+
+function updateShellPkg() {
+  return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
+}
 
 async function updateFetchJson(url) {
   const res = await fetch(url, { headers: { 'User-Agent': 'GitGood', 'Accept': 'application/vnd.github+json' } });
@@ -9394,89 +9411,255 @@ function updateSourceGit() {
   return simpleGit({ baseDir: app.getAppPath(), ...SG_OPTS });
 }
 
+async function updateRemoteMain() {
+  const line = (await simpleGit({ baseDir: os.tmpdir(), ...SG_OPTS }).raw(['ls-remote', UPDATE_GIT_URL, 'refs/heads/main'])).trim();
+  return line.split(/\s+/)[0] || '';
+}
+
 async function updateCheck() {
+  const boot = bootInfo();
+  if (!app.isPackaged && !boot.enabled) {
+    if (fs.existsSync(path.join(app.getAppPath(), '.git'))) return updateCheckClone();
+    const pkg = await updateFetchJson(`https://raw.githubusercontent.com/${UPDATE_REPO}/main/package.json`);
+    const latest = String(pkg.version || '');
+    return { mode: 'manual', current: app.getVersion(), latest, page: UPDATE_RELEASES_PAGE, updateAvailable: compareVersions(latest, app.getVersion()) > 0 };
+  }
+  return updateCheckApp(boot);
+}
+
+async function updateCheckClone() {
   const current = app.getVersion();
-  const mode = app.isPackaged
-    ? (process.platform === 'win32' ? 'installer' : 'manual')
-    : (fs.existsSync(path.join(app.getAppPath(), '.git')) ? 'source' : 'unsupported');
   // raw.githubusercontent, not the contents API: the file is all we need, and it does not
   // spend the unauthenticated API budget (60 an hour).
   const pkg = await updateFetchJson(`https://raw.githubusercontent.com/${UPDATE_REPO}/main/package.json`);
   const latest = String(pkg.version || '');
-  const out = { mode, current, latest, page: UPDATE_RELEASES_PAGE, updateAvailable: false };
+  const out = { mode: 'source', current, latest, page: UPDATE_RELEASES_PAGE, updateAvailable: false };
+  const g = updateSourceGit();
+  const head = (await g.revparse(['HEAD'])).trim();
+  const branch = (await g.revparse(['--abbrev-ref', 'HEAD'])).trim();
+  const remoteHead = await updateRemoteMain();
+  out.updateAvailable = !!remoteHead && remoteHead !== head;
+  out.headShort = head.slice(0, 7);
+  out.remoteShort = remoteHead.slice(0, 7);
+  if (out.updateAvailable) {
+    if (branch !== 'main') {
+      out.blocked = `This copy runs from a source checkout on "${branch}". Updating only fast-forwards a checkout of main, so your branch is left alone — switch to main to update here.`;
+    } else if ((await g.raw(['status', '--porcelain', '--untracked-files=no'])).trim()) {
+      out.blocked = 'The source checkout has uncommitted changes. Commit or stash them first — an update never touches them.';
+    }
+  }
+  return out;
+}
 
-  if (mode === 'source') {
-    const g = updateSourceGit();
-    const head = (await g.revparse(['HEAD'])).trim();
-    const branch = (await g.revparse(['--abbrev-ref', 'HEAD'])).trim();
-    const remoteLine = (await g.raw(['ls-remote', UPDATE_GIT_URL, 'refs/heads/main'])).trim();
-    const remoteHead = remoteLine.split(/\s+/)[0] || '';
-    out.updateAvailable = !!remoteHead && remoteHead !== head;
-    out.headShort = head.slice(0, 7);
-    out.remoteShort = remoteHead.slice(0, 7);
-    if (out.updateAvailable) {
-      if (branch !== 'main') {
-        out.blocked = `This copy runs from a source checkout on "${branch}". Updating only fast-forwards a checkout of main, so your branch is left alone — switch to main to update here.`;
-      } else if ((await g.raw(['status', '--porcelain', '--untracked-files=no'])).trim()) {
-        out.blocked = 'The source checkout has uncommitted changes. Commit or stash them first — an update never touches them.';
+// Both methods are worked out on every check, so the renderer can offer the choice. Each
+// is { newer, ok, blocked }: `newer` = it would bring something this copy doesn't have,
+// `ok` = it can actually be done here, `blocked` = why not.
+async function updateCheckApp(boot) {
+  const remoteSha = await updateRemoteMain();
+  if (!remoteSha) throw new Error('GitHub did not report a main branch for ' + UPDATE_REPO);
+  // Read at the commit ls-remote named, not at "main": raw.githubusercontent caches a
+  // branch path for minutes, and the two answers must describe the same commit.
+  const pkg = await updateFetchJson(`https://raw.githubusercontent.com/${UPDATE_REPO}/${remoteSha}/package.json`);
+  const latest = String(pkg.version || '');
+  const runningSource = boot.method === 'source';
+  const state = boot.root ? sboot.readBootState(boot.root) : { bad: [] };
+  const lf = boot.lastFailure;
+  const out = {
+    mode: 'app', running: boot.method,
+    current: runningSource ? boot.version : boot.shellVersion, shellVersion: boot.shellVersion,
+    commitShort: runningSource ? boot.commit.slice(0, 7) : null,
+    latest, remoteShort: remoteSha.slice(0, 7), page: UPDATE_RELEASES_PAGE,
+    bootNote: boot.note || null,
+    lastFailure: lf ? { commitShort: String(lf.commit || '').slice(0, 7), error: String(lf.error || '').split('\n')[0] } : null,
+    canUseInstalled: runningSource
+  };
+
+  // An installed build records no commit, so against it "newer" can only mean a newer
+  // version. A source copy knows its commit, so any movement of main counts.
+  const bs = { newer: runningSource ? remoteSha !== boot.commit : compareVersions(latest, boot.shellVersion) > 0, ok: false, blocked: null };
+  const compat = sboot.sourceCompatibility(updateShellPkg(), pkg, process.versions.electron);
+  if (!compat.ok) bs.blocked = compat.reason[0].toUpperCase() + compat.reason.slice(1) + '.';
+  else if (state.bad.includes(remoteSha)) bs.blocked = `main @${out.remoteShort} failed to start on this machine. Waiting for a newer commit, or use the installer.`;
+  bs.ok = bs.newer && !bs.blocked;
+  bs.firstFetch = !!boot.root && !fs.existsSync(path.join(boot.root, 'repo.git', 'HEAD'));
+
+  const inst = { newer: compareVersions(latest, boot.shellVersion) > 0, ok: false, blocked: null, asset: null, manual: false };
+  if (inst.newer) {
+    if (!app.isPackaged) inst.blocked = 'Only an installed copy can run the installer.';
+    else if (process.platform !== 'win32') { inst.manual = true; inst.blocked = 'Releases only carry the Windows installer — download this platform\'s build from the releases page.'; }
+    else {
+      try {
+        const releases = await updateFetchJson(`https://api.github.com/repos/${UPDATE_REPO}/releases?per_page=20`);
+        inst.asset = pickReleaseAsset(releases, latest);
+        if (!inst.asset) inst.blocked = `main is at ${latest}, but no installer for it has been published yet.`;
+      } catch (e) {
+        // The release list costs API budget the bootstrap doesn't need; a refusal here
+        // must not hide the other method.
+        inst.blocked = e.message;
       }
     }
-    return out;
+    inst.ok = !inst.blocked;
   }
-
-  out.updateAvailable = compareVersions(latest, current) > 0;
-  if (out.updateAvailable && mode === 'installer') {
-    const releases = await updateFetchJson(`https://api.github.com/repos/${UPDATE_REPO}/releases?per_page=20`);
-    out.asset = pickReleaseAsset(releases, latest);
-    if (!out.asset) out.blocked = `main is at ${latest}, but no installer for it has been published yet.`;
-  }
+  out.bootstrap = bs;
+  out.installer = inst;
+  // While running main's source, a newer installer only refreshes the fallback — it is
+  // offered, but it doesn't make this copy out of date.
+  out.updateAvailable = bs.newer || (!runningSource && inst.newer);
   return out;
 }
 
 ipcMain.handle('update:check', wrap(updateCheck));
 
-ipcMain.handle('update:install', wrap(async () => {
+ipcMain.handle('update:install', wrap(async (_, opts) => {
+  const method = opts && opts.method;
   const info = await updateCheck();
+  if (info.mode === 'source') return updateInstallClone(info);
+  if (info.mode !== 'app') throw new Error('This build cannot update itself. Download the latest release from ' + UPDATE_RELEASES_PAGE);
+  if (method === 'bootstrap') return updateInstallBootstrap(info);
+  if (method === 'installer') return updateInstallInstaller(info);
+  throw new Error('Choose how to update: from main, or with the installer.');
+}));
+
+// Back to the installed code: forget the current source (its files stay until the next
+// update prunes them) and relaunch.
+ipcMain.handle('update:useInstalled', wrap(async () => {
+  const boot = bootInfo();
+  if (boot.method !== 'source') throw new Error('GitGood is already running the installed version.');
+  const s = sboot.readBootState(boot.root);
+  s.current = null;
+  sboot.writeBootState(boot.root, s);
+  setTimeout(() => { app.relaunch(); app.exit(0); }, 400);
+  return { relaunching: true, version: boot.shellVersion };
+}));
+
+async function updateInstallClone(info) {
   if (!info.updateAvailable) throw new Error(`GitGood ${info.current} is already the latest.`);
   if (info.blocked) throw new Error(info.blocked);
-  const { spawn, execFile } = require('child_process');
-
-  if (info.mode === 'source') {
-    // A progress-reporting instance for the pull only, relabelled so the About panel's bar
-    // (which listens for method 'Update') shows it as one step of the update.
-    const g = simpleGit({
-      baseDir: app.getAppPath(), ...SG_OPTS,
-      progress({ stage, progress, processed, total }) {
-        emitOpProgress({ method: 'Update', stage: `Pulling main (${stage})`, progress, processed, total, active: true });
-      }
-    });
-    const before = (await g.revparse(['HEAD'])).trim();
-    emitOpProgress({ method: 'Update', stage: 'Pulling main' });
-    // --ff-only: a clone with local commits on main is refused rather than merged into.
-    await g.raw(['pull', '--ff-only', UPDATE_GIT_URL, 'main']);
-    const after = (await g.revparse(['HEAD'])).trim();
-    const depsMoved = (await g.raw(['diff', '--name-only', before, after, '--', 'package.json', 'package-lock.json'])).trim();
-    if (depsMoved) {
-      emitOpProgress({ method: 'Update', stage: 'npm install' });
-      await new Promise((resolve, reject) => {
-        const p = spawn('npm', ['install'], { cwd: app.getAppPath(), shell: true, windowsHide: true });
-        let err = '';
-        p.stderr.on('data', d => { err = (err + d).slice(-4000); });
-        p.on('error', reject);
-        p.on('close', code => code === 0 ? resolve()
-          : reject(new Error('The source was updated, but npm install failed. Run it by hand, then restart GitGood.\n\n' + err)));
-      });
+  const { spawn } = require('child_process');
+  // A progress-reporting instance for the pull only, relabelled so the About panel's bar
+  // (which listens for method 'Update') shows it as one step of the update.
+  const g = simpleGit({
+    baseDir: app.getAppPath(), ...SG_OPTS,
+    progress({ stage, progress, processed, total }) {
+      emitOpProgress({ method: 'Update', stage: `Pulling main (${stage})`, progress, processed, total, active: true });
     }
-    emitOpProgress({ active: false, done: true });
-    setTimeout(() => { app.relaunch(); app.exit(0); }, 600);
-    return { mode: 'source', version: info.latest, relaunching: true };
+  });
+  const before = (await g.revparse(['HEAD'])).trim();
+  emitOpProgress({ method: 'Update', stage: 'Pulling main' });
+  // --ff-only: a clone with local commits on main is refused rather than merged into.
+  await g.raw(['pull', '--ff-only', UPDATE_GIT_URL, 'main']);
+  const after = (await g.revparse(['HEAD'])).trim();
+  const depsMoved = (await g.raw(['diff', '--name-only', before, after, '--', 'package.json', 'package-lock.json'])).trim();
+  if (depsMoved) {
+    emitOpProgress({ method: 'Update', stage: 'npm install' });
+    await new Promise((resolve, reject) => {
+      const p = spawn('npm', ['install'], { cwd: app.getAppPath(), shell: true, windowsHide: true });
+      let err = '';
+      p.stderr.on('data', d => { err = (err + d).slice(-4000); });
+      p.on('error', reject);
+      p.on('close', code => code === 0 ? resolve()
+        : reject(new Error('The source was updated, but npm install failed. Run it by hand, then restart GitGood.\n\n' + err)));
+    });
+  }
+  emitOpProgress({ active: false, done: true });
+  setTimeout(() => { app.relaunch(); app.exit(0); }, 600);
+  return { mode: 'source', version: info.latest, relaunching: true };
+}
+
+// Fetch → export → point state.json at it → relaunch. The bare repository keeps the last
+// fetch, so the next one transfers only what changed. The running version's folder is
+// never touched; the export goes to a temp folder renamed into place only once complete,
+// so an interrupted update leaves the old state.json pointing at a whole tree.
+async function updateInstallBootstrap(info) {
+  const bs = info.bootstrap;
+  if (bs.blocked) throw new Error(bs.blocked);
+  if (!bs.newer) throw new Error(`Already running the latest of main (${info.remoteShort}).`);
+  const boot = bootInfo();
+  const root = boot.root;
+  if (!root) throw new Error('The bootstrap is not active in this copy.');
+  const repo = path.join(root, 'repo.git');
+  fs.mkdirSync(root, { recursive: true });
+  if (!fs.existsSync(path.join(repo, 'HEAD'))) {
+    fs.rmSync(repo, { recursive: true, force: true });
+    await simpleGit({ baseDir: root, ...SG_OPTS }).raw(['init', '--bare', '--quiet', repo]);
+  }
+  const g = simpleGit({
+    baseDir: repo, ...SG_OPTS,
+    progress({ stage, progress, processed, total }) {
+      emitOpProgress({ method: 'Update', stage: `Fetching main (${stage})`, progress, processed, total, active: true });
+    }
+  });
+  emitOpProgress({ method: 'Update', stage: 'Fetching main' });
+  // `+`: with --depth 1 the new commit's parent isn't present, so git can't prove a
+  // fast-forward. A private ref, so nothing reads it as a branch.
+  await g.raw(['fetch', '--depth', '1', '--no-tags', UPDATE_GIT_URL, '+refs/heads/main:refs/gitgood/main']);
+  const sha = (await g.revparse(['refs/gitgood/main'])).trim();
+  const short = sha.slice(0, 7);
+
+  // main may have moved since the check, so the commit actually fetched is judged again.
+  let pkg;
+  try { pkg = JSON.parse(await g.raw(['show', `${sha}:package.json`])); }
+  catch (e) { throw new Error(`main @${short} has no readable package.json, so it was not installed.`); }
+  const compat = sboot.sourceCompatibility(updateShellPkg(), pkg, process.versions.electron);
+  if (!compat.ok) throw new Error(`main moved since the check, and @${short} ${compat.reason.replace(/^main /, '')}. Use the installer instead.`);
+  const state = sboot.readBootState(root);
+  if (state.bad.includes(sha)) throw new Error(`main @${short} failed to start on this machine before. Waiting for a newer commit.`);
+  if (boot.method === 'source' && sha === boot.commit) throw new Error(`Already running the latest of main (${short}).`);
+
+  const name = sboot.versionDirName(sha);
+  const versions = path.join(root, 'versions');
+  const dir = path.join(versions, name);
+  fs.mkdirSync(versions, { recursive: true });
+  if (!fs.existsSync(path.join(dir, sboot.SOURCE_MARKER))) {
+    emitOpProgress({ method: 'Update', stage: 'Unpacking' });
+    const tmp = path.join(versions, `${name}.tmp-${process.pid}`);
+    const tarFile = path.join(root, `export-${process.pid}.tar`);
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp);
+    try {
+      await g.raw(['archive', '--format=tar', '-o', tarFile, sha]);
+      const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
+      await new Promise((resolve, reject) => require('child_process').execFile(tar, ['-xf', tarFile, '-C', tmp], { windowsHide: true },
+        (err, _o, stderr) => err ? reject(new Error('Could not unpack main: ' + (stderr || err.message))) : resolve()));
+      if (!fs.existsSync(path.join(tmp, sboot.SOURCE_MAIN))) throw new Error(`main @${short} has no ${sboot.SOURCE_MAIN.replace(/\\/g, '/')}, so it was not installed.`);
+      fs.writeFileSync(path.join(tmp, sboot.SOURCE_MARKER), JSON.stringify({ commit: sha, version: pkg.version, fetchedAt: new Date().toISOString() }, null, 2));
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.renameSync(tmp, dir);
+    } catch (e) {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      throw e;
+    } finally {
+      fs.rmSync(tarFile, { force: true });
+    }
   }
 
-  if (info.mode !== 'installer') throw new Error('This build cannot update itself. Download the latest release from ' + UPDATE_RELEASES_PAGE);
+  state.current = { commit: sha, version: String(pkg.version || ''), dir: `versions/${name}`, fetchedAt: new Date().toISOString() };
+  state.attempts = { [sha]: 0 };
+  state.bad = state.bad.slice(-20);
+  sboot.writeBootState(root, state);
+
+  try {
+    const running = boot.method === 'source' && boot.sourceDir ? path.basename(boot.sourceDir) : null;
+    for (const n of sboot.versionDirsToPrune(fs.readdirSync(versions), [name, running])) {
+      try { fs.rmSync(path.join(versions, n), { recursive: true, force: true }); } catch (e) { /* next time */ }
+    }
+  } catch (e) { /* pruning is housekeeping */ }
+
+  emitOpProgress({ method: 'Update', stage: 'Restarting', progress: 100 });
+  emitOpProgress({ active: false, done: true });
+  setTimeout(() => { app.relaunch(); app.exit(0); }, 600);
+  return { mode: 'bootstrap', version: String(pkg.version || ''), commitShort: short, relaunching: true };
+}
+
+async function updateInstallInstaller(info) {
+  const inst = info.installer;
+  if (!inst.newer) throw new Error(`The installed app is already v${info.shellVersion}.`);
+  if (inst.blocked) throw new Error(inst.blocked);
+  const { spawn, execFile } = require('child_process');
 
   // Download the release asset, reporting on the shared op:progress channel. fetch()
   // follows GitHub's redirect to its download host; no token is involved.
-  const a = info.asset;
+  const a = inst.asset;
   const dir = path.join(os.tmpdir(), 'gitgood-update', info.latest);
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
@@ -9518,14 +9701,20 @@ ipcMain.handle('update:install', wrap(async () => {
     if (!installer) throw new Error(`No installer was found inside ${a.name}.`);
   }
   emitOpProgress({ method: 'Update', stage: 'Starting installer', progress: 100 });
-  emitOpProgress({ active: false, done: true });
 
   // The installer replaces files this process holds open, so GitGood quits once it has
   // started it. Detached + unref, or quitting would take the installer down with it.
-  spawn(installer, [], { detached: true, stdio: 'ignore' }).unref();
+  // Quit only after 'spawn': if antivirus or policy refuses to start it, GitGood used to
+  // close anyway and leave nothing on screen.
+  await new Promise((resolve, reject) => {
+    const p = spawn(installer, [], { detached: true, stdio: 'ignore' });
+    p.once('error', (e) => reject(new Error(`The installer could not be started (${e.code || e.message}). It is saved at ${installer} — run it by hand.`)));
+    p.once('spawn', () => { p.unref(); resolve(); });
+  });
+  emitOpProgress({ active: false, done: true });
   setTimeout(() => app.quit(), 800);
   return { mode: 'installer', version: info.latest };
-}));
+}
 
 // ============================================
 // DEBUG TOOLKIT (commit menu → "Debug from here…")
