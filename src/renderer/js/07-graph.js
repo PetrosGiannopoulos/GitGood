@@ -336,6 +336,10 @@ function refreshThemeLaneColors() {
       LANE_COLORS = ['#d4302f', '#c8a04a', '#6b8e23', '#6db8c4', '#b388d3', '#e2a5a5', '#c1d9a0', '#efe6d4'];
       return;
     }
+    // A theme can name its lanes outright (the gem themes do: a monochrome palette would
+    // otherwise give eight shades of grey). Comma-separated colours in --lane-colors.
+    const named = v('--lane-colors', '').split(',').map(x => x.trim()).filter(Boolean);
+    if (named.length >= 2) { LANE_COLORS = named.map(resolveColor); return; }
     const accentBright = v('--accent-bright', '#d4302f');
     const accent = v('--accent', '#b22222');
     const gold = v('--gold-accent', '#c8a04a');

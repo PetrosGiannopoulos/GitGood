@@ -428,7 +428,10 @@ const BUILTIN_THEMES = [
   { id: 'biohazard', name: 'Biohazard',       swatches: ['#030803', '#39ff14', '#d8ff00', '#e8ffd6'] },
   { id: 'sweet',     name: 'Sweet Factory',   swatches: ['#0f040b', '#ff2d96', '#ffdf3d', '#ffeaf6'] },
   { id: 'monastery', name: 'Blood Monastery', swatches: ['#faf7f0', '#c41212', '#c89400', '#1c0500'] },
-  { id: 'racing',    name: 'Racing Punk',     swatches: ['#0a0a08', '#ffe600', '#ff6a00', '#fffbe0'] }
+  { id: 'racing',    name: 'Racing Punk',     swatches: ['#0a0a08', '#ffe600', '#ff6a00', '#fffbe0'] },
+  // Gem themes (06-gems.css + 24-gem-juice.js): palettes after rare diamonds, plus the
+  // cursor/drag/resize "juice". `gem` adds html.theme-gem, which the juice module keys on.
+  { id: 'orlov',     name: 'Black Orlov',     swatches: ['#050506', '#eef1f6', '#8a919e', '#c9a6ff'], gem: true }
 ];
 // Alacritty palettes (from github.com/alacritty/alacritty-theme), generated into
 // 00-alacritty-themes.js as window.ALACRITTY_THEMES. They carry a `vars` map that is
@@ -473,7 +476,7 @@ function applyTheme(themeId) {
   const html = document.documentElement;
   // Clear every possible theme class (built-ins + the alacritty marker)
   for (const t of BUILTIN_THEMES) html.classList.remove('theme-' + t.id);
-  html.classList.remove('theme-alacritty', 'theme-hero');
+  html.classList.remove('theme-alacritty', 'theme-hero', 'theme-gem');
   for (const t of HERO_THEMES) html.classList.remove('theme-' + t.id);
 
   const alac = ALACRITTY_BY_ID[themeId];
@@ -487,6 +490,7 @@ function applyTheme(themeId) {
     injectAlacrittyVars(null);            // remove any injected vars
     html.classList.remove('theme-light');
     if (themeId && themeId !== 'crusader') html.classList.add('theme-' + themeId);
+    if (BUILTIN_THEMES.some(t => t.id === themeId && t.gem)) html.classList.add('theme-gem');
   }
 
   // A Marvel theme may be showing its comic page instead of its art (22-comic-print.js).

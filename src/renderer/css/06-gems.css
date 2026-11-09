@@ -1,0 +1,296 @@
+/* ============================================
+   GEM THEMES — palettes after rare diamonds, lit by the cursor.
+   Applied as html.theme-<gem> + html.theme-gem (applyTheme, 08-lfs-settings.js).
+   The motion half (sparkles, drag dispersion, resize glints) is 24-gem-juice.js.
+
+   The rule the whole family follows: the resting palette is calm, and colour comes
+   from *light* — a highlight that follows the cursor, and spectral "fire" that only
+   appears while something moves. A rainbow that is always on reads cheap.
+
+   Per-gem knobs (set in each gem's palette block):
+     --gem-glint      colour of the cursor highlight and hover glints
+     --gem-fire-1..5  the dispersion colours: borders while something moves, and every
+                      coloured particle 24-gem-juice.js draws (it reads these stops)
+     --lane-colors    the commit graph's lanes (refreshThemeLaneColors, 07-graph.js)
+
+   The cursor highlight uses --mx/--my in *viewport* pixels on a background layer with
+   `background-attachment: fixed`, so one pair of numbers positions the light correctly
+   on every element. They are registered non-inheriting and written by the juice module
+   only on the few chrome elements below (and the one hovered control): writing an
+   inherited property on <html> would restyle the whole document — every graph row —
+   on every mouse move.
+   ============================================ */
+
+@property --mx { syntax: '<length>'; inherits: false; initial-value: -9999px; }
+@property --my { syntax: '<length>'; inherits: false; initial-value: -9999px; }
+
+@keyframes gem-glint-sweep {
+  from { background-position: 160% 0; }
+  to   { background-position: -60% 0; }
+}
+@keyframes gem-fire-run { to { background-position: 0 300%; } }
+
+/* ---------- BLACK ORLOV — black diamond: gunmetal, platinum, all colour from fire ---------- */
+html.theme-orlov {
+  --ink-black: #050506;
+  --shadow-black: #0a0b0d;
+  --panel-black: #101114;
+  --raised-black: #181a1f;
+  --border-iron: #262930;
+  --border-bright: #6b7280;
+  --bone-white: #eef1f6;
+  --parchment: #d9dde5;
+  --parchment-dim: #aab0bc;
+  --muted-text: #6f7684;
+  --crusader-red: #c9ced8;          /* accent: platinum */
+  --crusader-red-bright: #ffffff;
+  --crusader-red-deep: #5b616d;
+  --blood: #2a2d34;
+  --gold-accent: #b9c3d6;           /* secondary: cold silver */
+  --head-pill-text: #0a0b0d;
+  --bg: var(--ink-black);
+  --bg-panel: var(--panel-black);
+  --bg-raised: var(--raised-black);
+  --text: var(--bone-white);
+  --text-dim: var(--parchment-dim);
+  --text-muted: var(--muted-text);
+  --border: var(--border-iron);
+  --border-strong: var(--border-bright);
+  --accent: var(--crusader-red);
+  --accent-bright: var(--crusader-red-bright);
+  /* Diffs keep real colour: a monochrome +/- would be unreadable. Soft, cool, distinct. */
+  --added: #5ee6b0;
+  --added-bg: rgba(94, 230, 176, 0.10);
+  --removed: #ff6b8b;
+  --removed-bg: rgba(255, 107, 139, 0.11);
+
+  /* The fire that runs through the existing animated borders (05-effects.css) — at rest
+     it is platinum, not flame. */
+  --flame-a: #c9ced8;
+  --flame-b: #ffffff;
+  --flame-c: #3a3f4a;
+
+  --gem-glint: #ffffff;
+  /* A black diamond's fire is subdued and cold — not a full rainbow. Ice blue,
+     lavender, platinum and steel, the palette's own colours split by light. */
+  --gem-fire-1: #a9bfff;   /* ice blue */
+  --gem-fire-2: #c9b8ff;   /* lavender */
+  --gem-fire-3: #eef1f6;   /* platinum */
+  --gem-fire-4: #9fdcef;   /* ice cyan */
+  --gem-fire-5: #8593b3;   /* steel */
+  /* Lanes stay distinct but in the same cold family (a warm champagne for contrast). */
+  --lane-colors: #eef1f6, #8fb4ff, #c4a8ff, #7fd6e6, #8a93a6, #a8e6d2, #6f80e0, #d8cfb8;
+}
+html.theme-orlov #welcome-screen {
+  background: radial-gradient(ellipse at top, #1d2027 0%, var(--ink-black) 58%), var(--ink-black);
+}
+html.theme-orlov ::selection { background: rgba(255, 255, 255, 0.22); color: #fff; }
+
+/* =========================== shared gem treatment =========================== */
+
+/* ---- Chrome: brilliant-cut facets, lit by the cursor ---- */
+html.theme-gem .toolbar,
+html.theme-gem .statusbar,
+html.theme-gem .tabs,
+html.theme-gem .repo-tabs,
+html.theme-gem .sidebar-header {
+  background-color: var(--bg-raised);
+  background-image:
+    radial-gradient(420px circle at var(--mx) var(--my),
+      color-mix(in srgb, var(--gem-glint) 9%, transparent), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='144' height='80'%3E%3Cg stroke='%23fff' stroke-opacity='0.018' stroke-width='0.6'%3E%3Cpolygon points='-96,0 -48,0 -24,40' fill='%23fff' fill-opacity='0.004'/%3E%3Cpolygon points='-96,0 -72,40 -24,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='-48,0 0,0 24,40' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='-48,0 -24,40 24,40' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='0,0 48,0 72,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='0,0 24,40 72,40' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='48,0 96,0 120,40' fill='%23fff' fill-opacity='0.004'/%3E%3Cpolygon points='48,0 72,40 120,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='96,0 144,0 168,40' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='96,0 120,40 168,40' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='144,0 192,0 216,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='144,0 168,40 216,40' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='192,0 240,0 264,40' fill='%23fff' fill-opacity='0.004'/%3E%3Cpolygon points='192,0 216,40 264,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='-72,40 -24,40 -96,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='-24,40 -96,80 -48,80' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='-24,40 24,40 -48,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='24,40 -48,80 0,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='24,40 72,40 0,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='72,40 0,80 48,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='72,40 120,40 48,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='120,40 48,80 96,80' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='120,40 168,40 96,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='168,40 96,80 144,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='168,40 216,40 144,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='216,40 144,80 192,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='216,40 264,40 192,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='264,40 192,80 240,80' fill='%23fff' fill-opacity='0.017'/%3E%3C/g%3E%3C/svg%3E"),
+    linear-gradient(180deg, rgba(255,255,255,0.045), rgba(0,0,0,0.35));
+  background-attachment: fixed, scroll, scroll;
+  background-size: auto, 144px 80px, auto;
+  background-repeat: no-repeat, repeat, no-repeat;
+  background-blend-mode: normal;
+}
+html.theme-gem .statusbar,
+html.theme-gem .tabs { background-color: var(--bg-panel); }
+
+/* Toolbar edge: platinum, with a narrow band of dispersion drifting along it. */
+html.theme-gem .toolbar::after {
+  background: linear-gradient(90deg,
+    var(--flame-c) 0%, var(--flame-a) 18%, var(--flame-c) 36%,
+    var(--gem-fire-1) 44%, var(--gem-fire-2) 46.5%, var(--gem-fire-3) 49%,
+    var(--gem-fire-4) 51.5%, var(--gem-fire-5) 54%,
+    var(--flame-c) 62%, var(--flame-a) 80%, var(--flame-c) 100%);
+  background-size: 200% 100%;
+  animation: gg-flow 11s linear infinite;
+  opacity: 0.9;
+}
+html.theme-gem .statusbar::before { animation-duration: 14s; opacity: 0.5; }
+html.theme-gem .tab.active::after {
+  background: linear-gradient(90deg, transparent, var(--flame-a) 25%, var(--gem-glint) 50%, var(--flame-a) 75%, transparent);
+  background-size: 200% 100%;
+  animation: gg-flow 5s linear infinite;
+}
+html.theme-gem .tab.active { text-shadow: 0 0 10px color-mix(in srgb, var(--gem-glint) 35%, transparent); }
+
+/* While something is being dragged or resized, the whole frame catches fire. */
+html.theme-gem.gem-active .toolbar::after { animation-duration: 1.6s; opacity: 1; }
+html.theme-gem.gem-active .statusbar::before { animation-duration: 2s; opacity: 0.9; }
+
+/* ---- Buttons: polished, with the cursor's highlight on their face ----
+   The class is repeated to outrank the THEME PUNCH rule in 05-effects.css
+   (html[class*='theme-']:not(..):not(..) .btn-medieval.primary). */
+html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval {
+  background-color: var(--bg-raised);
+  background-image:
+    radial-gradient(140px circle at var(--mx) var(--my),
+      color-mix(in srgb, var(--gem-glint) 16%, transparent), transparent 70%),
+    linear-gradient(180deg, rgba(255,255,255,0.08), rgba(0,0,0,0.22));
+  background-attachment: fixed, scroll;
+  transition: transform 0.12s cubic-bezier(.3,1.6,.5,1), box-shadow 0.2s, border-color 0.2s;
+}
+html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval:hover {
+  border-color: color-mix(in srgb, var(--gem-glint) 55%, var(--border-strong));
+  transform: translateY(-1px);
+}
+html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval:active { transform: translateY(1px) scale(0.98); }
+/* Danger can't be the accent here — the accent is platinum, which reads as neutral. */
+html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval.danger {
+  border-color: color-mix(in srgb, var(--removed) 70%, transparent);
+  color: var(--removed);
+}
+
+/* Primary: a black stone in a platinum ring; the ring disperses on hover. */
+html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval.primary {
+  color: var(--bone-white);
+  border: 2px solid transparent;
+  background:
+    radial-gradient(140px circle at var(--mx) var(--my),
+      color-mix(in srgb, var(--gem-glint) 22%, transparent), transparent 70%) padding-box fixed,
+    linear-gradient(180deg, #2b2e35 0%, #0c0d10 100%) padding-box,
+    conic-gradient(from var(--gg-angle),
+      var(--flame-c), var(--flame-a), var(--flame-c), var(--flame-b), var(--flame-c)) border-box;
+  animation: gg-rotate 9s linear infinite;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--gem-glint) 14%, transparent),
+              inset 0 1px 0 rgba(255,255,255,0.16),
+              0 3px 8px rgba(0,0,0,0.5);
+}
+html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval.primary:hover {
+  background:
+    radial-gradient(140px circle at var(--mx) var(--my),
+      color-mix(in srgb, var(--gem-glint) 28%, transparent), transparent 70%) padding-box fixed,
+    linear-gradient(180deg, #33373f 0%, #101114 100%) padding-box,
+    conic-gradient(from var(--gg-angle),
+      var(--gem-fire-1), var(--gem-fire-2), var(--gem-fire-3), var(--gem-fire-4),
+      var(--gem-fire-5), var(--gem-fire-1)) border-box;
+  animation-duration: 2.4s;
+  box-shadow: 0 0 22px color-mix(in srgb, var(--gem-glint) 22%, transparent),
+              inset 0 1px 0 rgba(255,255,255,0.2),
+              0 4px 10px rgba(0,0,0,0.55);
+}
+
+html.theme-gem .tool-btn,
+html.theme-gem .mini-btn {
+  background-image: radial-gradient(90px circle at var(--mx) var(--my),
+    color-mix(in srgb, var(--gem-glint) 14%, transparent), transparent 70%);
+  background-attachment: fixed;
+}
+
+/* ---- Rows: one glint sweeps across on hover, like light crossing a facet ---- */
+html.theme-gem .sidebar-item:hover,
+html.theme-gem .file-item:hover,
+html.theme-gem .cfile-item:hover,
+html.theme-gem .graph-row:hover,
+html.theme-gem .recent-item:hover,
+html.theme-gem .theme-card:hover {
+  background-image: linear-gradient(105deg, transparent 38%,
+    color-mix(in srgb, var(--gem-glint) 11%, transparent) 50%, transparent 62%);
+  background-size: 260% 100%;
+  background-repeat: no-repeat;
+  animation: gem-glint-sweep 0.65s cubic-bezier(.2,.7,.3,1) 1 both;
+}
+
+/* ---- Pane resizers: a hairline of platinum that turns to fire while dragged ---- */
+html.theme-gem .pane-resizer:hover::before {
+  background: var(--flame-a);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--gem-glint) 50%, transparent);
+}
+html.theme-gem .pane-resizer.resizing::before {
+  width: 2px;
+  background: linear-gradient(180deg,
+    var(--gem-fire-1), var(--gem-fire-2), var(--gem-fire-3), var(--gem-fire-4),
+    var(--gem-fire-5), var(--gem-fire-1));
+  background-size: 100% 300%;
+  animation: gem-fire-run 1.2s linear infinite;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--gem-glint) 60%, transparent),
+              0 0 22px color-mix(in srgb, var(--gem-fire-4) 35%, transparent);
+}
+
+/* ---- Commit graph: the HEAD stone and the selection glow; the rest stay matte
+   (a filter on every dot would cost a lot on a large history) ---- */
+html.theme-gem .graph-svg circle.commit-dot.head,
+html.theme-gem .graph-row.selected .commit-dot {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--gem-glint) 70%, transparent));
+}
+html.theme-gem .commit-dot { filter: none; }
+
+/* ---- Selection reads as polished metal, not paint ---- */
+html.theme-gem .graph-row.selected,
+html.theme-gem .commit-row.selected {
+  background: color-mix(in srgb, var(--gem-glint) 7%, var(--bg-panel));
+  box-shadow: inset 2px 0 0 var(--accent-bright),
+              inset 0 1px 0 rgba(255,255,255,0.04);
+}
+html.theme-gem .sidebar-item.active,
+html.theme-gem .sidebar-item.current {
+  background-color: color-mix(in srgb, var(--gem-glint) 8%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-bright);
+}
+
+/* ---- Modals: cut-glass top edge ---- */
+html.theme-gem .modal {
+  border-color: color-mix(in srgb, var(--gem-glint) 18%, var(--border));
+  box-shadow: 0 24px 60px rgba(0,0,0,0.7),
+              0 0 0 1px rgba(255,255,255,0.03),
+              inset 0 1px 0 rgba(255,255,255,0.14);
+}
+
+/* ---- Scrollbars: brushed platinum ---- */
+html.theme-gem ::-webkit-scrollbar-thumb {
+  background: linear-gradient(90deg, #3a3f4a, #5b616d 50%, #3a3f4a);
+  border-radius: 6px;
+}
+html.theme-gem ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(90deg, #5b616d, #aab0bc 50%, #5b616d);
+}
+
+/* ---- Depth: a soft vignette pulls the eye to the centre ---- */
+html.theme-gem .workspace { position: relative; }
+html.theme-gem .workspace::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  mix-blend-mode: multiply;
+  background: radial-gradient(125% 135% at 50% 35%, transparent 60%, rgba(0,0,0,0.45) 100%);
+}
+
+/* The juice module's canvas: above everything, catches nothing. */
+#gem-juice-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 10040;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-gem .toolbar::after,
+  html.theme-gem .statusbar::before,
+  html.theme-gem .tab.active::after,
+  html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval.primary,
+  html.theme-gem .pane-resizer.resizing::before,
+  html.theme-gem .sidebar-item:hover,
+  html.theme-gem .file-item:hover,
+  html.theme-gem .cfile-item:hover,
+  html.theme-gem .graph-row:hover,
+  html.theme-gem .recent-item:hover,
+  html.theme-gem .theme-card:hover { animation: none; }
+}
