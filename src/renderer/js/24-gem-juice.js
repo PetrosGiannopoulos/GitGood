@@ -5,12 +5,28 @@
 //
 //   trigger                      persona hook
 //   ---------------------------  ------------------------------------------------------
-//   a fast cursor flick          flick(x, y, vx, vy)   — once per `flickSpacing` px
 //   a press on a control         press(x, y, big)      — big for primary buttons / drops
 //   a drag (DnD, graph dot)      trail(x, y, nx, ny, n) — once per `trailSpacing` px
 //   a pane resize                flick() along the divider, then a glint + press()
 //   a success toast              success(x, y)         — every successful git operation
 //   an error toast               error(x, y)
+//
+// Plain cursor movement leaves no particles (tried: the user found the trail distracting);
+// it only carries the light — on the chrome, and *behind* the commit graph.
+//
+// Git operations get physical reactions, shared by every gem and coloured by it. They come
+// from the 'gitgood:op' event withLoading() dispatches (01-core.js), keyed on its label:
+//   pull      → an earthquake: the window shakes, seismic wavefronts spread from where you
+//               clicked, a seismograph trace runs along the status bar
+//   push      → a take-off: engines rumble while it runs, then a rocket streak lifts off
+//               and the window kicks up; a failed push sputters and smokes
+//   fetch     → sonar pings while it runs
+//   commit    → a stamp: a downward thump and a puff of dust
+//   checkout  → a warp: speed lines and a sideways slide
+//   merge / cherry-pick / rebase → two streams converge and burst
+//   stash     → an implosion; popping one → the burst back out
+// Window shakes are CSS (`translate` on #app-screen, compositor-only) and last under a
+// second; the push rumble is capped so a slow push is not a slow earthquake.
 //
 // The personas come from the stones themselves (each is described where it is defined):
 // Black Orlov's facets, the Hope's red phosphorescence, Pink Star's petals, the
@@ -29,8 +45,8 @@
 //     cooling runs on a 250 ms timer, not on frames.
 //   - A hard particle cap (MAX_PARTS); soft glows are cached sprites, never per-frame
 //     gradients; fire colours are quantised so the sprite cache stays small.
-//   - Nothing spawns from the cursor over text people read closely (diffs, editors, inputs,
-//     the terminal). Window-wide effects (success) are brief and low-alpha.
+//   - Plain cursor movement spawns nothing at all. Window-wide effects (success, a pull's
+//     quake, a checkout's warp) are brief and low-alpha, and shakes stay under 5 px.
 //   - The cursor highlight is two CSS custom properties written on a handful of chrome
 //     elements and the one hovered control, never on <html>: --mx/--my are registered
 //     non-inheriting, and an inherited write at the root would restyle every graph row on
@@ -47,13 +63,14 @@
 
   // Chrome that carries the cursor highlight (background-attachment: fixed in 06-gems.css).
   const LIT_SEL = '.toolbar, .statusbar, .tabs, .repo-tabs, .sidebar-header';
+  // Scroll containers lit from *behind* their content. A fixed-attachment background on a
+  // scroll container repaints on every scroll, so these get element-local coordinates
+  // (--lx/--ly) on an ordinary background instead, which stays put while the rows scroll.
+  const LOCAL_LIT_SEL = '#graph-container, #graph-detail';
   // Controls that get the highlight on their own face while hovered.
   const HOT_SEL = '.btn-medieval, .tool-btn, .mini-btn';
   // Things that react to a press.
   const PRESS_SEL = '.btn-medieval, .tool-btn, .mini-btn, .tab, .theme-card, .sidebar-item, .recent-item';
-  // Where the cursor's particles would get in the way of reading.
-  const QUIET_SEL = 'textarea, input, select, pre, code, .diff-line, .dsplit-side, .dsplit-row, ' +
-                    '.cr-hunk, .terminal-overlay, .xterm, .smartdiff';
   const RESIZER_SEL = '.pane-resizer';
 
   const MAX_PARTS = 420;
@@ -78,9 +95,10 @@
   let persona = null;
 
   // Cursor
-  let mx = -9999, my = -9999, lastX = 0, lastY = 0, lastT = 0, speed = 0, flickAcc = 0;
+  let mx = -9999, my = -9999, lastX = 0, lastY = 0, lastT = 0, speed = 0;
+  let lastPress = null;       // { x, y, t } — where an operation's effect starts from
   let lightDirty = false;
-  let lit = [], litAt = 0;
+  let lit = [], litAt = 0, localLit = [];
   let hot = null;
 
   // Interactions
@@ -234,7 +252,10 @@
     if (canvas) canvas.remove();
     canvas = ctx = null;
     for (const el of lit) clearLight(el);
-    lit = [];
+    for (const el of localLit) clearLight(el);
+    lit = []; localLit = [];
+    for (const c of SHAKES) html.classList.remove(c);
+    stopOpLoops();
     if (hot) clearLight(hot);
     hot = null;
     mode = null; resizer = null; pressDown = null;
@@ -267,16 +288,25 @@
   function clearLight(el) {
     el.style.removeProperty('--mx');
     el.style.removeProperty('--my');
+    el.style.removeProperty('--lx');
+    el.style.removeProperty('--ly');
   }
 
   function writeLight(t) {
     if (t - litAt > 700) {                  // chrome is re-rendered now and then; re-collect
       litAt = t;
       lit = Array.from(document.querySelectorAll(LIT_SEL));
+      localLit = Array.from(document.querySelectorAll(LOCAL_LIT_SEL));
     }
+    // Read every rect before writing anything, so the frame never forces a layout mid-write.
+    const rects = localLit.map(el => el.getBoundingClientRect());
     const x = mx + 'px', y = my + 'px';
     for (const el of lit) { el.style.setProperty('--mx', x); el.style.setProperty('--my', y); }
     if (hot) { hot.style.setProperty('--mx', x); hot.style.setProperty('--my', y); }
+    localLit.forEach((el, i) => {
+      el.style.setProperty('--lx', (mx - rects[i].left) + 'px');
+      el.style.setProperty('--ly', (my - rects[i].top) + 'px');
+    });
   }
 
   function frame(t) {
@@ -667,6 +697,59 @@
         drawSprite(smoke, p.x, p.y, p.r0 + (p.r1 - p.r0) * easeOut(k), Math.sin(Math.PI * k) * p.a);
         break;
       }
+      case 'wave': {
+        // A seismic wavefront: a ring whose edge trembles as it spreads.
+        const r = p.r * easeOut(k);
+        const a = (1 - k) * p.a;
+        if (a <= 0.004) break;
+        ctx.strokeStyle = `rgba(${p.rgb || glint},${a})`;
+        ctx.lineWidth = 1.4 * (1 - k * 0.5);
+        ctx.beginPath();
+        for (let i = 0; i <= 72; i++) {
+          const ang = (i / 72) * TAU;
+          const rr = r + Math.sin(ang * 14 + t * 0.03 + p.ph) * 4 * (1 - k);
+          const x = p.x + Math.cos(ang) * rr, y = p.y + Math.sin(ang) * rr;
+          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        ctx.stroke();
+        break;
+      }
+      case 'seismo': {
+        // A seismograph trace along the status bar's top edge, loudest under the epicentre.
+        const a = (1 - k) * 0.75;
+        const amp = 9 * Math.pow(1 - k, 1.6);
+        ctx.strokeStyle = `rgba(${p.rgb || glint},${a})`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        for (let x = 0; x <= W; x += 4) {
+          const near = Math.exp(-Math.abs(x - p.ox) / 380);
+          const y = p.y + Math.sin(x * 0.11 - t * 0.045) * amp * (0.25 + 0.75 * near)
+                        + Math.sin(x * 0.37 + t * 0.02) * amp * 0.25 * near;
+          x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        ctx.stroke();
+        break;
+      }
+      case 'home': {
+        // A particle drawn to a point (merge streams, a stash imploding).
+        const e = k * k;
+        const x = p.x0 + (p.tx - p.x0) * e + Math.sin(k * Math.PI) * (p.bend || 0);
+        const y = p.y0 + (p.ty - p.y0) * e;
+        drawStar(x, y, p.size, Math.min(1, k * 4) * (0.6 + 0.4 * (1 - k)), p.rgb || glint);
+        break;
+      }
+      case 'speed': {
+        // A speed line crossing the window (checkout's warp).
+        const x = p.x0 + (p.x1 - p.x0) * easeOut(k);
+        const a = Math.sin(Math.PI * k) * p.a;
+        const g = ctx.createLinearGradient(x - p.len, 0, x, 0);
+        g.addColorStop(0, `rgba(${p.rgb || glint},0)`);
+        g.addColorStop(1, `rgba(${p.rgb || glint},${a})`);
+        ctx.strokeStyle = g;
+        ctx.lineWidth = p.w;
+        ctx.beginPath(); ctx.moveTo(x - p.len, p.y); ctx.lineTo(x, p.y); ctx.stroke();
+        break;
+      }
       case 'line': {
         // A glint running down a resizer after release.
         const e = 1 - Math.pow(1 - k, 2);
@@ -715,7 +798,7 @@
 
   // BLACK ORLOV is the base: white scintillation, crisp facet diagrams, a light sweep.
   const BASE = {
-    flickSpacing: 26, flickSpeed: 0.9, trailSpacing: 9,
+    trailSpacing: 9,
     flick(x, y, vx, vy) {
       spark(x, y, { rgb: Math.random() < 0.3 ? fireRgb(Math.random()) : null, vx: vx * 0.05, vy: vy * 0.05 });
     },
@@ -770,9 +853,8 @@
     },
 
     // PINK STAR — the romantic one. Petals unfold where you click, soft bokeh drifts up
-    // behind the cursor, and success is a slow rain of petals.
+    // from a dragged divider, and success is a slow rain of petals.
     pinkstar: {
-      flickSpacing: 30,
       flick(x, y, vx, vy) {
         push({ kind: 'bokeh', x, y, vx: vx * 0.015, vy: -rand(0.01, 0.03), size: rand(3, 7),
                a: rand(0.3, 0.5), rgb: fireRgb(Math.random()), life: rand(800, 1300) });
@@ -829,7 +911,7 @@
     },
 
     // DRESDEN GREEN — green from natural radiation, kept for centuries in the Green Vault.
-    // The cursor sheds flickering radiant motes, a drag grows a curling vine with leaves,
+    // A resized divider sheds flickering radiant motes, a drag grows a curling vine,
     // clicks spiral leaves outward, and success is an aurora across the top of the window.
     dresden: {
       trailSpacing: 6,
@@ -865,11 +947,11 @@
       },
     },
 
-    // ARGYLE VIOLET — from the Australian outback, under its night sky. Fast cursor moves
-    // leave stars that join into constellations, a click is a puff of nebula, and success
+    // ARGYLE VIOLET — from the Australian outback, under its night sky. A drag or a
+    // resize leaves stars that join into constellations, a click is a puff of nebula, and success
     // is a shooting star.
     argyle: {
-      flickSpacing: 30, trailSpacing: 16,
+      trailSpacing: 16,
       flick(x, y) {
         const prev = st.lastStar && !st.lastStar.dead && Math.hypot(st.lastStar.x - x, st.lastStar.y - y) < 170 ? st.lastStar : null;
         st.lastStar = push({ kind: 'cstar', x: x + rand(-8, 8), y: y + rand(-8, 8), vx: 0, vy: 0, size: rand(1.3, 2.5),
@@ -894,7 +976,7 @@
     },
 
     // GOLDEN JUBILEE — the largest faceted diamond, named for a king's jubilee. Gold
-    // glitter falls from the cursor, a click is a sunburst, a drag leaves falling gold dust,
+    // glitter falls from a resized divider, a click is a sunburst, a drag leaves falling gold dust,
     // and success is fireworks.
     jubilee: {
       flick(x, y, vx, vy) {
@@ -959,7 +1041,7 @@
     },
 
     // CHAMELEON — the diamond whose colour changes when heated. Here, *you* are the heat:
-    // fast moves, clicks and drags warm the whole theme from olive towards gold, and it
+    // clicks, drags, resizes and successes warm the whole theme from olive towards gold, and it
     // cools back over about ten seconds of rest. Embers rise, coloured by the current heat.
     chameleon: {
       flick(x, y, vx) {
@@ -1030,17 +1112,7 @@
       }
       if (mode === 'press-drag') return trailTo(dx, dy, dist);
     }
-
-    // A flick: only a quick movement, and never over text being read.
-    if (speed < persona.flickSpeed) { flickAcc = 0; return; }
-    const tgt = e.target;
-    if (tgt && tgt.closest && tgt.closest(QUIET_SEL)) return;
-    flickAcc += dist;
-    while (flickAcc >= persona.flickSpacing) {
-      flickAcc -= persona.flickSpacing;
-      const f = flickAcc / Math.max(dist, 1);
-      persona.flick(mx - dx * f + rand(-6, 6), my - dy * f + rand(-6, 6), -dx / dt, -dy / dt);
-    }
+    // Plain movement: light only, no particles (see the header).
   }
 
   function onPointerOver(e) {
@@ -1106,6 +1178,7 @@
       return;
     }
     pressDown = { x: e.clientX, y: e.clientY, onDot: !!tgt.closest('circle.commit-dot') };
+    lastPress = { x: e.clientX, y: e.clientY, t: now() };
 
     if (!particlesAllowed()) return;
     const pressed = tgt.closest(PRESS_SEL);
@@ -1129,6 +1202,194 @@
       if (particlesAllowed()) persona.press(e.clientX, e.clientY, true);
     }
     pressDown = null;
+  }
+
+  // ---------------------------------------------------------------- git operations
+
+  const SHAKES = ['gem-quake', 'gem-rumble', 'gem-liftoff', 'gem-thump', 'gem-swoosh', 'gem-sputter'];
+  const shakeTimers = {};
+  // Shake the app (06-gems.css animates `translate` on #app-screen). Removing and re-adding
+  // in the next frame restarts the animation without forcing a layout.
+  function shake(cls, ms) {
+    if (reduceMQ.matches) return;
+    clearTimeout(shakeTimers[cls]);
+    html.classList.remove(cls);
+    requestAnimationFrame(() => {
+      if (!on) return;
+      html.classList.add(cls);
+      shakeTimers[cls] = setTimeout(() => html.classList.remove(cls), ms);
+    });
+  }
+
+  function opKind(message) {
+    const m = String(message || '');
+    if (/^(Pulling|LFS pull)/.test(m)) return 'pull';
+    if (/^(Pushing|Force-pushing)/.test(m)) return 'push';
+    if (/^(Fetching|LFS fetch)/.test(m)) return 'fetch';
+    if (/^(Committing|Amending|Combining commits)/.test(m)) return 'commit';
+    if (/^(Checking out|Switching to|Returning to)/.test(m)) return 'checkout';
+    if (/^(Merging|Cherry-picking|Rebasing)/.test(m)) return 'merge';
+    if (/^Stashing/.test(m)) return 'stash';
+    if (/^(Popping|Applying)/.test(m) && /stash/i.test(m)) return 'unstash';
+    return null;
+  }
+
+  // Where an operation's effect starts: the control that was just pressed, else the top
+  // of the window (an operation started from a keyboard shortcut or the palette).
+  function origin() {
+    if (lastPress && now() - lastPress.t < 4000) return { x: lastPress.x, y: lastPress.y };
+    return { x: W / 2, y: 44 };
+  }
+
+  // Loops that run while an operation runs (push rumble, fetch sonar), always capped.
+  const opLoops = {};
+  function stopOpLoops(kind) {
+    for (const k of kind ? [kind] : Object.keys(opLoops)) {
+      if (opLoops[k]) { clearInterval(opLoops[k].id); clearTimeout(opLoops[k].cap); delete opLoops[k]; }
+    }
+    if (!kind || kind === 'push') html.classList.remove('gem-rumble');
+  }
+  function loop(kind, everyMs, capMs, fn) {
+    stopOpLoops(kind);
+    let n = 0;
+    const id = setInterval(() => { if (!on) return stopOpLoops(kind); fn(n++); }, everyMs);
+    const cap = setTimeout(() => stopOpLoops(kind), capMs);
+    opLoops[kind] = { id, cap };
+  }
+
+  function exhaust(o, power) {
+    for (let i = 0; i < 2 * power; i++) {
+      glow(o.x + rand(-6, 6), o.y + 8, { vx: rand(-0.03, 0.03), vy: rand(0.03, 0.08), size: rand(4, 7),
+                                        a: 0.5, rgb: fireRgb(rand(0, 0.4)), life: rand(300, 500) });
+      push({ kind: 'smoke', x: o.x + rand(-8, 8), y: o.y + 12, vx: rand(-0.05, 0.05), vy: rand(0.01, 0.04),
+             r0: 4, r1: rand(14, 24), a: blend === 'lighter' ? 0.16 : 0.12, life: rand(600, 900) });
+    }
+  }
+
+  const OPS = {
+    pull: {
+      // P-wave: the faint first arrival while the transfer runs.
+      start(o) { push({ kind: 'wave', x: o.x, y: o.y, r: 90, a: 0.35, ph: rand(0, TAU), life: 900 }); },
+      // The S-wave: the quake.
+      ok(o) {
+        shake('gem-quake', 800);
+        for (let i = 0; i < 4; i++) {
+          push({ kind: 'wave', x: o.x, y: o.y, r: Math.max(W, H) * (0.45 + i * 0.12), a: 0.42 - i * 0.07,
+                 rgb: fireRgb(i / 4), ph: rand(0, TAU), life: 1300 + i * 120, delay: i * 130 });
+        }
+        const sb = document.querySelector('.statusbar');
+        const y = sb ? sb.getBoundingClientRect().top : H - 26;
+        push({ kind: 'seismo', ox: o.x, y, rgb: fireRgb(0.2), life: 1500 });
+      },
+      fail(o) { shake('gem-sputter', 450); },
+    },
+    push: {
+      // Engines spooling: a rumble and exhaust at the button, capped at 1.4 s.
+      start(o) {
+        // loop() first: it clears any previous push loop, and that clears the rumble class.
+        loop('push', 70, 1400, (n) => exhaust(o, n < 6 ? 1 : 2));
+        if (!reduceMQ.matches) html.classList.add('gem-rumble');
+      },
+      ok(o) {
+        stopOpLoops('push');
+        shake('gem-liftoff', 700);
+        const x1 = o.x + rand(-40, 40);
+        push({ kind: 'streak', x0: o.x, y0: o.y, x1, y1: -60, life: 900 });
+        for (let i = 0; i < 14; i++) {                      // the smoke ring at the pad
+          const a = rand(0, Math.PI), v = rand(0.06, 0.16);
+          push({ kind: 'smoke', x: o.x, y: o.y + 10, vx: Math.cos(a) * v * (Math.random() < 0.5 ? -1 : 1), vy: rand(-0.01, 0.02),
+                 r0: 5, r1: rand(18, 30), a: blend === 'lighter' ? 0.2 : 0.14, life: rand(800, 1200) });
+        }
+        for (let i = 0; i < 12; i++) {                      // the burn trail behind the streak
+          const f = i / 12;
+          glow(o.x + (x1 - o.x) * f * 0.4, o.y - (o.y + 60) * f * 0.4, { size: rand(5, 9), a: 0.45,
+               rgb: fireRgb(f * 0.5), life: rand(400, 700), delay: i * 30 });
+        }
+      },
+      // The engines sputter out.
+      fail(o) {
+        stopOpLoops('push');
+        shake('gem-sputter', 450);
+        for (let i = 0; i < 5; i++) {
+          push({ kind: 'smoke', x: o.x + rand(-10, 10), y: o.y + rand(-4, 8), vx: rand(-0.02, 0.02), vy: -rand(0.01, 0.03),
+                 r0: 5, r1: rand(20, 34), a: blend === 'lighter' ? 0.24 : 0.16, life: rand(900, 1400), delay: i * 90 });
+        }
+      },
+    },
+    fetch: {
+      start(o) {
+        const ping = () => {
+          ring(o.x, o.y, { r: 70, w: 1.2, a: 0.5, rgb: fireRgb(0.1), life: 1000 });
+          ring(o.x, o.y, { r: 40, w: 1, a: 0.35, rgb: fireRgb(0.3), life: 800, delay: 120 });
+        };
+        ping();
+        loop('fetch', 850, 3500, ping);
+      },
+      ok(o) { stopOpLoops('fetch'); ring(o.x, o.y, { r: 110, w: 1.6, a: 0.55, rgb: glint, life: 900 }); },
+      fail() { stopOpLoops('fetch'); },
+    },
+    commit: {
+      ok(o) {
+        shake('gem-thump', 420);
+        persona.press(o.x, o.y, true);
+        for (let i = 0; i < 8; i++) {                       // dust kicked out sideways
+          const dir = i % 2 ? 1 : -1;
+          push({ kind: 'smoke', x: o.x + dir * rand(4, 14), y: o.y + rand(6, 12), vx: dir * rand(0.04, 0.1), vy: -rand(0, 0.02),
+                 r0: 3, r1: rand(12, 20), a: blend === 'lighter' ? 0.18 : 0.12, life: rand(600, 900) });
+        }
+      },
+    },
+    checkout: {
+      ok(o) {
+        shake('gem-swoosh', 520);
+        for (let i = 0; i < 14; i++) {
+          const y = rand(H * 0.08, H * 0.92);
+          push({ kind: 'speed', x0: -80, x1: W + 260, y, len: rand(120, 260), w: rand(0.8, 1.6),
+                 a: rand(0.18, 0.34), rgb: Math.random() < 0.5 ? null : fireRgb(Math.random()),
+                 life: rand(380, 560), delay: rand(0, 160) });
+        }
+      },
+    },
+    merge: {
+      ok(o) {
+        const n = 16, travel = 650;
+        for (let i = 0; i < n; i++) {
+          const left = i % 2 === 0;
+          push({ kind: 'home', x0: left ? -10 : W + 10, y0: o.y + rand(-80, 80), tx: o.x, ty: o.y,
+                 bend: rand(-60, 60), size: rand(1.6, 2.8), rgb: fireRgb(left ? 0.1 : 0.6), life: travel, delay: i * 18 });
+        }
+        setTimeout(() => { if (on) persona.press(o.x, o.y, true); }, travel + n * 18 - 120);
+      },
+    },
+    stash: {
+      ok(o) {
+        const n = 14;
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * TAU, r = rand(50, 80);
+          push({ kind: 'home', x0: o.x + Math.cos(a) * r, y0: o.y + Math.sin(a) * r, tx: o.x, ty: o.y,
+                 size: rand(1.4, 2.4), rgb: fireRgb(i / n), life: 520 });
+        }
+        setTimeout(() => { if (on) ring(o.x, o.y, { r: 14, a: 0.7, life: 300 }); }, 480);
+      },
+    },
+    unstash: {
+      ok(o) { persona.press(o.x, o.y, true); ring(o.x, o.y, { r: 60, a: 0.4, life: 700 }); },
+    },
+  };
+
+  function onOp(e) {
+    if (!on || !particlesAllowed()) return;
+    const d = e.detail || {};
+    const kind = opKind(d.message);
+    const fx = kind && OPS[kind];
+    if (!fx) return;
+    const o = origin();
+    try {
+      if (d.phase === 'start') { if (fx.start) fx.start(o); }
+      else if (d.ok === true) { if (fx.ok) fx.ok(o); }
+      else if (d.ok === false) { if (fx.fail) fx.fail(o); else stopOpLoops(kind); }
+      else stopOpLoops(kind);                     // cancelled
+    } catch (err) { /* an effect must never break an operation */ }
   }
 
   // ---------------------------------------------------------------- toasts: success / error
@@ -1175,6 +1436,7 @@
 
     new MutationObserver(sync).observe(html, { attributes: true, attributeFilter: ['class'] });
     watchToasts();
+    document.addEventListener('gitgood:op', onOp);
     sync();
   }
 

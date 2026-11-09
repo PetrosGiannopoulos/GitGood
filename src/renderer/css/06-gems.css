@@ -30,6 +30,10 @@
 
 @property --mx { syntax: '<length>'; inherits: false; initial-value: -9999px; }
 @property --my { syntax: '<length>'; inherits: false; initial-value: -9999px; }
+/* The same light in element-local pixels, for scroll containers lit from behind (the
+   commit graph): a fixed-attachment background there would repaint on every scroll. */
+@property --lx { syntax: '<length>'; inherits: false; initial-value: -9999px; }
+@property --ly { syntax: '<length>'; inherits: false; initial-value: -9999px; }
 /* Chameleon only: 0 = resting olive, 1 = heated gold. Registered so it can transition. */
 @property --chameleon-heat { syntax: '<number>'; inherits: false; initial-value: 0; }
 
@@ -702,6 +706,80 @@ html.theme-gem .toast.error.fadeout { animation: toast-out 0.25s ease-in forward
   text-transform: none;
 }
 
+/* ---- The light behind the commit graph ----
+   Painted on the scroll container's own background, under the rows, lanes and text — it
+   never sits on top of anything readable. A hovered row was an opaque panel colour, which
+   blotted the light out exactly where the cursor is, so on gems it is translucent. */
+html.theme-gem #graph-container,
+html.theme-gem #graph-detail {
+  background-image: radial-gradient(440px circle at var(--lx) var(--ly),
+    color-mix(in srgb, var(--gem-glint) 8%, transparent), transparent 70%);
+  background-repeat: no-repeat;
+}
+/* On white an 8% tint is invisible (measured: 239 → 238); the light gem needs a real one. */
+html.theme-kohinoor #graph-container,
+html.theme-kohinoor #graph-detail {
+  background-image: radial-gradient(440px circle at var(--lx) var(--ly),
+    color-mix(in srgb, var(--gem-glint) 20%, transparent), transparent 70%);
+}
+html.theme-gem .graph-row:hover:not(.selected) {
+  background-color: color-mix(in srgb, var(--bg-panel) 45%, transparent);
+}
+
+/* ---- Operations shake the window (24-gem-juice.js adds the class; `translate` on
+   #app-screen runs on the compositor). All under a second and under 5 px, so text stays
+   readable; the push rumble is capped by the juice module. ---- */
+@keyframes gem-quake {
+  0%   { translate: 0 0; }
+  8%   { translate: -4px 2px; }
+  16%  { translate: 4px -2px; }
+  26%  { translate: -3px 2px; }
+  36%  { translate: 3px -1.5px; }
+  48%  { translate: -2px 1px; }
+  62%  { translate: 1.5px -1px; }
+  78%  { translate: -0.8px 0.5px; }
+  100% { translate: 0 0; }
+}
+@keyframes gem-rumble {
+  0%   { translate: 0 0; }
+  25%  { translate: 0.8px -0.6px; }
+  50%  { translate: -0.7px 0.5px; }
+  75%  { translate: 0.6px 0.7px; }
+  100% { translate: 0 0; }
+}
+@keyframes gem-liftoff {
+  0%   { translate: 0 0; }
+  16%  { translate: 0 -5px; }
+  42%  { translate: 0 1.5px; }
+  68%  { translate: 0 -0.6px; }
+  100% { translate: 0 0; }
+}
+@keyframes gem-thump {
+  0%   { translate: 0 0; }
+  18%  { translate: 0 3px; }
+  50%  { translate: 0 -1px; }
+  100% { translate: 0 0; }
+}
+@keyframes gem-swoosh {
+  0%   { translate: 0 0; }
+  22%  { translate: -6px 0; }
+  58%  { translate: 1.5px 0; }
+  100% { translate: 0 0; }
+}
+@keyframes gem-sputter {
+  0%, 45%, 100% { translate: 0 0; }
+  12% { translate: 1.5px 0; }
+  28% { translate: -1px 0.5px; }
+  68% { translate: -1.5px -0.5px; }
+  84% { translate: 0.5px 0; }
+}
+html.theme-gem.gem-quake   #app-screen { animation: gem-quake 0.8s cubic-bezier(.3, .6, .4, 1); }
+html.theme-gem.gem-rumble  #app-screen { animation: gem-rumble 0.09s linear infinite; }
+html.theme-gem.gem-liftoff #app-screen { animation: gem-liftoff 0.7s cubic-bezier(.2, .8, .3, 1); }
+html.theme-gem.gem-thump   #app-screen { animation: gem-thump 0.42s cubic-bezier(.3, .7, .4, 1); }
+html.theme-gem.gem-swoosh  #app-screen { animation: gem-swoosh 0.52s cubic-bezier(.3, .8, .3, 1); }
+html.theme-gem.gem-sputter #app-screen { animation: gem-sputter 0.45s linear; }
+
 /* The juice module's canvas: above everything, catches nothing. */
 #gem-juice-canvas {
   position: fixed;
@@ -727,4 +805,5 @@ html.theme-gem .toast.error.fadeout { animation: toast-out 0.25s ease-in forward
   html.theme-chameleon { transition: none; }
   html.theme-moussaieff.theme-gem.theme-gem.theme-gem .btn-medieval.primary,
   html.theme-gem .toast.error { animation: none; }
+  html.theme-gem #app-screen { animation: none !important; }
 }

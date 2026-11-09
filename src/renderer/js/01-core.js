@@ -494,12 +494,21 @@ async function withLoading(message, fn) {
     const still = opProgress.current();
     setStatus(still ? still.message + '...' : fallback);
   };
+  // Announced for anything that wants to react to operations (the gem themes' juice,
+  // 24-gem-juice.js, turns a pull into a seismic wave and a push into a take-off) — so no
+  // call site needs to know who is listening. ok: true / false, or null when cancelled.
+  const announce = (phase, ok) => {
+    try { document.dispatchEvent(new CustomEvent('gitgood:op', { detail: { message, phase, ok } })); } catch (e) { /* never fail an op over a listener */ }
+  };
+  announce('start');
   try {
     const result = await fn();
     settle('Ready', false);
+    announce('end', result && result.canceled ? null : !(result && result.ok === false));
     return result;
   } catch (err) {
     settle('Failed', true);
+    announce('end', false);
     throw err;
   }
 }
