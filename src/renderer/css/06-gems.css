@@ -9,6 +9,20 @@
    colour an effect uses is drawn from the gem's own family; nothing cycles through a
    rainbow (tried on Black Orlov and rejected: it reads cheap, and off-theme).
 
+   The palettes sit on one perceptual (OKLCH) lightness ladder, Gruvbox-Material style:
+   lifted backgrounds (never black), panels a few lightness steps apart, soft text (~10.5:1,
+   not 18:1), muted mid-light accents (5–9:1) and low-contrast borders. Only the hue and the
+   amount of tint differ between gems, which is what makes them read as one family. They
+   were computed, not picked — to change a gem, move its hue/chroma and keep the ladder
+   (OKLCH lightness; C = the gem's small neutral tint unless noted):
+     background .255 · shadow .228 · panel .285 · raised .318 · border .385 / .53
+     text .865 · parchment .82 · dim .725 · muted .60
+     accent ~.74 (C .10–.135) · bright +.07 · deep −.18 · metal .74–.78 (C .01–.06)
+     added .76 C .105 H135 · removed .70 C .125 H25 · lanes .76 C .095, hues spread
+   Result on every dark gem: text 10.5:1, dim 6.5:1, muted 4.0:1, accents 5.4–9:1.
+   The light gem has its own ladder (background .945, text .36); every text colour there,
+   its syntax tokens included, is ≥ 4.2:1 — and on the added/removed line tints too.
+
    Per-gem knobs (each gem's palette block):
      --flame-a/b/c    the setting's metal: platinum, rose gold, champagne… Used by every
                       animated border here and in 05-effects.css.
@@ -58,269 +72,269 @@ html.theme-gem {
 
   --gem-blend: lighter;
   --gem-facets: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='144' height='80'%3E%3Cg stroke='%23fff' stroke-opacity='0.018' stroke-width='0.6'%3E%3Cpolygon points='-96,0 -48,0 -24,40' fill='%23fff' fill-opacity='0.004'/%3E%3Cpolygon points='-96,0 -72,40 -24,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='-48,0 0,0 24,40' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='-48,0 -24,40 24,40' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='0,0 48,0 72,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='0,0 24,40 72,40' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='48,0 96,0 120,40' fill='%23fff' fill-opacity='0.004'/%3E%3Cpolygon points='48,0 72,40 120,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='96,0 144,0 168,40' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='96,0 120,40 168,40' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='144,0 192,0 216,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='144,0 168,40 216,40' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='192,0 240,0 264,40' fill='%23fff' fill-opacity='0.004'/%3E%3Cpolygon points='192,0 216,40 264,40' fill='%23fff' fill-opacity='0.008'/%3E%3Cpolygon points='-72,40 -24,40 -96,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='-24,40 -96,80 -48,80' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='-24,40 24,40 -48,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='24,40 -48,80 0,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='24,40 72,40 0,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='72,40 0,80 48,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='72,40 120,40 48,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='120,40 48,80 96,80' fill='%23fff' fill-opacity='0.017'/%3E%3Cpolygon points='120,40 168,40 96,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='168,40 96,80 144,80' fill='%23fff' fill-opacity='0.012'/%3E%3Cpolygon points='168,40 216,40 144,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='216,40 144,80 192,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='216,40 264,40 192,80' fill='%23fff' fill-opacity='0'/%3E%3Cpolygon points='264,40 192,80 240,80' fill='%23fff' fill-opacity='0.017'/%3E%3C/g%3E%3C/svg%3E");
-  --gem-shade: rgba(0, 0, 0, 0.35);            /* bottom of the chrome's sheen */
-  --gem-shadow: rgba(0, 0, 0, 0.6);            /* drop shadows under buttons and dialogs */
-  --gem-vignette: rgba(0, 0, 0, 0.45);
+  --gem-shade: rgba(0, 0, 0, 0.22);            /* bottom of the chrome's sheen */
+  --gem-shadow: rgba(0, 0, 0, 0.42);           /* drop shadows under buttons and dialogs */
+  --gem-vignette: rgba(0, 0, 0, 0.26);
   --gem-btn-text: var(--bone-white);
-  --gem-btn-text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  --gem-btn-text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
   --gem-scroll: color-mix(in srgb, var(--flame-c) 60%, var(--flame-a));
   --gem-scroll-hi: var(--flame-a);
 }
 
 /* ---------- BLACK ORLOV — black diamond: gunmetal and platinum ---------- */
 html.theme-orlov {
-  --ink-black: #050506;
-  --shadow-black: #0a0b0d;
-  --panel-black: #101114;
-  --raised-black: #181a1f;
-  --border-iron: #262930;
-  --border-bright: #6b7280;
-  --bone-white: #eef1f6;
-  --parchment: #d9dde5;
-  --parchment-dim: #aab0bc;
-  --muted-text: #6f7684;
-  --crusader-red: #c9ced8;          /* accent: platinum */
-  --crusader-red-bright: #ffffff;
-  --crusader-red-deep: #5b616d;
-  --blood: #2a2d34;
-  --gold-accent: #b9c3d6;           /* secondary: cold silver */
-  --head-pill-text: #0a0b0d;
+  --ink-black: #212326;
+  --shadow-black: #1a1d20;
+  --panel-black: #282a2e;
+  --raised-black: #303336;
+  --border-iron: #414448;
+  --border-bright: #686c72;
+  --bone-white: #cdd3dc;
+  --parchment: #bec5cd;
+  --parchment-dim: #a1a7ae;
+  --muted-text: #7c8187;
+  --crusader-red: #bdc5d0;          /* accent: platinum */
+  --crusader-red-bright: #d4dbe5;
+  --crusader-red-deep: #868d96;
+  --blood: #44484d;
+  --gold-accent: #b2b8bf;           /* secondary: cold silver */
+  --head-pill-text: #212326;
   /* Diffs keep real colour: a monochrome +/- would be unreadable. */
-  --added: #5ee6b0;
-  --added-bg: rgba(94, 230, 176, 0.10);
-  --removed: #ff6b8b;
-  --removed-bg: rgba(255, 107, 139, 0.11);
-  --flame-a: #c9ced8;
-  --flame-b: #ffffff;
-  --flame-c: #3a3f4a;
-  --gem-glint: #ffffff;
-  --gem-fire-1: #a9bfff;   /* ice blue */
-  --gem-fire-2: #c9b8ff;   /* lavender */
-  --gem-fire-3: #eef1f6;   /* platinum */
-  --gem-fire-4: #9fdcef;   /* ice cyan */
-  --gem-fire-5: #8593b3;   /* steel */
-  --gem-btn-top: #2b2e35;
-  --gem-btn-bottom: #0c0d10;
-  --lane-colors: #eef1f6, #8fb4ff, #c4a8ff, #7fd6e6, #8a93a6, #a8e6d2, #6f80e0, #d8cfb8;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e27e76;
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: #a5acb2;
+  --flame-b: #e2e5e8;
+  --flame-c: #4a4d51;
+  --gem-glint: #dee1e5;
+  --gem-fire-1: #b4bbc4;   /* ice blue */
+  --gem-fire-2: #cbced4;   /* lavender */
+  --gem-fire-3: #dbe2e9;   /* platinum */
+  --gem-fire-4: #a5afba;   /* ice cyan */
+  --gem-fire-5: #96a0a9;   /* steel */
+  --gem-btn-top: #3a3d42;
+  --gem-btn-bottom: #27292c;
+  --lane-colors: #d4dbe5, #91b4e1, #c0a4d5, #dc9ea6, #d3a87f, #afb780, #80c1aa, #77becf;
 }
 
 /* ---------- HOPE — deep grey-blue, in steel and silver ---------- */
 html.theme-hope {
-  --ink-black: #04070d;
-  --shadow-black: #080c15;
-  --panel-black: #0c1220;
-  --raised-black: #131b2d;
-  --border-iron: #1f2a40;
-  --border-bright: #4d6a9e;
-  --bone-white: #e6eeff;
-  --parchment: #cdd9f2;
-  --parchment-dim: #9fb0d0;
-  --muted-text: #66789c;
-  --crusader-red: #3d74ff;
-  --crusader-red-bright: #7aa6ff;
-  --crusader-red-deep: #1a3a8f;
-  --blood: #10224f;
-  --gold-accent: #b8c6dc;
-  --head-pill-text: #ffffff;
-  --added: #4fd6a0;
-  --added-bg: rgba(79, 214, 160, 0.10);
-  --removed: #ff7a8e;
-  --removed-bg: rgba(255, 122, 142, 0.11);
-  --flame-a: #9fb2d4;
-  --flame-b: #e6eeff;
-  --flame-c: #2a3550;
-  --gem-glint: #d6e4ff;
+  --ink-black: #1d232c;
+  --shadow-black: #171d25;
+  --panel-black: #242b33;
+  --raised-black: #2c333c;
+  --border-iron: #3d444e;
+  --border-bright: #626d7b;
+  --bone-white: #c5d4e8;
+  --parchment: #b7c6d9;
+  --parchment-dim: #9aa7b8;
+  --muted-text: #768190;
+  --crusader-red: #81aded;
+  --crusader-red-bright: #9dc3fb;
+  --crusader-red-deep: #5175ac;
+  --blood: #344867;
+  --gold-accent: #abb9c7;
+  --head-pill-text: #1d232c;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e27e76;
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: #9eadba;
+  --flame-b: #dfe5eb;
+  --flame-c: #464e55;
+  --gem-glint: #d3e3fa;
   /* The real Hope phosphoresces red-orange after UV light: its afterglow, used by
      24-gem-juice.js for the glow that lingers where you clicked or dragged. */
-  --gem-afterglow: #ff6a2a;
-  --gem-fire-1: #7aa6ff;
-  --gem-fire-2: #b8ccff;
-  --gem-fire-3: #e6eeff;
-  --gem-fire-4: #5f8cff;
-  --gem-fire-5: #9fb2d4;
-  --gem-btn-top: #1d2a48;
-  --gem-btn-bottom: #0a1022;
-  --lane-colors: #7aa6ff, #e6eeff, #9fd0ff, #b9a8ff, #5ad1c8, #8fa0c0, #ffd28a, #4d6aff;
+  --gem-afterglow: #ea8751;
+  --gem-fire-1: #97bdf4;
+  --gem-fire-2: #bfcdf5;
+  --gem-fire-3: #d1e4f4;
+  --gem-fire-4: #a1b0bd;
+  --gem-fire-5: #67a4dd;
+  --gem-btn-top: #353e49;
+  --gem-btn-bottom: #232932;
+  --lane-colors: #9dc3fb, #8bb3ed, #c69fdc, #e798a0, #d9a66e, #abba73, #6bc5ab, #63c0d9;
 }
 
 /* ---------- PINK STAR — vivid pink, in rose gold ---------- */
 html.theme-pinkstar {
-  --ink-black: #0d0609;
-  --shadow-black: #140910;
-  --panel-black: #1b0d16;
-  --raised-black: #261320;
-  --border-iron: #3a1f30;
-  --border-bright: #a0607e;
-  --bone-white: #ffeef6;
-  --parchment: #f6d6e6;
-  --parchment-dim: #d4a8bf;
-  --muted-text: #9a6f86;
-  --crusader-red: #ff4fa3;
-  --crusader-red-bright: #ff8cc6;
-  --crusader-red-deep: #b0246b;
-  --blood: #5a1236;
-  --gold-accent: #e8b49a;           /* rose gold */
-  --head-pill-text: #1a0610;
-  --added: #6fe0b0;
-  --added-bg: rgba(111, 224, 176, 0.10);
-  --removed: #ff8a6a;               /* coral, so it never reads as the pink accent */
-  --removed-bg: rgba(255, 138, 106, 0.12);
-  --flame-a: #e8b49a;
-  --flame-b: #fff0e8;
-  --flame-c: #5a3040;
-  --gem-glint: #ffe6f2;
-  --gem-fire-1: #ff8cc6;
-  --gem-fire-2: #ffc2dd;
-  --gem-fire-3: #ffe6f2;
-  --gem-fire-4: #e8b49a;
-  --gem-fire-5: #ff5fae;
-  --gem-btn-top: #3a1a2c;
-  --gem-btn-bottom: #12070d;
-  --lane-colors: #ff8cc6, #ffe6f2, #e8b49a, #c9a6ff, #8fd3ff, #ffb36b, #7fe0c0, #ff5f8a;
+  --ink-black: #292024;
+  --shadow-black: #22191d;
+  --panel-black: #31272b;
+  --raised-black: #392f33;
+  --border-iron: #4b4045;
+  --border-bright: #76676e;
+  --bone-white: #e4cbd5;
+  --parchment: #d5bcc7;
+  --parchment-dim: #b59fa9;
+  --muted-text: #8d7a82;
+  --crusader-red: #e490b5;
+  --crusader-red-bright: #f4abca;
+  --crusader-red-deep: #a45e7d;
+  --blood: #613a4b;
+  --gold-accent: #d4ae9d;           /* rose gold */
+  --head-pill-text: #292024;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e27e76;               /* coral, so it never reads as the pink accent */
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: #c7a291;
+  --flame-b: #f1e1da;
+  --flame-c: #5c4840;
+  --gem-glint: #f7d7e4;
+  --gem-fire-1: #eaa2c1;
+  --gem-fire-2: #f1bec9;
+  --gem-fire-3: #f3dcd1;
+  --gem-fire-4: #caa594;
+  --gem-fire-5: #cd82b2;
+  --gem-btn-top: #46393f;
+  --gem-btn-bottom: #2f262a;
+  --lane-colors: #f4abca, #e098b7, #e49e7d, #b8b66c, #77c49f, #60c1d4, #96b0ee, #c5a0dd;
 }
 
 /* ---------- MOUSSAIEFF RED — the rarest colour: crimson, in platinum ---------- */
 html.theme-moussaieff {
-  --ink-black: #0b0305;
-  --shadow-black: #12060a;
-  --panel-black: #190a0f;
-  --raised-black: #241018;
-  --border-iron: #3a1a24;
-  --border-bright: #8a4a5c;
-  --bone-white: #fff0f2;
-  --parchment: #f2d4da;
-  --parchment-dim: #cfa3ad;
-  --muted-text: #93707a;
-  --crusader-red: #d3123c;
-  --crusader-red-bright: #ff4466;
-  --crusader-red-deep: #7a0a24;
-  --blood: #4a0614;
-  --gold-accent: #d7d9e0;           /* platinum */
-  --head-pill-text: #ffffff;
-  --added: #5fd6b0;
-  --added-bg: rgba(95, 214, 176, 0.10);
-  --removed: #ff8a66;               /* orange-red: the accent already owns crimson */
-  --removed-bg: rgba(255, 138, 102, 0.12);
-  --flame-a: #c9ccd6;
-  --flame-b: #ffffff;
-  --flame-c: #3a2a30;
-  --gem-glint: #ffe0e6;
-  --gem-fire-1: #ff4466;
-  --gem-fire-2: #ff8fa3;
-  --gem-fire-3: #ffe0e6;
-  --gem-fire-4: #c9ccd6;
-  --gem-fire-5: #b0103a;
-  --gem-btn-top: #3a121e;
-  --gem-btn-bottom: #120507;
-  --lane-colors: #ff4466, #f2d4da, #c9ccd6, #ff9f7a, #b98aff, #7fc8ff, #ffd27a, #ff7bc0;
+  --ink-black: #2a2020;
+  --shadow-black: #23191a;
+  --panel-black: #322727;
+  --raised-black: #3a2f30;
+  --border-iron: #4d4041;
+  --border-bright: #786768;
+  --bone-white: #e7cbcc;
+  --parchment: #d8bcbd;
+  --parchment-dim: #b89fa0;
+  --muted-text: #8f7a7b;
+  --crusader-red: #e37678;
+  --crusader-red-bright: #f19393;
+  --crusader-red-deep: #a04548;
+  --blood: #6a3637;
+  --gold-accent: #b2b8bf;           /* platinum */
+  --head-pill-text: #2a2020;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e59656;               /* orange-red: the accent already owns crimson */
+  --removed-bg: rgba(229, 150, 86, 0.12);
+  --flame-a: #a5acb2;
+  --flame-b: #e2e5e8;
+  --flame-c: #4a4d51;
+  --gem-glint: #fbd7d6;
+  --gem-fire-1: #fc9c9c;
+  --gem-fire-2: #fabdb0;
+  --gem-fire-3: #d3e3f5;
+  --gem-fire-4: #a5afba;
+  --gem-fire-5: #e4788b;
+  --gem-btn-top: #47393a;
+  --gem-btn-bottom: #302626;
+  --lane-colors: #f19393, #e79998, #d5a96a, #97bf81, #60c5be, #77b9e8, #b5a5e8, #da99c4;
 }
 
 /* ---------- DRESDEN GREEN — natural green, in champagne gold ---------- */
 html.theme-dresden {
-  --ink-black: #030a07;
-  --shadow-black: #06120c;
-  --panel-black: #0a1a12;
-  --raised-black: #10241a;
-  --border-iron: #1c3a2a;
-  --border-bright: #5a9a76;
-  --bone-white: #eafff4;
-  --parchment: #cfeedd;
-  --parchment-dim: #a2cdb6;
-  --muted-text: #6a947f;
-  --crusader-red: #1fd17a;
-  --crusader-red-bright: #7dffb5;
-  --crusader-red-deep: #0c7a45;
-  --blood: #06401f;
-  --gold-accent: #e7d9a8;           /* champagne */
-  --head-pill-text: #04140b;
-  --added: #9be86e;                 /* lime, a step away from the emerald accent */
-  --added-bg: rgba(155, 232, 110, 0.10);
-  --removed: #ff7a7a;
-  --removed-bg: rgba(255, 122, 122, 0.12);
-  --flame-a: #d9c98f;
-  --flame-b: #fff6d8;
-  --flame-c: #3a3a1e;
-  --gem-glint: #e8fff2;
-  --gem-fire-1: #7dffb5;
-  --gem-fire-2: #b8ffd8;
-  --gem-fire-3: #fff6d8;
-  --gem-fire-4: #d9c98f;
-  --gem-fire-5: #1fd17a;
-  --gem-btn-top: #163a28;
-  --gem-btn-bottom: #06120c;
-  --lane-colors: #7dffb5, #e7d9a8, #8fd3ff, #c9a6ff, #ffd27a, #4fc39a, #ff9ec7, #cfeedd;
+  --ink-black: #1c2520;
+  --shadow-black: #161f1a;
+  --panel-black: #232d27;
+  --raised-black: #2c352f;
+  --border-iron: #3c4740;
+  --border-bright: #617067;
+  --bone-white: #c2d9cb;
+  --parchment: #b3cbbd;
+  --parchment-dim: #97aca0;
+  --muted-text: #74857b;
+  --crusader-red: #71c294;
+  --crusader-red-bright: #92d6ae;
+  --crusader-red-deep: #408862;
+  --blood: #2b513c;
+  --gold-accent: #c7b68c;           /* champagne */
+  --head-pill-text: #1c2520;
+  --added: #abba6b;                 /* lime, a step away from the emerald accent */
+  --added-bg: rgba(171, 186, 107, 0.12);
+  --removed: #e27e76;
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: #bba980;
+  --flame-b: #ebe4d3;
+  --flame-c: #554c36;
+  --gem-glint: #cee9d8;
+  --gem-fire-1: #88cca5;
+  --gem-fire-2: #a9dbc8;
+  --gem-fire-3: #eae1cb;
+  --gem-fire-4: #beac83;
+  --gem-fire-5: #6fb079;
+  --gem-btn-top: #344139;
+  --gem-btn-bottom: #222b26;
+  --lane-colors: #92d6ae, #7bc49a, #60c1d5, #9dadee, #d29cd0, #e7989a, #d6a86b, #abba73;
 }
 
 /* ---------- ARGYLE VIOLET — violet, in lilac silver ---------- */
 html.theme-argyle {
-  --ink-black: #07050d;
-  --shadow-black: #0c0916;
-  --panel-black: #120e1f;
-  --raised-black: #1a152c;
-  --border-iron: #2c2546;
-  --border-bright: #7a6aaa;
-  --bone-white: #f2eeff;
-  --parchment: #ddd5f5;
-  --parchment-dim: #b0a6d0;
-  --muted-text: #7a7099;
-  --crusader-red: #8a5cff;
-  --crusader-red-bright: #b99bff;
-  --crusader-red-deep: #4a2aa8;
-  --blood: #26145a;
-  --gold-accent: #c9c4dc;           /* lilac silver */
-  --head-pill-text: #ffffff;
-  --added: #6fe0b8;
-  --added-bg: rgba(111, 224, 184, 0.10);
-  --removed: #ff7f9f;
-  --removed-bg: rgba(255, 127, 159, 0.12);
-  --flame-a: #b8b0d4;
-  --flame-b: #f2eeff;
-  --flame-c: #2e2846;
-  --gem-glint: #ece4ff;
-  --gem-fire-1: #b99bff;
-  --gem-fire-2: #d9c9ff;
-  --gem-fire-3: #f2eeff;
-  --gem-fire-4: #b8b0d4;
-  --gem-fire-5: #8a5cff;
-  --gem-btn-top: #2a1f4a;
-  --gem-btn-bottom: #0c0916;
-  --lane-colors: #b99bff, #f2eeff, #8fd3ff, #ff9ec7, #c9c4dc, #7fe0c0, #ffd27a, #6f5cff;
+  --ink-black: #23212b;
+  --shadow-black: #1d1b24;
+  --panel-black: #2b2832;
+  --raised-black: #33313b;
+  --border-iron: #44424d;
+  --border-bright: #6c6979;
+  --bone-white: #d4cfe6;
+  --parchment: #c5c0d7;
+  --parchment-dim: #a7a3b7;
+  --muted-text: #817d8e;
+  --crusader-red: #b39be7;
+  --crusader-red-bright: #c8b4f6;
+  --crusader-red-deep: #7c67a7;
+  --blood: #4c4064;
+  --gold-accent: #b7b5ca;           /* lilac silver */
+  --head-pill-text: #23212b;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e27e76;
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: #aaa8bd;
+  --flame-b: #e4e3ec;
+  --flame-c: #4d4c56;
+  --gem-glint: #e4dcf8;
+  --gem-fire-1: #c1aeef;
+  --gem-fire-2: #dac3ec;
+  --gem-fire-3: #e0def4;
+  --gem-fire-4: #adabc0;
+  --gem-fire-5: #9b93df;
+  --gem-btn-top: #3e3b48;
+  --gem-btn-bottom: #292731;
+  --lane-colors: #c8b4f6, #b8a4e6, #e198b6, #e1a078, #b7b66d, #7bc49a, #60c1d5, #8bb3ed;
 }
 
 /* ---------- GOLDEN JUBILEE — fancy yellow-brown, in champagne ---------- */
 html.theme-jubilee {
-  --ink-black: #0b0803;
-  --shadow-black: #120d05;
-  --panel-black: #1a1307;
-  --raised-black: #241b0b;
-  --border-iron: #3d2f15;
-  --border-bright: #a07a30;
-  --bone-white: #fff8e6;
-  --parchment: #f5e6c2;
-  --parchment-dim: #d2bd8c;
-  --muted-text: #9a8456;
-  --crusader-red: #ffc21a;
-  --crusader-red-bright: #ffe066;
-  --crusader-red-deep: #b07d00;
-  --blood: #5a3f00;
-  --gold-accent: #e8c98a;           /* champagne */
-  --head-pill-text: #1a1200;
-  --added: #8fe07a;
-  --added-bg: rgba(143, 224, 122, 0.10);
-  --removed: #ff7a6a;
-  --removed-bg: rgba(255, 122, 106, 0.12);
-  --flame-a: #d8b46a;
-  --flame-b: #fff3c4;
-  --flame-c: #4a3510;
-  --gem-glint: #fff3d6;
-  --gem-fire-1: #ffe066;
-  --gem-fire-2: #fff3c4;
-  --gem-fire-3: #ffd28a;
-  --gem-fire-4: #d8b46a;
-  --gem-fire-5: #ffb31a;
-  --gem-btn-top: #3a2a0e;
-  --gem-btn-bottom: #120d05;
-  --lane-colors: #ffe066, #fff3c4, #ff9f5a, #8fd3ff, #c9a6ff, #7fe0a0, #e8c98a, #ff7b9c;
+  --ink-black: #27221a;
+  --shadow-black: #211b14;
+  --panel-black: #2f2921;
+  --raised-black: #373129;
+  --border-iron: #494339;
+  --border-bright: #746a5e;
+  --bone-white: #dfd0bc;
+  --parchment: #d1c2ae;
+  --parchment-dim: #b1a493;
+  --muted-text: #897e70;
+  --crusader-red: #e0ae57;
+  --crusader-red-bright: #f1c77f;
+  --crusader-red-deep: #a27828;
+  --blood: #5a4319;
+  --gold-accent: #cdb38c;           /* champagne */
+  --head-pill-text: #27221a;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e27e76;
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: #c0a780;
+  --flame-b: #eee3d3;
+  --flame-c: #584b37;
+  --gem-glint: #f0dfc4;
+  --gem-fire-1: #ddb36c;
+  --gem-fire-2: #ddcd9d;
+  --gem-fire-3: #eddfcc;
+  --gem-fire-4: #c3aa83;
+  --gem-fire-5: #ce9042;
+  --gem-btn-top: #443c31;
+  --gem-btn-bottom: #2e2820;
+  --lane-colors: #f1c77f, #d1ab69, #97bf81, #5ec4c4, #82b6ec, #baa4e5, #e298b4, #e69d83;
 }
 
 /* ---------- KOH-I-NOOR — colourless, flawless: the light gem ----------
@@ -328,49 +342,78 @@ html.theme-jubilee {
    the cursor's "light" is an ice-blue sheen, sparkles are painted rather than added
    (--gem-blend), and the chrome's sheen and every drop shadow are much softer. */
 html.theme-kohinoor {
-  --ink-black: #eef2f7;
-  --shadow-black: #e2e8f0;
-  --panel-black: #f7f9fc;
-  --raised-black: #ffffff;
-  --border-iron: #c9d3e0;
-  --border-bright: #7a8aa6;
-  --bone-white: #0b1220;            /* text */
-  --parchment: #1a2538;
-  --parchment-dim: #3d4a62;
-  --muted-text: #6a7891;
-  --crusader-red: #2f4a7a;          /* accent: slate sapphire ink */
-  --crusader-red-bright: #4f73b8;
-  --crusader-red-deep: #1c2e50;
-  --blood: #9aa8c0;
-  --gold-accent: #8a9ab8;
+  --ink-black: #e8edf3;
+  --shadow-black: #dee4e9;
+  --panel-black: #eff4fa;
+  --raised-black: #f6f9fd;
+  --border-iron: #ccd4dc;
+  --border-bright: #8e9aa6;
+  --bone-white: #2f3f4f;            /* text */
+  --parchment: #404f5e;
+  --parchment-dim: #4f5c6a;
+  --muted-text: #66727e;
+  --crusader-red: #3e649c;          /* accent: slate sapphire ink */
+  --crusader-red-bright: #507bbb;
+  --crusader-red-deep: #325384;
+  --blood: #a9b9ca;
+  --gold-accent: #75899a;
   --head-pill-text: #ffffff;
-  --added: #0a8a5a;
-  --added-bg: rgba(10, 138, 90, 0.10);
-  --removed: #c4304a;
-  --removed-bg: rgba(196, 48, 74, 0.09);
-  --flame-a: #8a9ab8;
+  --added: #2f7442;
+  --added-bg: rgba(47, 116, 66, 0.1);
+  --removed: #a93f41;
+  --removed-bg: rgba(169, 63, 65, 0.09);
+  --flame-a: #8195a7;
   --flame-b: #ffffff;
-  --flame-c: #d5dce8;
-  --gem-glint: #7f9cd6;
-  --gem-ink: #2f4a7a;               /* the pen: ripples and drag strokes on white */
-  --gem-fire-1: #9fb8e8;
-  --gem-fire-2: #c8b8f0;
-  --gem-fire-3: #8a9ab8;
-  --gem-fire-4: #9fd4e8;
-  --gem-fire-5: #5f7fc0;
-  --gem-btn-top: #ffffff;
-  --gem-btn-bottom: #e2e8f0;
+  --flame-c: #c9d2db;
+  --gem-glint: #779bc9;
+  --gem-ink: #3b5984;               /* the pen: ripples and drag strokes on white */
+  --gem-fire-1: #87a7d0;
+  --gem-fire-2: #aaa5cf;
+  --gem-fire-3: #8195a7;
+  --gem-fire-4: #85bbc9;
+  --gem-fire-5: #5b7bb0;
+  --gem-btn-top: #fafcfe;
+  --gem-btn-bottom: #e1e7ed;
   --gem-btn-text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
   --gem-blend: source-over;
   --gem-facets: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='144' height='80'%3E%3Cg stroke='%231e2a44' stroke-opacity='0.03' stroke-width='0.6'%3E%3Cpolygon points='-96,0 -48,0 -24,40' fill='%231e2a44' fill-opacity='0.006'/%3E%3Cpolygon points='-96,0 -72,40 -24,40' fill='%231e2a44' fill-opacity='0.012'/%3E%3Cpolygon points='-48,0 0,0 24,40' fill='%231e2a44' fill-opacity='0.018'/%3E%3Cpolygon points='-48,0 -24,40 24,40' fill='%231e2a44' fill-opacity='0.026'/%3E%3Cpolygon points='0,0 48,0 72,40' fill='%231e2a44' fill-opacity='0.012'/%3E%3Cpolygon points='0,0 24,40 72,40' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='48,0 96,0 120,40' fill='%231e2a44' fill-opacity='0.006'/%3E%3Cpolygon points='48,0 72,40 120,40' fill='%231e2a44' fill-opacity='0.012'/%3E%3Cpolygon points='96,0 144,0 168,40' fill='%231e2a44' fill-opacity='0.018'/%3E%3Cpolygon points='96,0 120,40 168,40' fill='%231e2a44' fill-opacity='0.026'/%3E%3Cpolygon points='144,0 192,0 216,40' fill='%231e2a44' fill-opacity='0.012'/%3E%3Cpolygon points='144,0 168,40 216,40' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='192,0 240,0 264,40' fill='%231e2a44' fill-opacity='0.006'/%3E%3Cpolygon points='192,0 216,40 264,40' fill='%231e2a44' fill-opacity='0.012'/%3E%3Cpolygon points='-72,40 -24,40 -96,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='-24,40 -96,80 -48,80' fill='%231e2a44' fill-opacity='0.026'/%3E%3Cpolygon points='-24,40 24,40 -48,80' fill='%231e2a44' fill-opacity='0.018'/%3E%3Cpolygon points='24,40 -48,80 0,80' fill='%231e2a44' fill-opacity='0.018'/%3E%3Cpolygon points='24,40 72,40 0,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='72,40 0,80 48,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='72,40 120,40 48,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='120,40 48,80 96,80' fill='%231e2a44' fill-opacity='0.026'/%3E%3Cpolygon points='120,40 168,40 96,80' fill='%231e2a44' fill-opacity='0.018'/%3E%3Cpolygon points='168,40 96,80 144,80' fill='%231e2a44' fill-opacity='0.018'/%3E%3Cpolygon points='168,40 216,40 144,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='216,40 144,80 192,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='216,40 264,40 192,80' fill='%231e2a44' fill-opacity='0'/%3E%3Cpolygon points='264,40 192,80 240,80' fill='%231e2a44' fill-opacity='0.026'/%3E%3C/g%3E%3C/svg%3E");
   --gem-shade: rgba(30, 42, 68, 0.05);
   --gem-shadow: rgba(30, 42, 68, 0.16);
   --gem-vignette: rgba(30, 42, 68, 0.08);
-  --gem-scroll: #c9d3e0;
-  --gem-scroll-hi: #9aa8c0;
-  --lane-colors: #2f4a7a, #0a8a8a, #7a4ab8, #c4306a, #b07a10, #3a7ad0, #5a6a80, #0a8a4a;
+  --gem-scroll: #c3cbd4;
+  --gem-scroll-hi: #9ba6b1;
+  --lane-colors: #3e649c, #4c72ab, #0a8282, #7b63a3, #9d587a, #936823, #1e7ca1, #428252;
 }
 html.theme-kohinoor .loading-overlay { background: rgba(255, 255, 255, 0.65); }
+/* Koh-i-Noor's added/removed line text: the app's defaults (#c1d9a0 / #e2a5a5) are pastels
+   for dark backgrounds and vanish on white — the two older light themes override them too. */
+html.theme-kohinoor .diff-line.add .diff-text,
+html.theme-kohinoor .dsplit-side.add .dsplit-text { color: var(--added); }
+html.theme-kohinoor .diff-line.del .diff-text,
+html.theme-kohinoor .dsplit-side.del .dsplit-text { color: var(--removed); }
+/* Word-diff highlights. The app tints removed words with the *accent*, which on a gem is
+   platinum (Orlov) or reads as a selection (Moussaieff) — gems use their "removed" colour.
+   Koh-i-Noor also needs dark word text: the default is near-white. */
+html.theme-gem .diff-line.del .wd,
+html.theme-gem .dsplit-side.del .wd { background: color-mix(in srgb, var(--removed) 32%, transparent); }
+html.theme-kohinoor .diff-line.add .wd,
+html.theme-kohinoor .dsplit-side.add .wd { background: color-mix(in srgb, var(--added) 22%, transparent); color: #024b1f; }
+html.theme-kohinoor .diff-line.del .wd,
+html.theme-kohinoor .dsplit-side.del .wd { background: color-mix(in srgb, var(--removed) 20%, transparent); color: #791920; }
+/* Koh-i-Noor's syntax colours. The app's token colours (02-views.css) are tuned for dark
+   backgrounds and were near-invisible on white; these are deep Gruvbox-Material-Light-style
+   tones, each >= 4.5:1 on the page *and* on the added/removed line backgrounds (comments
+   ~4:1, as is customary). `:not(.wd)` keeps word-diff spans inheriting their line colour. */
+html.theme-kohinoor.theme-gem .tk-com:not(.wd) { color: #606a74; }
+html.theme-kohinoor.theme-gem .tk-str:not(.wd) { color: #326935; }
+html.theme-kohinoor.theme-gem .tk-kw:not(.wd) { color: #a1373b; }
+html.theme-kohinoor.theme-gem .tk-lit:not(.wd) { color: #883c7a; }
+html.theme-kohinoor.theme-gem .tk-num:not(.wd) { color: #925019; }
+html.theme-kohinoor.theme-gem .tk-typ:not(.wd) { color: #056774; }
+html.theme-kohinoor.theme-gem .tk-fn:not(.wd) { color: #7c5500; }
+html.theme-kohinoor.theme-gem .tk-prop:not(.wd) { color: #1b6651; }
+html.theme-kohinoor.theme-gem .tk-var:not(.wd) { color: #674698; }
+html.theme-kohinoor.theme-gem .tk-ann:not(.wd) { color: #4c6585; }
 
 /* ---------- CHAMELEON — the diamond that changes colour when heated ----------
    Resting olive; activity (fast moves, clicks, drags, a success) heats it towards gold
@@ -380,40 +423,40 @@ html.theme-kohinoor .loading-overlay { background: rgba(255, 255, 255, 0.65); }
    and nothing else needs to know — and a restyle happens only when the level changes,
    a few times a minute at most, never per frame. */
 html.theme-chameleon {
-  --ink-black: #090a04;
-  --shadow-black: #0f1107;
-  --panel-black: #15180a;
-  --raised-black: #1e2210;
-  --border-iron: #33381a;
-  --border-bright: #7a8a3a;
-  --bone-white: #f4f6e0;
-  --parchment: #e0e4c0;
-  --parchment-dim: #b8be8f;
-  --muted-text: #82885a;
-  --crusader-red: color-mix(in oklab, #9aa83a, #ffc21a calc(var(--chameleon-heat) * 100%));
-  --crusader-red-bright: color-mix(in oklab, #c8d860, #ffe066 calc(var(--chameleon-heat) * 100%));
-  --crusader-red-deep: color-mix(in oklab, #5a6620, #b07d00 calc(var(--chameleon-heat) * 100%));
-  --blood: #2e3412;
-  --gold-accent: color-mix(in oklab, #c8b878, #ffd28a calc(var(--chameleon-heat) * 100%));
-  --head-pill-text: #10120a;
-  --added: #7fe0b0;
-  --added-bg: rgba(127, 224, 176, 0.10);
-  --removed: #ff7a7a;
-  --removed-bg: rgba(255, 122, 122, 0.12);
-  --flame-a: color-mix(in oklab, #b8b878, #ffd28a calc(var(--chameleon-heat) * 100%));
-  --flame-b: #fffbe0;
-  --flame-c: #3a3a18;
-  --gem-glint: #f6f8d8;
+  --ink-black: #23241b;
+  --shadow-black: #1c1d15;
+  --panel-black: #2a2b22;
+  --raised-black: #32332a;
+  --border-iron: #44453a;
+  --border-bright: #6c6d5f;
+  --bone-white: #d3d5bd;
+  --parchment: #c4c7af;
+  --parchment-dim: #a6a894;
+  --muted-text: #808271;
+  --crusader-red: color-mix(in oklab, #a2ac61, #e6b557 calc(var(--chameleon-heat) * 100%));
+  --crusader-red-bright: color-mix(in oklab, #bbc581, #eecd7e calc(var(--chameleon-heat) * 100%));
+  --crusader-red-deep: color-mix(in oklab, #6d7437, #a97e33 calc(var(--chameleon-heat) * 100%));
+  --blood: #474b27;
+  --gold-accent: color-mix(in oklab, #beb994, #e3c78e calc(var(--chameleon-heat) * 100%));
+  --head-pill-text: #23241b;
+  --added: #94c07c;
+  --added-bg: rgba(148, 192, 124, 0.12);
+  --removed: #e27e76;
+  --removed-bg: rgba(226, 126, 118, 0.12);
+  --flame-a: color-mix(in oklab, #b2ac88, #d8ba79 calc(var(--chameleon-heat) * 100%));
+  --flame-b: #e8e5d6;
+  --flame-c: #524d3b;
+  --gem-glint: #e0e4ca;
   /* Particles read these once per theme change, so they span the whole olive → gold
      range: a drag trail walking the stops shows the colour change on its own. */
-  --gem-fire-1: #b8c850;
-  --gem-fire-2: #d8d860;
-  --gem-fire-3: #ffe066;
-  --gem-fire-4: #ffc21a;
-  --gem-fire-5: #9aa83a;
-  --gem-btn-top: #2e3416;
-  --gem-btn-bottom: #0f1107;
-  --lane-colors: #c8d860, #ffe066, #8fd3ff, #c9a6ff, #e0e4c0, #7fe0b0, #ff9f7a, #9aa83a;
+  --gem-fire-1: #afb96d;
+  --gem-fire-2: #c8c26b;
+  --gem-fire-3: #e7c869;
+  --gem-fire-4: #e6b557;
+  --gem-fire-5: #99a75d;
+  --gem-btn-top: #3d3e32;
+  --gem-btn-bottom: #292a21;
+  --lane-colors: #b8c182, #afb971, #6ec5a8, #6dbde2, #aaa9eb, #d79ac9, #e79a8d, #d5a96a;
   transition: --chameleon-heat 1.4s cubic-bezier(.3, 0, .2, 1);
 }
 html.theme-chameleon.heat-1 { --chameleon-heat: 0.25; }
@@ -422,15 +465,15 @@ html.theme-chameleon.heat-3 { --chameleon-heat: 0.75; }
 html.theme-chameleon.heat-4 { --chameleon-heat: 1; }
 
 /* ---------- per-gem welcome backdrops and text selection ---------- */
-html.theme-orlov      #welcome-screen { background: radial-gradient(ellipse at top, #1d2027 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-hope       #welcome-screen { background: radial-gradient(ellipse at top, #13234a 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-pinkstar   #welcome-screen { background: radial-gradient(ellipse at top, #3a1028 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-moussaieff #welcome-screen { background: radial-gradient(ellipse at top, #3a0816 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-dresden    #welcome-screen { background: radial-gradient(ellipse at top, #0c3a22 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-argyle     #welcome-screen { background: radial-gradient(ellipse at top, #24184a 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-jubilee    #welcome-screen { background: radial-gradient(ellipse at top, #3a2a08 0%, var(--ink-black) 58%), var(--ink-black); }
-html.theme-kohinoor   #welcome-screen { background: radial-gradient(ellipse at top, #ffffff 0%, var(--ink-black) 60%), var(--ink-black); }
-html.theme-chameleon  #welcome-screen { background: radial-gradient(ellipse at top, #2a3010 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-orlov      #welcome-screen { background: radial-gradient(ellipse at top, #2e333b 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-hope       #welcome-screen { background: radial-gradient(ellipse at top, #253447 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-pinkstar   #welcome-screen { background: radial-gradient(ellipse at top, #412b35 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-moussaieff #welcome-screen { background: radial-gradient(ellipse at top, #432b2d 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-dresden    #welcome-screen { background: radial-gradient(ellipse at top, #22382d 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-argyle     #welcome-screen { background: radial-gradient(ellipse at top, #342f45 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-jubilee    #welcome-screen { background: radial-gradient(ellipse at top, #3d301e 0%, var(--ink-black) 58%), var(--ink-black); }
+html.theme-kohinoor   #welcome-screen { background: radial-gradient(ellipse at top, #fafcfe 0%, var(--ink-black) 60%), var(--ink-black); }
+html.theme-chameleon  #welcome-screen { background: radial-gradient(ellipse at top, #33351f 0%, var(--ink-black) 58%), var(--ink-black); }
 html.theme-gem ::selection { background: color-mix(in srgb, var(--gem-glint) 24%, transparent); color: var(--bone-white); }
 
 /* =========================== shared gem treatment =========================== */

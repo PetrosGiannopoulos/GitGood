@@ -436,15 +436,15 @@ const BUILTIN_THEMES = [
 // key on, and `light` sets html.theme-light like a light Alacritty palette.
 // Swatches: background, stone, setting metal, text.
 const GEM_THEMES = [
-  { id: 'orlov',      name: 'Black Orlov',    swatches: ['#050506', '#c9ced8', '#3a3f4a', '#eef1f6'], gem: true, sig: 'Facet flashes · white scintillation' },
-  { id: 'hope',       name: 'Hope',           swatches: ['#04070d', '#3d74ff', '#9fb2d4', '#e6eeff'], gem: true, sig: 'Ripples · red-orange afterglow' },
-  { id: 'pinkstar',   name: 'Pink Star',      swatches: ['#0d0609', '#ff4fa3', '#e8b49a', '#ffeef6'], gem: true, sig: 'Petal blooms · drifting bokeh' },
-  { id: 'moussaieff', name: 'Moussaieff Red', swatches: ['#0b0305', '#d3123c', '#c9ccd6', '#fff0f2'], gem: true, sig: 'Trillion shards · a heartbeat' },
-  { id: 'dresden',    name: 'Dresden Green',  swatches: ['#030a07', '#1fd17a', '#d9c98f', '#eafff4'], gem: true, sig: 'Growing vines · aurora' },
-  { id: 'argyle',     name: 'Argyle Violet',  swatches: ['#07050d', '#8a5cff', '#b8b0d4', '#f2eeff'], gem: true, sig: 'Constellations · shooting stars' },
-  { id: 'jubilee',    name: 'Golden Jubilee', swatches: ['#0b0803', '#ffc21a', '#d8b46a', '#fff8e6'], gem: true, sig: 'Sunbursts · gold dust · fireworks' },
-  { id: 'kohinoor',   name: 'Koh-i-Noor',     swatches: ['#eef2f7', '#2f4a7a', '#8a9ab8', '#0b1220'], gem: true, light: true, sig: 'Ink ripples · pen strokes · light' },
-  { id: 'chameleon',  name: 'Chameleon',      swatches: ['#090a04', '#9aa83a', '#ffc21a', '#f4f6e0'], gem: true, sig: 'Warms to gold as you work' }
+  { id: 'orlov',      name: 'Black Orlov',    swatches: ['#212326', '#bdc5d0', '#a5acb2', '#cdd3dc'], gem: true, sig: 'Facet flashes · white scintillation' },
+  { id: 'hope',       name: 'Hope',           swatches: ['#1d232c', '#81aded', '#9eadba', '#c5d4e8'], gem: true, sig: 'Ripples · red-orange afterglow' },
+  { id: 'pinkstar',   name: 'Pink Star',      swatches: ['#292024', '#e490b5', '#c7a291', '#e4cbd5'], gem: true, sig: 'Petal blooms · drifting bokeh' },
+  { id: 'moussaieff', name: 'Moussaieff Red', swatches: ['#2a2020', '#e37678', '#a5acb2', '#e7cbcc'], gem: true, sig: 'Trillion shards · a heartbeat' },
+  { id: 'dresden',    name: 'Dresden Green',  swatches: ['#1c2520', '#71c294', '#bba980', '#c2d9cb'], gem: true, sig: 'Growing vines · aurora' },
+  { id: 'argyle',     name: 'Argyle Violet',  swatches: ['#23212b', '#b39be7', '#aaa8bd', '#d4cfe6'], gem: true, sig: 'Constellations · shooting stars' },
+  { id: 'jubilee',    name: 'Golden Jubilee', swatches: ['#27221a', '#e0ae57', '#c0a780', '#dfd0bc'], gem: true, sig: 'Sunbursts · gold dust · fireworks' },
+  { id: 'kohinoor',   name: 'Koh-i-Noor',     swatches: ['#e8edf3', '#3e649c', '#8195a7', '#2f3f4f'], gem: true, light: true, sig: 'Ink ripples · pen strokes · light' },
+  { id: 'chameleon',  name: 'Chameleon',      swatches: ['#23241b', '#a2ac61', '#e6b557', '#d3d5bd'], gem: true, sig: 'Warms to gold as you work' }
 ];
 for (const g of GEM_THEMES) BUILTIN_THEMES.push(g);
 // Alacritty palettes (from github.com/alacritty/alacritty-theme), generated into
