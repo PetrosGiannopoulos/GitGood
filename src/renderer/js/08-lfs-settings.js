@@ -486,8 +486,22 @@ function injectAlacrittyVars(theme) {
 
 // Apply a theme: built-ins set an html class (vars live in CSS); Alacritty themes get a
 // shared "theme-alacritty" class plus injected CSS variables. Called on load and picker.
+// The theme last applied (undefined until the first call at startup, which must not animate).
+let _lastAppliedTheme;
 function applyTheme(themeId) {
   const html = document.documentElement;
+  // Switching *to* a gem shatters the previous theme away (24-gem-juice.js); that needs the
+  // old background, read before the classes change.
+  const prevTheme = _lastAppliedTheme;
+  let prevBg = '';
+  if (prevTheme !== undefined && prevTheme !== themeId) {
+    // Resolved by the browser (a gem's --bg may be a color-mix, which a canvas cannot take).
+    const probe = document.createElement('i');
+    probe.style.cssText = 'position:absolute;width:0;height:0;background:var(--bg)';
+    html.appendChild(probe);
+    prevBg = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+  }
   // Clear every possible theme class (built-ins + the alacritty marker)
   for (const t of BUILTIN_THEMES) html.classList.remove('theme-' + t.id);
   html.classList.remove('theme-alacritty', 'theme-hero', 'theme-gem');
@@ -518,6 +532,12 @@ function applyTheme(themeId) {
   if (typeof refreshThemeLaneColors === 'function') {
     refreshThemeLaneColors();
     try { if (state && state.graph && state.graph.commits && state.graph.commits.length) relayoutGraph(); } catch (e) {}
+  }
+
+  _lastAppliedTheme = themeId;
+  if (prevBg && GEM_THEMES.some(t => t.id === themeId)) {
+    if (typeof gemFacetWipe === 'function') gemFacetWipe(prevBg);
+    if (typeof gemSound === 'function') gemSound('theme');
   }
 }
 
@@ -835,7 +855,33 @@ async function showSettingsDialog() {
       <div class="settings-group">
         <div class="settings-group-title">Gem themes <span class="text-muted" style="font-weight:400">(${GEM_THEMES.length})</span></div>
         <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Palettes after rare diamonds, set in their own metal, and each with its own way of answering you: light follows the cursor, and clicks, drags, resizes, successes and errors each get the stone's own reaction. Particles never cover code or diffs.</p>
-        <div class="theme-picker" id="gem-picker">${gemCards}</div>
+        <div class="theme-picker gem-showroom" id="gem-picker">${gemCards}</div>
+        <div class="settings-row">
+          <div class="label">Gem sounds<small>A synthesized cue per operation (a chime on commit, a whoosh on push, a low thud on pull), tuned to each stone. Gem themes only.</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-gem-sound" ${appSettings.gemSound ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="label">Sound volume</div>
+          <div class="control">
+            <input type="range" id="set-gem-volume" min="0" max="100" step="5" value="${appSettings.gemSoundVolume ?? 40}" />
+            <span id="set-gem-volume-val" style="color:var(--muted-text);font-size:11px;min-width:34px">${appSettings.gemSoundVolume ?? 40}%</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="label">Koh-i-Noor by day, Black Orlov by night<small>While either is your theme, follow the system's light/dark setting.</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-gem-daynight" ${appSettings.gemDayNight ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+        <p class="modal-text text-muted" style="font-size:11px;margin-top:6px">In a gem theme, hold <b>Ctrl</b> over a diff for the jeweller's loupe.</p>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">Alacritty themes <span class="text-muted" style="font-weight:400">(${ALACRITTY_THEMES.length} imported)</span></div>
@@ -970,6 +1016,25 @@ async function showSettingsDialog() {
       };
     }
 
+    // Gem preferences — live preview, persisted on Save.
+    const gemLive = () => { if (typeof applyGemPrefs === 'function') applyGemPrefs({ ...appSettings, ...appChanges }); };
+    const gsnd = panel.querySelector('#set-gem-sound');
+    if (gsnd) gsnd.onchange = () => {
+      appChanges.gemSound = gsnd.checked; gemLive();
+      if (gsnd.checked && typeof gemSound === 'function') gemSound('commit');   // a sample
+    };
+    const gvol = panel.querySelector('#set-gem-volume');
+    if (gvol) {
+      gvol.oninput = () => {
+        const v = parseInt(gvol.value, 10);
+        panel.querySelector('#set-gem-volume-val').textContent = v + '%';
+        appChanges.gemSoundVolume = v; gemLive();
+      };
+      gvol.onchange = () => { if (typeof gemSound === 'function') gemSound('commit'); };
+    }
+    const gdn = panel.querySelector('#set-gem-daynight');
+    if (gdn) gdn.onchange = () => { appChanges.gemDayNight = gdn.checked; gemLive(); };
+
     // Marvel backdrop style — live preview, persisted on Save.
     const hs = panel.querySelector('#set-hero-style');
     if (hs) {
@@ -1035,10 +1100,17 @@ async function showSettingsDialog() {
 
   // One theme card. `dark` flag (Alacritty) tunes the name text via CSS if needed.
   function themeCardHtml(t, currentId, extraClass = '') {
-    return `<button class="theme-card ${extraClass} ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}">
+    // A gem card is a showroom piece: the stone itself, turning, and its one-line story
+    // (both from 25-gem-world.js).
+    const gemCard = extraClass === 'gem-card';
+    const stone = gemCard && typeof gemStoneHtml === 'function' ? gemStoneHtml(t.id, t.swatches) : '';
+    const story = gemCard && typeof gemStory === 'function' ? gemStory(t.id) : '';
+    return `<button class="theme-card ${extraClass} ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}"${story ? ` title="${escapeHtml(story)}"` : ''}>
+      ${stone}
       <div class="theme-swatches">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
       <div class="theme-card-name">${escapeHtml(t.name)}</div>
       ${t.sig ? `<div class="theme-card-sig">${escapeHtml(t.sig)}</div>` : ''}
+      ${story ? `<div class="theme-card-story">${escapeHtml(story)}</div>` : ''}
     </button>`;
   }
 
@@ -1378,6 +1450,7 @@ async function showSettingsDialog() {
         applyFontScale(appSettings.fontScale);
         applyHeroBackdrop(appSettings.heroBackdrop);
         applyHeroStyle(appSettings.heroBackdropStyle);
+        if (typeof applyGemPrefs === 'function') applyGemPrefs(appSettings);
         applyFonts(appSettings.monoFont, appSettings.uiFont);
         showToast('Preferences reset', 'success');
       }
@@ -1412,6 +1485,7 @@ async function showSettingsDialog() {
     applyFontScale(appSettings.fontScale);
     applyHeroBackdrop(appSettings.heroBackdrop);
     applyHeroStyle(appSettings.heroBackdropStyle);
+    if (typeof applyGemPrefs === 'function') applyGemPrefs(appSettings);
     applyFonts(appSettings.monoFont, appSettings.uiFont);
     modal.hide();
   };
@@ -1440,6 +1514,7 @@ async function showSettingsDialog() {
         applyFontScale(appSettings.fontScale);
         applyHeroBackdrop(appSettings.heroBackdrop);
         applyHeroStyle(appSettings.heroBackdropStyle);
+        if (typeof applyGemPrefs === 'function') applyGemPrefs(appSettings);
         applyFonts(appSettings.monoFont, appSettings.uiFont);
       }
     }
@@ -1487,6 +1562,9 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   fontScale: 1.0,
   heroBackdrop: 75,
   heroBackdropStyle: 'art',
+  gemSound: false,
+  gemSoundVolume: 40,
+  gemDayNight: false,
   monoFont: 'default',
   uiFont: 'default',
   llmAssistant: false,
@@ -1683,6 +1761,7 @@ async function applySavedAppSettings() {
       applyFontScale(r.data.fontScale);
       applyHeroBackdrop(r.data.heroBackdrop);
       applyHeroStyle(r.data.heroBackdropStyle);
+      if (typeof applyGemPrefs === 'function') applyGemPrefs(r.data);
       applyFonts(r.data.monoFont, r.data.uiFont);
       // Mirror a few into state for downstream code
       if (typeof state !== 'undefined') {

@@ -50,6 +50,8 @@
 @property --ly { syntax: '<length>'; inherits: false; initial-value: -9999px; }
 /* Chameleon only: 0 = resting olive, 1 = heated gold. Registered so it can transition. */
 @property --chameleon-heat { syntax: '<number>'; inherits: false; initial-value: 0; }
+/* Chameleon only: 0 through the morning → 1 in the evening (25-gem-world.js, every 10 min). */
+@property --chameleon-dusk { syntax: '<number>'; inherits: false; initial-value: 0; }
 
 @keyframes gem-glint-sweep {
   from { background-position: 160% 0; }
@@ -423,27 +425,27 @@ html.theme-kohinoor.theme-gem .tk-ann:not(.wd) { color: #4c6585; }
    and nothing else needs to know — and a restyle happens only when the level changes,
    a few times a minute at most, never per frame. */
 html.theme-chameleon {
-  --ink-black: #23241b;
-  --shadow-black: #1c1d15;
-  --panel-black: #2a2b22;
-  --raised-black: #32332a;
+  --ink-black: color-mix(in oklab, #23241b, #1b170f calc(var(--chameleon-dusk) * 100%));
+  --shadow-black: color-mix(in oklab, #1c1d15, #15120b calc(var(--chameleon-dusk) * 100%));
+  --panel-black: color-mix(in oklab, #2a2b22, #221d14 calc(var(--chameleon-dusk) * 100%));
+  --raised-black: color-mix(in oklab, #32332a, #2a241a calc(var(--chameleon-dusk) * 100%));
   --border-iron: #44453a;
   --border-bright: #6c6d5f;
   --bone-white: #d3d5bd;
   --parchment: #c4c7af;
   --parchment-dim: #a6a894;
   --muted-text: #808271;
-  --crusader-red: color-mix(in oklab, #a2ac61, #e6b557 calc(var(--chameleon-heat) * 100%));
-  --crusader-red-bright: color-mix(in oklab, #bbc581, #eecd7e calc(var(--chameleon-heat) * 100%));
-  --crusader-red-deep: color-mix(in oklab, #6d7437, #a97e33 calc(var(--chameleon-heat) * 100%));
+  --crusader-red: color-mix(in oklab, color-mix(in oklab, #a2ac61, #7a5a24 calc(var(--chameleon-dusk) * 40%)), #e6b557 calc(var(--chameleon-heat) * 100%));
+  --crusader-red-bright: color-mix(in oklab, color-mix(in oklab, #bbc581, #7a5a24 calc(var(--chameleon-dusk) * 40%)), #eecd7e calc(var(--chameleon-heat) * 100%));
+  --crusader-red-deep: color-mix(in oklab, color-mix(in oklab, #6d7437, #7a5a24 calc(var(--chameleon-dusk) * 40%)), #a97e33 calc(var(--chameleon-heat) * 100%));
   --blood: #474b27;
-  --gold-accent: color-mix(in oklab, #beb994, #e3c78e calc(var(--chameleon-heat) * 100%));
+  --gold-accent: color-mix(in oklab, color-mix(in oklab, #beb994, #7a5a24 calc(var(--chameleon-dusk) * 40%)), #e3c78e calc(var(--chameleon-heat) * 100%));
   --head-pill-text: #23241b;
   --added: #94c07c;
   --added-bg: rgba(148, 192, 124, 0.12);
   --removed: #e27e76;
   --removed-bg: rgba(226, 126, 118, 0.12);
-  --flame-a: color-mix(in oklab, #b2ac88, #d8ba79 calc(var(--chameleon-heat) * 100%));
+  --flame-a: color-mix(in oklab, color-mix(in oklab, #b2ac88, #7a5a24 calc(var(--chameleon-dusk) * 40%)), #d8ba79 calc(var(--chameleon-heat) * 100%));
   --flame-b: #e8e5d6;
   --flame-c: #524d3b;
   --gem-glint: #e0e4ca;
@@ -458,6 +460,7 @@ html.theme-chameleon {
   --gem-btn-bottom: #292a21;
   --lane-colors: #b8c182, #afb971, #6ec5a8, #6dbde2, #aaa9eb, #d79ac9, #e79a8d, #d5a96a;
   transition: --chameleon-heat 1.4s cubic-bezier(.3, 0, .2, 1);
+  /* --head-pill-text stays a literal: it is text on the accent, and must not follow the dusk. */
 }
 html.theme-chameleon.heat-1 { --chameleon-heat: 0.25; }
 html.theme-chameleon.heat-2 { --chameleon-heat: 0.5; }
@@ -823,6 +826,254 @@ html.theme-gem.gem-thump   #app-screen { animation: gem-thump 0.42s cubic-bezier
 html.theme-gem.gem-swoosh  #app-screen { animation: gem-swoosh 0.52s cubic-bezier(.3, .8, .3, 1); }
 html.theme-gem.gem-sputter #app-screen { animation: gem-sputter 0.45s linear; }
 
+/* =========================== the stone itself (25-gem-world.js) =========================== */
+
+/* ---- Commit dots as cut stones. They are drawn under the circles, which stay as the
+   (transparent) hit targets every graph handler keys on; a hovered circle becomes a ring of
+   light around its stone. ---- */
+html.theme-gem .graph-svg.has-gemcuts circle.commit-dot {
+  fill: transparent !important;
+  stroke: transparent !important;
+  filter: none !important;
+}
+html.theme-gem .graph-svg.has-gemcuts circle.commit-dot.row-hover {
+  r: 10.5;
+  stroke: color-mix(in srgb, var(--gem-glint) 75%, transparent) !important;
+  stroke-width: 1.2;
+}
+.graph-gemcuts { pointer-events: none; }
+.gem-cut .gem-table   { fill: rgba(255, 255, 255, 0.24); stroke: rgba(255, 255, 255, 0.35); stroke-width: 0.6; }
+.gem-cut .gem-facets  { fill: none; stroke: rgba(255, 255, 255, 0.42); stroke-width: 0.6; }
+.gem-cut .gem-spec    { fill: rgba(255, 255, 255, 0.85); stroke: none; }
+html.theme-light .gem-cut .gem-table { fill: rgba(255, 255, 255, 0.5); }
+html.theme-gem .gem-cut.head { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--gem-glint) 80%, transparent)); }
+html.theme-gem .gem-cut.selected { filter: drop-shadow(0 0 4px var(--accent-bright)); }
+html.theme-gem .gem-cut.merge .gem-table { fill: rgba(255, 255, 255, 0.34); }
+#graph-container.graph-highlight-active .gem-cut:not(.rel) { opacity: 0.22; }
+
+/* ---- Hope: commits that arrived with a pull glow in its red-orange afterglow and fade
+   over three minutes. One animation, started `age` seconds in the past (--fresh-delay), so
+   a redraw while scrolling never restarts it. ---- */
+@keyframes hope-afterglow {
+  from { background-color: color-mix(in srgb, var(--gem-afterglow) 17%, transparent); box-shadow: inset 2px 0 0 var(--gem-afterglow); }
+  to   { background-color: transparent; box-shadow: inset 2px 0 0 transparent; }
+}
+html.theme-hope .graph-row.gem-fresh,
+html.theme-hope .graph-row.gem-fresh:hover {
+  animation: hope-afterglow 180s linear both;
+  animation-delay: var(--fresh-delay, 0s);
+}
+html.theme-hope .gem-cut.fresh { filter: drop-shadow(0 0 4px var(--gem-afterglow)); }
+
+/* ---- Moussaieff Red: the heartbeat follows the repository — calm when clean, quicker with
+   uncommitted work, quicker still when behind the remote, racing during a conflict. ---- */
+html.theme-moussaieff.tension-1.theme-gem.theme-gem.theme-gem .btn-medieval.primary { animation-duration: 9s, 1.8s; }
+html.theme-moussaieff.tension-2.theme-gem.theme-gem.theme-gem .btn-medieval.primary { animation-duration: 9s, 1.25s; }
+html.theme-moussaieff.tension-3.theme-gem.theme-gem.theme-gem .btn-medieval.primary { animation-duration: 9s, 0.78s; }
+
+/* ---- Black Orlov, the cursed diamond: a confirmation whose button is a danger button
+   (force-push, hard reset, delete) closes in with smoke and a slow, bloody glow. ---- */
+@keyframes orlov-curse {
+  0%, 100% { box-shadow: 0 24px 60px var(--gem-shadow), 0 0 0 1px rgba(150, 30, 45, 0.45), 0 0 26px rgba(120, 10, 25, 0.22), inset 0 0 50px rgba(0, 0, 0, 0.5); }
+  50%      { box-shadow: 0 24px 60px var(--gem-shadow), 0 0 0 1px rgba(170, 40, 55, 0.6), 0 0 48px rgba(150, 15, 35, 0.42), inset 0 0 50px rgba(0, 0, 0, 0.5); }
+}
+@keyframes orlov-smoke {
+  from { transform: translate(-4%, 2%) rotate(0deg); }
+  to   { transform: translate(4%, -2%) rotate(8deg); }
+}
+html.theme-orlov #modal-overlay.gem-cursed {
+  background: radial-gradient(ellipse at center, rgba(8, 4, 6, 0.4) 0%, rgba(4, 0, 2, 0.88) 78%);
+  overflow: hidden;
+}
+html.theme-orlov #modal-overlay.gem-cursed::before {
+  content: '';
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    radial-gradient(closest-side at 22% 30%, rgba(60, 50, 55, 0.35), transparent),
+    radial-gradient(closest-side at 78% 62%, rgba(50, 40, 46, 0.3), transparent),
+    radial-gradient(closest-side at 50% 90%, rgba(70, 20, 30, 0.25), transparent);
+  filter: blur(18px);
+  animation: orlov-smoke 14s ease-in-out infinite alternate;
+}
+html.theme-orlov #modal-overlay.gem-cursed .modal {
+  position: relative;
+  border-color: rgba(160, 45, 60, 0.6);
+  animation: orlov-curse 3.4s ease-in-out infinite;
+}
+html.theme-orlov #modal-overlay.gem-cursed #modal-title {
+  color: #e2a8ad;
+  text-shadow: 0 0 12px rgba(170, 25, 45, 0.55);
+}
+
+/* ---- Dresden Green: the graph grows in like a vine when a repository opens, and a
+   long-lived branch (a straight lane over many rows) carries leaves along it. ---- */
+@keyframes dres-grow { from { clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes dres-bud  { from { opacity: 0; } to { opacity: 1; } }
+.graph-svg.gem-grow .graph-edges   { animation: dres-grow 1.25s cubic-bezier(.25, .7, .2, 1) both; }
+.graph-svg.gem-grow .graph-gemcuts { animation: dres-bud 0.8s 0.35s both; }
+.gem-vine {
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 0 13;
+  opacity: 0.36;
+  pointer-events: none;
+}
+.gem-vine.b { stroke-dashoffset: -6.5; }
+
+/* ---- Argyle Violet, under the outback sky: HEAD twinkles, tags are named stars (their
+   commits are drawn as stars too, and the lanes default to constellations). ---- */
+@keyframes argyle-twinkle {
+  0%, 100% { transform: scale(1);    opacity: 1; }
+  50%      { transform: scale(1.18); opacity: 0.8; }
+}
+html.theme-argyle .gem-cut.head {
+  animation: argyle-twinkle 2.6s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+html.theme-argyle .ref-pill.tag::before { content: '✦ '; color: var(--gem-glint); }
+html.theme-argyle .ref-pill.tag { box-shadow: 0 0 8px color-mix(in srgb, var(--gem-glint) 22%, transparent); }
+
+/* ---- Golden Jubilee: every tag is a release, gilded, with a slow shimmer across it. ---- */
+@keyframes jub-shimmer {
+  0%, 72% { background-position: 160% 0, 0 0; }
+  100%    { background-position: -60% 0, 0 0; }
+}
+html.theme-jubilee .ref-pill.tag {
+  background-image:
+    linear-gradient(110deg, transparent 38%, rgba(255, 244, 214, 0.55) 50%, transparent 62%),
+    linear-gradient(180deg, color-mix(in srgb, var(--crusader-red) 62%, var(--bg-raised)), color-mix(in srgb, var(--crusader-red-deep) 70%, var(--bg-raised)));
+  background-size: 300% 100%, 100% 100%;
+  background-repeat: no-repeat;
+  border-color: var(--crusader-red);
+  color: var(--head-pill-text);
+  animation: jub-shimmer 5.5s ease-in-out infinite;
+}
+html.theme-jubilee .ref-pill.tag::before { content: '♛ '; }
+
+/* ---- Gem-cut chrome: a faceted progress bar, bevelled toasts, a faceted focus ring ---- */
+html.theme-gem .op-progress-bar {
+  border: none;
+  height: 8px;
+  background: color-mix(in srgb, var(--bg-raised) 75%, black);
+  clip-path: polygon(4px 0, 100% 0, calc(100% - 4px) 100%, 0 100%);
+}
+html.theme-gem .op-progress-bar-fill {
+  background:
+    repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.24) 0 3px, transparent 3px 9px, rgba(0, 0, 0, 0.14) 9px 12px, transparent 12px 18px),
+    linear-gradient(90deg, var(--crusader-red-deep), var(--crusader-red), var(--gem-glint));
+  box-shadow: none;
+}
+html.theme-gem .toast-container { filter: drop-shadow(0 6px 14px var(--gem-shadow)); }
+html.theme-gem .toast {
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+}
+html.theme-gem .toast.success {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.22),
+              inset 8px 0 16px -10px color-mix(in srgb, var(--gem-glint) 70%, transparent);
+}
+html.theme-gem :is(input, textarea, select, .commit-search):focus {
+  border-color: var(--accent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--gem-glint) 22%, transparent),
+              inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+              0 0 0 1px var(--accent),
+              0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent),
+              0 0 14px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* ---- The Settings showroom: each card holds its stone, slowly turning. The facet band
+   slides under the cut's silhouette (a transform, so the compositor does the work); the
+   drop-shadows trace the silhouette in the setting's metal. ---- */
+.gem-showroom { grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); }
+/* Cards centre their children, which shrinks a row of empty swatch spans to their borders
+   (measured: 20 px rows of 2 px swatches). Gem cards stretch; the stone centres itself. */
+.theme-card.gem-card { align-items: stretch; text-align: left; }
+@keyframes gem-turn { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.gem-stone {
+  display: block;
+  width: 54px;
+  height: 44px;
+  margin: 2px auto 0;
+  filter: drop-shadow(0 0 1px var(--st-metal)) drop-shadow(0 4px 6px rgba(0, 0, 0, 0.45));
+}
+.gem-stone-body {
+  display: block;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--st-stone);
+}
+.gem-stone-facets {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 200%;
+  background: repeating-linear-gradient(100deg,
+    color-mix(in srgb, var(--st-stone) 50%, white) 0 6px, var(--st-stone) 6px 14px,
+    color-mix(in srgb, var(--st-stone) 55%, black) 14px 19px, var(--st-stone) 19px 27px);
+  animation: gem-turn 7s linear infinite;
+}
+.gem-stone-table {
+  position: absolute;
+  left: 28%; right: 28%; top: 24%; bottom: 38%;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.06));
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%);
+}
+.gem-stone.cut-cushion  .gem-stone-body { clip-path: inset(0 round 32%); }
+.gem-stone.cut-oval     .gem-stone-body { clip-path: ellipse(50% 44% at 50% 50%); }
+.gem-stone.cut-trillion .gem-stone-body { clip-path: polygon(50% 2%, 98% 94%, 2% 94%); }
+.gem-stone.cut-trillion .gem-stone-table { top: 46%; bottom: 22%; }
+.gem-stone.cut-pear     .gem-stone-body { clip-path: polygon(50% 0, 64% 14%, 78% 34%, 86% 56%, 82% 78%, 68% 94%, 50% 100%, 32% 94%, 18% 78%, 14% 56%, 22% 34%, 36% 14%); }
+.gem-stone.cut-pear     .gem-stone-table { top: 44%; bottom: 20%; }
+.gem-stone.cut-radiant  .gem-stone-body { clip-path: polygon(16% 0, 84% 0, 100% 18%, 100% 82%, 84% 100%, 16% 100%, 0 82%, 0 18%); }
+.theme-card:hover .gem-stone-facets,
+.theme-card.active .gem-stone-facets { animation-duration: 2.6s; }
+.theme-card .theme-card-story {
+  font-size: 10px;
+  line-height: 1.3;
+  font-style: italic;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* ---- The jeweller's loupe (hold Ctrl over a diff) ---- */
+#gem-loupe {
+  position: fixed;
+  left: 0; top: 0;
+  width: 236px; height: 236px;
+  border-radius: 50%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 10030;
+  opacity: 0;
+  transition: opacity 0.12s;
+  background: var(--bg-panel);
+  box-shadow: 0 0 0 2px var(--flame-a),
+              0 0 0 4px color-mix(in srgb, var(--flame-c) 85%, transparent),
+              0 14px 34px rgba(0, 0, 0, 0.5),
+              inset 0 0 22px rgba(0, 0, 0, 0.4);
+  will-change: transform;
+}
+#gem-loupe.on { opacity: 1; }
+#gem-loupe::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  /* the glass: a refracting rim tinted by the stone, and one reflection */
+  background:
+    radial-gradient(circle at 50% 50%, transparent 64%, color-mix(in srgb, var(--gem-fire-1) 16%, transparent) 88%, color-mix(in srgb, var(--gem-glint) 34%, transparent) 100%),
+    radial-gradient(circle at 30% 24%, rgba(255, 255, 255, 0.2), transparent 28%);
+}
+.gem-loupe-view { position: absolute; inset: 0; }
+.gem-loupe-lines { position: absolute; left: 0; top: 0; transform-origin: 0 0; background: var(--bg-panel); }
+
 /* The juice module's canvas: above everything, catches nothing. */
 #gem-juice-canvas {
   position: fixed;
@@ -849,4 +1100,11 @@ html.theme-gem.gem-sputter #app-screen { animation: gem-sputter 0.45s linear; }
   html.theme-moussaieff.theme-gem.theme-gem.theme-gem .btn-medieval.primary,
   html.theme-gem .toast.error { animation: none; }
   html.theme-gem #app-screen { animation: none !important; }
+  html.theme-argyle .gem-cut.head,
+  html.theme-jubilee .ref-pill.tag,
+  html.theme-orlov #modal-overlay.gem-cursed::before,
+  html.theme-orlov #modal-overlay.gem-cursed .modal,
+  .graph-svg.gem-grow .graph-edges,
+  .graph-svg.gem-grow .graph-gemcuts,
+  .gem-stone-facets { animation: none !important; }
 }

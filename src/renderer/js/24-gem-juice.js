@@ -28,6 +28,14 @@
 // Window shakes are CSS (`translate` on #app-screen, compositor-only) and last under a
 // second; the push rumble is capped so a slow push is not a slow earthquake.
 //
+// Also here, because they draw on this canvas or read the cursor's light:
+//   - the HEAD commit's stone (25-gem-world.js draws it) turns its highlight to the cursor
+//   - switching to a gem is a facet wipe: the old theme shatters into shards and falls away
+//     (window.gemFacetWipe, called by applyTheme)
+//   - on Koh-i-Noor, rewriting history (amend, squash, rebase) is a "re-cut": scattered
+//     facets settle into a brilliant while shavings fly off
+//   - a pushed tag ('gitgood:tag-pushed') is a celebration; on Golden Jubilee, fireworks
+//
 // The personas come from the stones themselves (each is described where it is defined):
 // Black Orlov's facets, the Hope's red phosphorescence, Pink Star's petals, the
 // Moussaieff's trillion cut and heartbeat, Dresden's vines and aurora, Argyle's night sky,
@@ -300,6 +308,9 @@
     }
     // Read every rect before writing anything, so the frame never forces a layout mid-write.
     const rects = localLit.map(el => el.getBoundingClientRect());
+    // The HEAD stone's highlight faces the cursor, like a facet catching the light.
+    const spec = document.querySelector('.graph-gemcuts .gem-cut.head .gem-spec');
+    const specRect = spec ? spec.parentNode.getBoundingClientRect() : null;
     const x = mx + 'px', y = my + 'px';
     for (const el of lit) { el.style.setProperty('--mx', x); el.style.setProperty('--my', y); }
     if (hot) { hot.style.setProperty('--mx', x); hot.style.setProperty('--my', y); }
@@ -307,6 +318,11 @@
       el.style.setProperty('--lx', (mx - rects[i].left) + 'px');
       el.style.setProperty('--ly', (my - rects[i].top) + 'px');
     });
+    if (spec && specRect && specRect.width) {
+      const ang = Math.atan2(my - (specRect.top + specRect.height / 2), mx - (specRect.left + specRect.width / 2));
+      const deg = Math.round(ang * 180 / Math.PI + 90);     // the highlight is drawn at the top
+      spec.setAttribute('transform', `rotate(${deg} ${spec.dataset.cx} ${spec.dataset.cy})`);
+    }
   }
 
   function frame(t) {
@@ -748,6 +764,64 @@
         ctx.strokeStyle = g;
         ctx.lineWidth = p.w;
         ctx.beginPath(); ctx.moveTo(x - p.len, p.y); ctx.lineTo(x, p.y); ctx.stroke();
+        break;
+      }
+      case 'wipe': {
+        // The previous theme, shattered: each shard holds until the diagonal sweep reaches it,
+        // then turns, shrinks towards its centre and fades, catching the light as it goes.
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
+        const age2 = age;
+        for (const sh of p.shards) {
+          const u = Math.min(1, Math.max(0, (age2 - sh.delay) / p.fall));
+          if (u >= 1) continue;
+          const e = u * u;
+          // Slightly translucent from the start: the new theme glows through the cracks.
+          const sc = 1 - e, a = (1 - e * e) * 0.88;
+          ctx.save();
+          ctx.translate(sh.cx + sh.dx * e, sh.cy + sh.dy * e);
+          ctx.rotate(sh.rot * e);
+          ctx.scale(sc, sc);
+          ctx.beginPath();
+          ctx.moveTo(sh.p[0] - sh.cx, sh.p[1] - sh.cy);
+          ctx.lineTo(sh.p[2] - sh.cx, sh.p[3] - sh.cy);
+          ctx.lineTo(sh.p[4] - sh.cx, sh.p[5] - sh.cy);
+          ctx.closePath();
+          ctx.globalAlpha = a;
+          ctx.fillStyle = p.bg;
+          ctx.fill();
+          if (u > 0) {
+            ctx.strokeStyle = `rgba(${glint},${0.55 * Math.sin(Math.PI * u)})`;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+        ctx.restore();
+        break;
+      }
+      case 'recut': {
+        // Koh-i-Noor's re-cut: scattered facets settle into a brilliant (top view).
+        const e = easeOut(Math.min(1, k / 0.75));
+        const a = k < 0.75 ? 0.9 : 0.9 * (1 - (k - 0.75) / 0.25);
+        const rot = p.rot + (1 - e) * 0.8;
+        const pt = (i, rr, off) => {
+          const ang = rot + (i / 8) * TAU + (off || 0);
+          const j = p.jit[i % p.jit.length];
+          return [p.x + Math.cos(ang) * rr + j[0] * (1 - e), p.y + Math.sin(ang) * rr + j[1] * (1 - e)];
+        };
+        const outer = [], inner = [];
+        for (let i = 0; i < 8; i++) { outer.push(pt(i, p.r)); inner.push(pt(i, p.r * 0.5, TAU / 16)); }
+        ctx.strokeStyle = `rgba(${p.rgb},${a})`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        outer.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+        inner.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+        for (let i = 0; i < 8; i++) {
+          ctx.moveTo(inner[i][0], inner[i][1]); ctx.lineTo(outer[i][0], outer[i][1]);
+          ctx.moveTo(inner[i][0], inner[i][1]); ctx.lineTo(outer[(i + 1) % 8][0], outer[(i + 1) % 8][1]);
+        }
+        ctx.stroke();
         break;
       }
       case 'line': {
@@ -1223,6 +1297,7 @@
 
   function opKind(message) {
     const m = String(message || '');
+    if (/^(Amending|Rewording|Combining commits|Rebasing|Running interactive rebase|Rewriting history)/.test(m)) return 'rewrite';
     if (/^(Pulling|LFS pull)/.test(m)) return 'pull';
     if (/^(Pushing|Force-pushing)/.test(m)) return 'push';
     if (/^(Fetching|LFS fetch)/.test(m)) return 'fetch';
@@ -1375,6 +1450,26 @@
     unstash: {
       ok(o) { persona.press(o.x, o.y, true); ring(o.x, o.y, { r: 60, a: 0.4, life: 700 }); },
     },
+    // History rewritten. Koh-i-Noor — re-cut in 1852, losing over 40% of its weight for
+    // brilliance — gets a re-cut; every other gem keeps its usual reaction.
+    rewrite: {
+      ok(o, message) {
+        if (gemId === 'kohinoor') {
+          const jit = [];
+          for (let i = 0; i < 8; i++) jit.push([rand(-26, 26), rand(-26, 26)]);
+          push({ kind: 'recut', x: o.x, y: o.y, r: 30, rot: rand(0, TAU), jit, rgb: ink, life: 1100 });
+          for (let i = 0; i < 14; i++) {                    // the shavings
+            const a = rand(0, TAU), v = rand(0.08, 0.2);
+            push({ kind: 'shard', x: o.x + Math.cos(a) * 22, y: o.y + Math.sin(a) * 22, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+                   g: 0.0003, drag: 0.985, rot: rand(0, TAU), vrot: rand(-0.02, 0.02), size: rand(1.6, 3),
+                   rgb: fireRgb(Math.random()), life: rand(600, 900), delay: rand(0, 300) });
+          }
+          setTimeout(() => { if (on) spark(o.x, o.y, { vx: 0, vy: 0, size: 3.4, life: 500 }); }, 820);
+          shake('gem-thump', 420);
+        } else if (/^(Amending|Rewording)/.test(message || '')) OPS.commit.ok(o);
+        else OPS.merge.ok(o);
+      },
+    },
   };
 
   function onOp(e) {
@@ -1386,11 +1481,53 @@
     const o = origin();
     try {
       if (d.phase === 'start') { if (fx.start) fx.start(o); }
-      else if (d.ok === true) { if (fx.ok) fx.ok(o); }
+      else if (d.ok === true) { if (fx.ok) fx.ok(o, d.message); }
       else if (d.ok === false) { if (fx.fail) fx.fail(o); else stopOpLoops(kind); }
       else stopOpLoops(kind);                     // cancelled
     } catch (err) { /* an effect must never break an operation */ }
   }
+
+  // ---------------------------------------------------------------- facet wipe
+
+  // Called by applyTheme right after the classes change, with the *previous* theme's
+  // background. The canvas is brought up synchronously and the first frame drawn at once, so
+  // the new theme never flashes before the shards cover it.
+  window.gemFacetWipe = function gemFacetWipe(prevBg) {
+    try {
+      sync();
+      if (!on || reduceMQ.matches || !prevBg) return;
+      const cell = 92, shards = [];
+      const cols = Math.ceil(W / cell) + 1, rows = Math.ceil(H / cell) + 1;
+      const jx = [], jy = [];
+      for (let r = 0; r <= rows; r++) for (let c = 0; c <= cols; c++) {
+        const edge = r === 0 || c === 0 || r === rows || c === cols;
+        jx.push(c * cell + (edge ? 0 : rand(-cell * 0.3, cell * 0.3)));
+        jy.push(r * cell + (edge ? 0 : rand(-cell * 0.3, cell * 0.3)));
+      }
+      const at = (c, r) => [jx[r * (cols + 1) + c], jy[r * (cols + 1) + c]];
+      const sweep = 440;
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        const a = at(c, r), b = at(c + 1, r), d = at(c, r + 1), e = at(c + 1, r + 1);
+        for (const tri of [[a, b, e], [a, e, d]]) {
+          const cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3, cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3;
+          shards.push({ p: [tri[0][0], tri[0][1], tri[1][0], tri[1][1], tri[2][0], tri[2][1]], cx, cy,
+                        dx: rand(-18, 18), dy: rand(10, 40), rot: rand(-0.9, 0.9),
+                        delay: ((cx + cy) / (W + H)) * sweep + rand(0, 60) });
+        }
+      }
+      const p = push({ kind: 'wipe', shards, bg: prevBg, fall: 340, life: sweep + 440 });
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      frame(p.born);
+    } catch (e) { /* a transition must never break applying a theme */ }
+  };
+
+  // A tag reached the remote: a release went out.
+  document.addEventListener('gitgood:tag-pushed', () => {
+    if (!on || !particlesAllowed()) return;
+    const o = origin();
+    if (gemId === 'jubilee') persona.success(o.x, o.y);       // fireworks
+    else { persona.press(o.x, o.y, true); ring(o.x, o.y, { r: 70, a: 0.45, life: 800 }); }
+  });
 
   // ---------------------------------------------------------------- toasts: success / error
 

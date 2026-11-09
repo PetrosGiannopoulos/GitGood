@@ -4074,6 +4074,9 @@ const DEFAULT_APP_SETTINGS = {
   fontScale: 1.0,                     // UI font scale multiplier
   heroBackdrop: 75,                   // Marvel themes: strength of the backdrop art, 0–100 (%)
   heroBackdropStyle: 'art',           // Marvel themes: 'art' (suit art) | 'comic' (comic page) | 'print' (comic page as newsprint)
+  gemSound: false,                    // gem themes: synthesized sound cues per operation (25-gem-world.js)
+  gemSoundVolume: 40,                 // gem themes: cue volume, 0–100 (%)
+  gemDayNight: false,                 // gem themes: Koh-i-Noor by day, Black Orlov by night (follows the OS)
   monoFont: 'default',                // monospace font family (Nerd Font name or 'default')
   uiFont: 'default',                  // interface font family (Nerd Font name or 'default')
   llmAssistant: false,                // local AI git assistant — OFF by default; needs Ollama + a pulled model

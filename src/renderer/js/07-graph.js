@@ -368,6 +368,12 @@ function refreshThemeLaneColors() {
 const GRAPH_LINE_STYLES = ['default', 'dragon', 'gears', 'constellations'];
 function graphLineStyle() {
   const s = typeof state !== 'undefined' && state.graphLineStyle;
+  // A gem theme may bring its own default (Argyle Violet: constellations); a style the user
+  // actually picked always wins.
+  if ((!s || s === 'default') && typeof gemDefaultLineStyle === 'function') {
+    const g = gemDefaultLineStyle();
+    if (g) return g;
+  }
   return GRAPH_LINE_STYLES.includes(s) ? s : 'default';
 }
 
@@ -827,6 +833,12 @@ function renderGraph() {
   const lineStyle = graphLineStyle();
   const shades = lineStyle !== 'default' ? graphLaneShades() : null;
   const styleDefs = graphStyleDefs(lineStyle, shades, svgWidth, totalHeight);
+  // Gem themes draw each commit as the stone's cut (25-gem-world.js), in a layer under the
+  // circles — which stay, transparent, as the hit targets every handler here keys on.
+  const gemCuts = typeof gemDotSvg === 'function' && typeof gemThemeId === 'function' && !!gemThemeId();
+  const gemEdge = typeof gemEdgeExtra === 'function' ? gemEdgeExtra : null;
+  if (gemEdge && typeof gemMarkVines === 'function') gemMarkVines(edges);
+  const gemAge = typeof gemFreshAge === 'function' ? gemFreshAge : null;
 
   // Build the SVG string for one edge. A straight run is a single <line> spanning all its
   // rows (#2); a column change is a short cubic.
@@ -849,15 +861,16 @@ function renderGraph() {
     }
     const y1 = e.fromRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
     const y2 = e.toRow * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    const extra = gemEdge ? gemEdge(e, x1, y1, x2, y2, color) : '';
     if (lineStyle !== 'default') {
       const idx = colorKey % shades.length;
       const d = x1 === x2 ? `M ${x1} ${y1} L ${x2} ${y2}` : graphCrossEdgePath(lineStyle, x1, y1, x2, y2);
-      return graphStyledEdge(lineStyle, d, shades[idx], idx, `graph-edge styled${relCls}`, owner);
+      return graphStyledEdge(lineStyle, d, shades[idx], idx, `graph-edge styled${relCls}`, owner) + extra;
     }
     // A line across a fold is dashed: commits are hidden between its two ends.
     const dash = e.folded ? ' stroke-dasharray="2 4"' : '';
     if (x1 === x2) {
-      return `<line class="graph-edge${relCls}${e.folded ? ' folded' : ''}"${owner} x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"${dash}/>`;
+      return `<line class="graph-edge${relCls}${e.folded ? ' folded' : ''}"${owner} x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"${dash}/>` + extra;
     }
     const midY = y1 + (y2 - y1) / 2;
     return `<path class="graph-edge${relCls}${e.folded ? ' folded' : ''}"${owner} d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"${dash}/>`;
@@ -909,6 +922,20 @@ function renderGraph() {
     const r = (c.parents || []).length > 1 ? 6 : 5;
     const relCls = (relatedSet && relatedSet.has(c.hash)) ? ' rel' : '';
     return graphStyledDeco(lineStyle, cx, cy, r, shades[key % shades.length], `graph-deco-item${relCls}`);
+  };
+
+  // The commit as a cut stone (gem themes only; see gemCuts above).
+  const buildGem = (c, pos) => {
+    const cx = GRAPH_LANE_X0 + pos.lane * GRAPH_LANE_W;
+    const cy = pos.row * GRAPH_ROW_H + GRAPH_ROW_H / 2;
+    const isMerge = (c.parents || []).length > 1;
+    return gemDotSvg(cx, cy, isMerge ? 6 : 5, laneColor(pos.colorIdx != null ? pos.colorIdx : pos.lane), {
+      head: c.hash === head, merge: isMerge,
+      tagged: (c.refs || []).some(r => r.type === 'tag'),
+      rel: !!(relatedSet && relatedSet.has(c.hash)),
+      selected: state.selectedGraphHash === c.hash,
+      fresh: !!(gemAge && gemAge(c.hash) != null),
+    });
   };
 
   // Build the branch-column cell for one commit. Refs live in their OWN virtualized column
@@ -971,7 +998,12 @@ function renderGraph() {
     const lineNote = pos.branchLine
       ? `\n\nBranch line: ${pos.branchLine}`
       : '\n\nBranch line: unknown (branch deleted or outside view)';
-    return `<div class="graph-row${selectedCls}${headCls}${relCls}" data-hash="${c.hash}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px">` +
+    // Hope: a commit that arrived with a pull glows and fades over minutes. The fade is one
+    // CSS animation started `age` seconds in the past, so a redraw never restarts it.
+    const freshAge = gemAge ? gemAge(c.hash) : null;
+    const freshCls = freshAge != null ? ' gem-fresh' : '';
+    const freshStyle = freshAge != null ? `;--fresh-delay:-${freshAge.toFixed(1)}s` : '';
+    return `<div class="graph-row${selectedCls}${headCls}${relCls}${freshCls}" data-hash="${c.hash}" style="top:${pos.row * GRAPH_ROW_H}px;height:${GRAPH_ROW_H}px${freshStyle}">` +
         foldToggle +
         `<span class="graph-row-msg" title="${escapeHtml((c.message || '') + lineNote)}">${msgHtml}</span>` +
         foldBadge +
@@ -1000,10 +1032,11 @@ function renderGraph() {
     `<div class="graph-svg-wrap${refColWidth > 0 ? ' has-refs' : ''}" style="grid-template-columns: ${gridCols}">` +
       refsColHtml +
       `<div class="graph-svg-col" style="height:${totalHeight}px;width:${svgWidth}px">` +
-        `<svg class="graph-svg line-style-${lineStyle}" width="${svgWidth}" height="0" viewBox="0 0 ${svgWidth} 0" preserveAspectRatio="xMinYMin slice">` +
+        `<svg class="graph-svg line-style-${lineStyle}${gemCuts ? ' has-gemcuts' : ''}" width="${svgWidth}" height="0" viewBox="0 0 ${svgWidth} 0" preserveAspectRatio="xMinYMin slice">` +
           styleDefs.defs + styleDefs.backdrop +
           `<g class="graph-edges"></g>` +
           `<g class="graph-deco"></g>` +
+          `<g class="graph-gemcuts"></g>` +
           `<g class="graph-dots"></g>` +
         `</svg>` +
       `</div>` +
@@ -1014,6 +1047,7 @@ function renderGraph() {
   const edgesG = container.querySelector('.graph-edges');
   const dotsG = container.querySelector('.graph-dots');
   const decoG = container.querySelector('.graph-deco');
+  const gemG = container.querySelector('.graph-gemcuts');
   const rowsEl = container.querySelector('.graph-rows');
   const svgEl = container.querySelector('.graph-svg');
   const refsColEl = container.querySelector('.graph-refs-col');
@@ -1049,6 +1083,7 @@ function renderGraph() {
     const dotParts = [];
     const refParts = [];
     const decoParts = [];
+    const gemParts = [];
     const withDeco = lineStyle !== 'default';
     for (let i = start; i <= end; i++) {
       const c = commits[i];
@@ -1056,11 +1091,13 @@ function renderGraph() {
       if (!pos) continue;
       dotParts.push(buildDot(c, pos));
       if (withDeco) decoParts.push(buildDeco(c, pos));
+      if (gemCuts) gemParts.push(buildGem(c, pos));
       rowParts.push(buildRow(c, pos));
       if (refsColEl) refParts.push(buildRefCell(c, pos));
     }
     dotsG.innerHTML = dotParts.join('');
     if (withDeco) decoG.innerHTML = decoParts.join('');
+    if (gemCuts) gemG.innerHTML = gemParts.join('');
     rowsEl.innerHTML = rowParts.join('');
     if (refsColEl) refsColEl.innerHTML = refParts.join('');
 
@@ -1762,10 +1799,14 @@ async function doPushTag(tagName) {
     r = await withLoading(`Force-pushing ${tagName}`, () => gs.pushTag({ tag: tagName, remote, force: true }));
     if (!r.ok) { showToast(r.error || 'Force push failed', 'error', 7000); return; }
     showToast(`Tag ${tagName} force-pushed to ${remote}`, 'success');
+    document.dispatchEvent(new CustomEvent('gitgood:tag-pushed', { detail: { tag: tagName } }));
   } else {
     showToast(r.data.result === 'up-to-date'
       ? `${remote} already has ${tagName}`
       : `Tag ${tagName} pushed to ${remote}`, 'success');
+    // A tag reaching the remote is a release going out: gem themes celebrate it
+    // (24-gem-juice.js, 25-gem-world.js). Not for "already there".
+    if (r.data.result !== 'up-to-date') document.dispatchEvent(new CustomEvent('gitgood:tag-pushed', { detail: { tag: tagName } }));
   }
 
   // Only refine a set we already have. Seeding it from a single push would imply every
