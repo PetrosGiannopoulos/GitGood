@@ -108,12 +108,14 @@ html.theme-gem .sidebar-header {
 html.theme-gem .statusbar,
 html.theme-gem .tabs { background-color: var(--bg-panel); }
 
-/* Toolbar edge: platinum, with a narrow band of dispersion drifting along it. */
+/* Toolbar edge: platinum, with one glint of light drifting along it (white core, a faint
+   ice tint either side) — the same language as the primary button's ring. */
 html.theme-gem .toolbar::after {
   background: linear-gradient(90deg,
     var(--flame-c) 0%, var(--flame-a) 18%, var(--flame-c) 36%,
-    var(--gem-fire-1) 44%, var(--gem-fire-2) 46.5%, var(--gem-fire-3) 49%,
-    var(--gem-fire-4) 51.5%, var(--gem-fire-5) 54%,
+    color-mix(in srgb, var(--gem-fire-1) 45%, var(--flame-a)) 45%,
+    var(--gem-glint) 49%,
+    color-mix(in srgb, var(--gem-fire-1) 45%, var(--flame-a)) 53%,
     var(--flame-c) 62%, var(--flame-a) 80%, var(--flame-c) 100%);
   background-size: 200% 100%;
   animation: gg-flow 11s linear infinite;
@@ -175,9 +177,13 @@ html.theme-gem.theme-gem.theme-gem.theme-gem .btn-medieval.primary:hover {
     radial-gradient(140px circle at var(--mx) var(--my),
       color-mix(in srgb, var(--gem-glint) 28%, transparent), transparent 70%) padding-box fixed,
     linear-gradient(180deg, #33373f 0%, #101114 100%) padding-box,
+    /* Platinum, with a single ice-tinted glint travelling round — the hover reads as the
+       ring catching light, not as a colour wheel. */
     conic-gradient(from var(--gg-angle),
-      var(--gem-fire-1), var(--gem-fire-2), var(--gem-fire-3), var(--gem-fire-4),
-      var(--gem-fire-5), var(--gem-fire-1)) border-box;
+      var(--flame-c), var(--flame-a) 20%, var(--gem-glint) 26%, var(--flame-a) 32%,
+      var(--flame-c) 50%, var(--flame-a) 70%,
+      color-mix(in srgb, var(--gem-fire-1) 70%, var(--gem-glint)) 76%,
+      var(--flame-a) 82%, var(--flame-c)) border-box;
   animation-duration: 2.4s;
   box-shadow: 0 0 22px color-mix(in srgb, var(--gem-glint) 22%, transparent),
               inset 0 1px 0 rgba(255,255,255,0.2),
@@ -213,8 +219,11 @@ html.theme-gem .pane-resizer:hover::before {
 html.theme-gem .pane-resizer.resizing::before {
   width: 2px;
   background: linear-gradient(180deg,
-    var(--gem-fire-1), var(--gem-fire-2), var(--gem-fire-3), var(--gem-fire-4),
-    var(--gem-fire-5), var(--gem-fire-1));
+    var(--flame-c), var(--flame-a) 30%,
+    color-mix(in srgb, var(--gem-fire-1) 45%, var(--flame-a)) 44%,
+    var(--gem-glint) 50%,
+    color-mix(in srgb, var(--gem-fire-1) 45%, var(--flame-a)) 56%,
+    var(--flame-a) 70%, var(--flame-c));
   background-size: 100% 300%;
   animation: gem-fire-run 1.2s linear infinite;
   box-shadow: 0 0 10px color-mix(in srgb, var(--gem-glint) 60%, transparent),
