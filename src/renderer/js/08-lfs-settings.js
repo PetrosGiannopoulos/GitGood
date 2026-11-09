@@ -436,15 +436,15 @@ const BUILTIN_THEMES = [
 // key on, and `light` sets html.theme-light like a light Alacritty palette.
 // Swatches: background, stone, setting metal, text.
 const GEM_THEMES = [
-  { id: 'orlov',      name: 'Black Orlov',    swatches: ['#050506', '#c9ced8', '#3a3f4a', '#eef1f6'], gem: true },
-  { id: 'hope',       name: 'Hope',           swatches: ['#04070d', '#3d74ff', '#9fb2d4', '#e6eeff'], gem: true },
-  { id: 'pinkstar',   name: 'Pink Star',      swatches: ['#0d0609', '#ff4fa3', '#e8b49a', '#ffeef6'], gem: true },
-  { id: 'moussaieff', name: 'Moussaieff Red', swatches: ['#0b0305', '#d3123c', '#c9ccd6', '#fff0f2'], gem: true },
-  { id: 'dresden',    name: 'Dresden Green',  swatches: ['#030a07', '#1fd17a', '#d9c98f', '#eafff4'], gem: true },
-  { id: 'argyle',     name: 'Argyle Violet',  swatches: ['#07050d', '#8a5cff', '#b8b0d4', '#f2eeff'], gem: true },
-  { id: 'jubilee',    name: 'Golden Jubilee', swatches: ['#0b0803', '#ffc21a', '#d8b46a', '#fff8e6'], gem: true },
-  { id: 'kohinoor',   name: 'Koh-i-Noor',     swatches: ['#eef2f7', '#2f4a7a', '#8a9ab8', '#0b1220'], gem: true, light: true },
-  { id: 'chameleon',  name: 'Chameleon',      swatches: ['#090a04', '#9aa83a', '#ffc21a', '#f4f6e0'], gem: true }
+  { id: 'orlov',      name: 'Black Orlov',    swatches: ['#050506', '#c9ced8', '#3a3f4a', '#eef1f6'], gem: true, sig: 'Facet flashes · white scintillation' },
+  { id: 'hope',       name: 'Hope',           swatches: ['#04070d', '#3d74ff', '#9fb2d4', '#e6eeff'], gem: true, sig: 'Ripples · red-orange afterglow' },
+  { id: 'pinkstar',   name: 'Pink Star',      swatches: ['#0d0609', '#ff4fa3', '#e8b49a', '#ffeef6'], gem: true, sig: 'Petal blooms · drifting bokeh' },
+  { id: 'moussaieff', name: 'Moussaieff Red', swatches: ['#0b0305', '#d3123c', '#c9ccd6', '#fff0f2'], gem: true, sig: 'Trillion shards · a heartbeat' },
+  { id: 'dresden',    name: 'Dresden Green',  swatches: ['#030a07', '#1fd17a', '#d9c98f', '#eafff4'], gem: true, sig: 'Growing vines · aurora' },
+  { id: 'argyle',     name: 'Argyle Violet',  swatches: ['#07050d', '#8a5cff', '#b8b0d4', '#f2eeff'], gem: true, sig: 'Constellations · shooting stars' },
+  { id: 'jubilee',    name: 'Golden Jubilee', swatches: ['#0b0803', '#ffc21a', '#d8b46a', '#fff8e6'], gem: true, sig: 'Sunbursts · gold dust · fireworks' },
+  { id: 'kohinoor',   name: 'Koh-i-Noor',     swatches: ['#eef2f7', '#2f4a7a', '#8a9ab8', '#0b1220'], gem: true, light: true, sig: 'Ink ripples · pen strokes · light' },
+  { id: 'chameleon',  name: 'Chameleon',      swatches: ['#090a04', '#9aa83a', '#ffc21a', '#f4f6e0'], gem: true, sig: 'Warms to gold as you work' }
 ];
 for (const g of GEM_THEMES) BUILTIN_THEMES.push(g);
 // Alacritty palettes (from github.com/alacritty/alacritty-theme), generated into
@@ -834,7 +834,7 @@ async function showSettingsDialog() {
       </div>
       <div class="settings-group">
         <div class="settings-group-title">Gem themes <span class="text-muted" style="font-weight:400">(${GEM_THEMES.length})</span></div>
-        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Palettes after rare diamonds, set in their own metal. They react to you: light follows the cursor, sparkles trail fast movements, drags and resizes catch a glint. Chameleon warms from olive to gold while you drag.</p>
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Palettes after rare diamonds, set in their own metal, and each with its own way of answering you: light follows the cursor, and clicks, drags, resizes, successes and errors each get the stone's own reaction. Particles never cover code or diffs.</p>
         <div class="theme-picker" id="gem-picker">${gemCards}</div>
       </div>
       <div class="settings-group">
@@ -1038,6 +1038,7 @@ async function showSettingsDialog() {
     return `<button class="theme-card ${extraClass} ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}">
       <div class="theme-swatches">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
       <div class="theme-card-name">${escapeHtml(t.name)}</div>
+      ${t.sig ? `<div class="theme-card-sig">${escapeHtml(t.sig)}</div>` : ''}
     </button>`;
   }
 

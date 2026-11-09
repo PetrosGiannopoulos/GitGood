@@ -126,6 +126,9 @@ html.theme-hope {
   --flame-b: #e6eeff;
   --flame-c: #2a3550;
   --gem-glint: #d6e4ff;
+  /* The real Hope phosphoresces red-orange after UV light: its afterglow, used by
+     24-gem-juice.js for the glow that lingers where you clicked or dragged. */
+  --gem-afterglow: #ff6a2a;
   --gem-fire-1: #7aa6ff;
   --gem-fire-2: #b8ccff;
   --gem-fire-3: #e6eeff;
@@ -345,6 +348,7 @@ html.theme-kohinoor {
   --flame-b: #ffffff;
   --flame-c: #d5dce8;
   --gem-glint: #7f9cd6;
+  --gem-ink: #2f4a7a;               /* the pen: ripples and drag strokes on white */
   --gem-fire-1: #9fb8e8;
   --gem-fire-2: #c8b8f0;
   --gem-fire-3: #8a9ab8;
@@ -365,10 +369,12 @@ html.theme-kohinoor {
 html.theme-kohinoor .loading-overlay { background: rgba(255, 255, 255, 0.65); }
 
 /* ---------- CHAMELEON — the diamond that changes colour when heated ----------
-   Resting olive; while anything is dragged or resized (html.gem-active, set by the juice
-   module) it warms to gold over ~0.6 s, and cools back more slowly once let go.
-   Only --chameleon-heat transitions; the colours below are derived from it on <html>,
-   so descendants inherit already-resolved colours and nothing else needs to know. */
+   Resting olive; activity (fast moves, clicks, drags, a success) heats it towards gold
+   and it cools over ~10 s of rest. 24-gem-juice.js keeps the heat and sets one of
+   html.heat-1..4; each level is a short transition of --chameleon-heat. The colours
+   below are derived from it on <html>, so descendants inherit already-resolved colours
+   and nothing else needs to know — and a restyle happens only when the level changes,
+   a few times a minute at most, never per frame. */
 html.theme-chameleon {
   --ink-black: #090a04;
   --shadow-black: #0f1107;
@@ -404,12 +410,12 @@ html.theme-chameleon {
   --gem-btn-top: #2e3416;
   --gem-btn-bottom: #0f1107;
   --lane-colors: #c8d860, #ffe066, #8fd3ff, #c9a6ff, #e0e4c0, #7fe0b0, #ff9f7a, #9aa83a;
-  transition: --chameleon-heat 2.8s cubic-bezier(.3, 0, .2, 1);
+  transition: --chameleon-heat 1.4s cubic-bezier(.3, 0, .2, 1);
 }
-html.theme-chameleon.gem-active {
-  --chameleon-heat: 1;
-  transition-duration: 0.6s;
-}
+html.theme-chameleon.heat-1 { --chameleon-heat: 0.25; }
+html.theme-chameleon.heat-2 { --chameleon-heat: 0.5; }
+html.theme-chameleon.heat-3 { --chameleon-heat: 0.75; }
+html.theme-chameleon.heat-4 { --chameleon-heat: 1; }
 
 /* ---------- per-gem welcome backdrops and text selection ---------- */
 html.theme-orlov      #welcome-screen { background: radial-gradient(ellipse at top, #1d2027 0%, var(--ink-black) 58%), var(--ink-black); }
@@ -625,6 +631,77 @@ html.theme-gem .workspace::before {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
+/* =========================== per-gem motion ===========================
+   Each gem moves differently, not just looks different. The class chain matches the
+   shared button rules above so these win by order. */
+
+/* HOPE — deep water: slow, heavy easing, a deeper lift. */
+html.theme-hope.theme-gem.theme-gem.theme-gem .btn-medieval {
+  transition: transform 0.45s cubic-bezier(.2, .8, .2, 1), box-shadow 0.45s, border-color 0.45s;
+}
+html.theme-hope.theme-gem.theme-gem.theme-gem .btn-medieval:hover { transform: translateY(-2px); }
+
+/* PINK STAR — soft and springy: presses squash and bounce back. */
+html.theme-pinkstar.theme-gem.theme-gem.theme-gem .btn-medieval {
+  transition: transform 0.38s cubic-bezier(.34, 1.9, .5, 1), box-shadow 0.25s, border-color 0.25s;
+}
+html.theme-pinkstar.theme-gem.theme-gem.theme-gem .btn-medieval:active { transform: scale(0.93); }
+
+/* MOUSSAIEFF RED — alive: the primary button keeps a slow heartbeat (lub-dub, rest). */
+@keyframes gem-heartbeat {
+  0%, 32%, 100% { box-shadow: 0 0 12px color-mix(in srgb, var(--crusader-red-bright) 14%, transparent), 0 3px 8px var(--gem-shadow); }
+  8%  { box-shadow: 0 0 22px color-mix(in srgb, var(--crusader-red-bright) 55%, transparent), 0 3px 8px var(--gem-shadow); }
+  14% { box-shadow: 0 0 14px color-mix(in srgb, var(--crusader-red-bright) 22%, transparent), 0 3px 8px var(--gem-shadow); }
+  20% { box-shadow: 0 0 20px color-mix(in srgb, var(--crusader-red-bright) 42%, transparent), 0 3px 8px var(--gem-shadow); }
+}
+html.theme-moussaieff.theme-gem.theme-gem.theme-gem .btn-medieval.primary {
+  animation: gg-rotate 9s linear infinite, gem-heartbeat 2.4s ease-in-out infinite;
+}
+
+/* BLACK ORLOV / KOH-I-NOOR — precise: no lift, a crisp press. */
+html.theme-orlov.theme-gem.theme-gem.theme-gem .btn-medieval,
+html.theme-kohinoor.theme-gem.theme-gem.theme-gem .btn-medieval {
+  transition: transform 0.08s linear, box-shadow 0.15s, border-color 0.15s;
+}
+html.theme-orlov.theme-gem.theme-gem.theme-gem .btn-medieval:hover,
+html.theme-kohinoor.theme-gem.theme-gem.theme-gem .btn-medieval:hover { transform: none; }
+
+/* GOLDEN JUBILEE — regal: a gilded lift. */
+html.theme-jubilee.theme-gem.theme-gem.theme-gem .btn-medieval:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--flame-a) 30%, transparent), 0 4px 10px var(--gem-shadow);
+}
+
+/* ---- Toasts: success catches light; an error shakes, in the diff's "removed" colour
+   (on Orlov the accent-bright an error used to wear is white, which reads as nothing).
+   The shake animates `translate`, separate from toast-in's `transform`, so both run. ---- */
+@keyframes gem-shake {
+  15%, 85% { translate: -2px 0; }
+  30%, 70% { translate: 4px 0; }
+  45%      { translate: -5px 0; }
+  60%      { translate: 5px 0; }
+}
+html.theme-gem .toast.success {
+  box-shadow: 0 4px 16px var(--gem-shadow), -4px 0 14px -6px color-mix(in srgb, var(--gem-glint) 70%, transparent);
+}
+html.theme-gem .toast.error {
+  border-left-color: var(--removed);
+  animation: toast-in 0.25s ease-out, gem-shake 0.42s 0.25s cubic-bezier(.36, .07, .19, .97);
+}
+html.theme-gem .toast.error .toast-icon { color: var(--removed); }
+html.theme-gem .toast.error.fadeout { animation: toast-out 0.25s ease-in forwards; }
+
+/* ---- Settings: each gem card names its signature ---- */
+.theme-card .theme-card-sig {
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-muted);
+  margin-top: 2px;
+  font-family: var(--font-body);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 /* The juice module's canvas: above everything, catches nothing. */
 #gem-juice-canvas {
   position: fixed;
@@ -648,4 +725,6 @@ html.theme-gem .workspace::before {
   html.theme-gem .recent-item:hover,
   html.theme-gem .theme-card:hover { animation: none; }
   html.theme-chameleon { transition: none; }
+  html.theme-moussaieff.theme-gem.theme-gem.theme-gem .btn-medieval.primary,
+  html.theme-gem .toast.error { animation: none; }
 }
