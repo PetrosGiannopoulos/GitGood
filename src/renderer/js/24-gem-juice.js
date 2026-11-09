@@ -55,6 +55,9 @@
   // use, so sparkles, trails and the resizer line can never drift off the theme.
   let glint = '255,255,255';
   let fire = [[255, 255, 255]];
+  // How particles combine with the page: 'lighter' (additive light) on dark gems; a light
+  // gem sets --gem-blend: source-over, because adding light to white shows nothing.
+  let blend = 'lighter';
 
   // Cursor
   let mx = -9999, my = -9999, lastX = 0, lastY = 0, lastT = 0, speed = 0, sparkAcc = 0;
@@ -93,6 +96,7 @@
     const stops = [1, 2, 3, 4, 5].map(i => rgbOf('--gem-fire-' + i)).filter(Boolean);
     fire = stops.length ? stops : [g];
     probe.remove();
+    blend = cs.getPropertyValue('--gem-blend').trim() === 'source-over' ? 'source-over' : 'lighter';
   }
   // A colour along the fire stops, t in [0, 1), wrapping — so a trail that walks t
   // cycles smoothly through the theme's own dispersion. Returns "r,g,b".
@@ -186,7 +190,7 @@
 
     ctx.clearRect(0, 0, W, H);
     if (parts.length) {
-      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalCompositeOperation = blend;
       for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
         const age = t - p.born;

@@ -428,11 +428,25 @@ const BUILTIN_THEMES = [
   { id: 'biohazard', name: 'Biohazard',       swatches: ['#030803', '#39ff14', '#d8ff00', '#e8ffd6'] },
   { id: 'sweet',     name: 'Sweet Factory',   swatches: ['#0f040b', '#ff2d96', '#ffdf3d', '#ffeaf6'] },
   { id: 'monastery', name: 'Blood Monastery', swatches: ['#faf7f0', '#c41212', '#c89400', '#1c0500'] },
-  { id: 'racing',    name: 'Racing Punk',     swatches: ['#0a0a08', '#ffe600', '#ff6a00', '#fffbe0'] },
-  // Gem themes (06-gems.css + 24-gem-juice.js): palettes after rare diamonds, plus the
-  // cursor/drag/resize "juice". `gem` adds html.theme-gem, which the juice module keys on.
-  { id: 'orlov',     name: 'Black Orlov',     swatches: ['#050506', '#eef1f6', '#8a919e', '#c9a6ff'], gem: true }
+  { id: 'racing',    name: 'Racing Punk',     swatches: ['#0a0a08', '#ffe600', '#ff6a00', '#fffbe0'] }
 ];
+// Gem themes (06-gems.css + 24-gem-juice.js): palettes after rare diamonds, plus the
+// cursor/drag/resize "juice". Built-ins in every respect (an html class, vars in CSS) —
+// `gem` additionally sets html.theme-gem, which the shared gem rules and the juice module
+// key on, and `light` sets html.theme-light like a light Alacritty palette.
+// Swatches: background, stone, setting metal, text.
+const GEM_THEMES = [
+  { id: 'orlov',      name: 'Black Orlov',    swatches: ['#050506', '#c9ced8', '#3a3f4a', '#eef1f6'], gem: true },
+  { id: 'hope',       name: 'Hope',           swatches: ['#04070d', '#3d74ff', '#9fb2d4', '#e6eeff'], gem: true },
+  { id: 'pinkstar',   name: 'Pink Star',      swatches: ['#0d0609', '#ff4fa3', '#e8b49a', '#ffeef6'], gem: true },
+  { id: 'moussaieff', name: 'Moussaieff Red', swatches: ['#0b0305', '#d3123c', '#c9ccd6', '#fff0f2'], gem: true },
+  { id: 'dresden',    name: 'Dresden Green',  swatches: ['#030a07', '#1fd17a', '#d9c98f', '#eafff4'], gem: true },
+  { id: 'argyle',     name: 'Argyle Violet',  swatches: ['#07050d', '#8a5cff', '#b8b0d4', '#f2eeff'], gem: true },
+  { id: 'jubilee',    name: 'Golden Jubilee', swatches: ['#0b0803', '#ffc21a', '#d8b46a', '#fff8e6'], gem: true },
+  { id: 'kohinoor',   name: 'Koh-i-Noor',     swatches: ['#eef2f7', '#2f4a7a', '#8a9ab8', '#0b1220'], gem: true, light: true },
+  { id: 'chameleon',  name: 'Chameleon',      swatches: ['#090a04', '#9aa83a', '#ffc21a', '#f4f6e0'], gem: true }
+];
+for (const g of GEM_THEMES) BUILTIN_THEMES.push(g);
 // Alacritty palettes (from github.com/alacritty/alacritty-theme), generated into
 // 00-alacritty-themes.js as window.ALACRITTY_THEMES. They carry a `vars` map that is
 // injected at runtime instead of relying on a predefined CSS class.
@@ -490,7 +504,11 @@ function applyTheme(themeId) {
     injectAlacrittyVars(null);            // remove any injected vars
     html.classList.remove('theme-light');
     if (themeId && themeId !== 'crusader') html.classList.add('theme-' + themeId);
-    if (BUILTIN_THEMES.some(t => t.id === themeId && t.gem)) html.classList.add('theme-gem');
+    const gem = GEM_THEMES.find(t => t.id === themeId);
+    if (gem) {
+      html.classList.add('theme-gem');
+      html.classList.toggle('theme-light', !!gem.light);
+    }
   }
 
   // A Marvel theme may be showing its comic page instead of its art (22-comic-print.js).
@@ -793,7 +811,8 @@ async function showSettingsDialog() {
   }
 
   function renderAppearance() {
-    const builtinCards = BUILTIN_THEMES.map(t => themeCardHtml(t, appSettings.theme)).join('');
+    const builtinCards = BUILTIN_THEMES.filter(t => !t.gem).map(t => themeCardHtml(t, appSettings.theme)).join('');
+    const gemCards = GEM_THEMES.map(t => themeCardHtml(t, appSettings.theme, 'gem-card')).join('');
     panel.innerHTML = `
       <div class="settings-panel-title">Appearance</div>
       <div class="settings-group">
@@ -812,6 +831,11 @@ async function showSettingsDialog() {
         <div class="settings-group-title">Theme</div>
         <p class="modal-text text-muted" style="font-size:12px;margin-bottom:10px">Pick a theme. Changes apply immediately as a preview; Save to keep.</p>
         <div class="theme-picker" id="theme-picker">${builtinCards}</div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">Gem themes <span class="text-muted" style="font-weight:400">(${GEM_THEMES.length})</span></div>
+        <p class="modal-text text-muted" style="font-size:12px;margin-bottom:8px">Palettes after rare diamonds, set in their own metal. They react to you: light follows the cursor, sparkles trail fast movements, drags and resizes catch a glint. Chameleon warms from olive to gold while you drag.</p>
+        <div class="theme-picker" id="gem-picker">${gemCards}</div>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">Alacritty themes <span class="text-muted" style="font-weight:400">(${ALACRITTY_THEMES.length} imported)</span></div>
@@ -1010,8 +1034,8 @@ async function showSettingsDialog() {
   }
 
   // One theme card. `dark` flag (Alacritty) tunes the name text via CSS if needed.
-  function themeCardHtml(t, currentId) {
-    return `<button class="theme-card ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}">
+  function themeCardHtml(t, currentId, extraClass = '') {
+    return `<button class="theme-card ${extraClass} ${currentId === t.id ? 'active' : ''}" type="button" data-theme="${t.id}" data-name="${escapeHtml(t.name)}">
       <div class="theme-swatches">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
       <div class="theme-card-name">${escapeHtml(t.name)}</div>
     </button>`;
