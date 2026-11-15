@@ -62,23 +62,89 @@ const terminal = {
     };
   },
 
-  // Strip ANSI escape / control sequences so the plain console stays readable.
+  // Strip ANSI escape / control sequences so the plain console stays readable. Line
+  // editing is kept, because progress output depends on it: \r and \b pass through, and
+  // the erase-line / cursor-to-column-1 sequences become \x01 (erase to end of line),
+  // \x02 (erase whole line) or \r, which stream() applies to the line being written.
   clean(s) {
     return s
-      .replace(/\x1b\][^\x07]*\x07/g, '')             // OSC sequences
-      .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')     // CSI sequences
-      .replace(/\x1b[@-Z\\-_]/g, '')                  // other escapes
-      .replace(/\r/g, '');                            // carriage returns
+      .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')                 // OSC sequences
+      .replace(/[\x00-\x07\x0b\x0c\x0e-\x1a\x1c-\x1f]/g, '')          // stray controls (frees \x01/\x02)
+      .replace(/\x1b\[0?K/g, '\x01')                                   // erase to end of line
+      .replace(/\x1b\[2K/g, '\x02')                                    // erase whole line
+      .replace(/\x1b\[[01]?G/g, '\r')                                  // cursor to column 1
+      .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')                      // other CSI sequences
+      .replace(/\x1b[@-Z\\-_]/g, '');                                  // other escapes
   },
 
+  // The line still being written (no newline yet) lives in its own span so a carriage
+  // return can rewrite it in place — that is how "Receiving objects: 45%" becomes 46%
+  // instead of a new copy per update. _line is its text, _col the cursor within it.
+  _lineSpan: null,
+  _line: '',
+  _col: 0,
+
+  _scrollState(output) {
+    return output.scrollHeight - output.scrollTop - output.clientHeight < 30;
+  },
+
+  // Fixed text (prompts, echoed commands, messages). Ends any line in progress first, so
+  // a later \r from the shell can never rewrite it.
   write(text, cls) {
     const { output } = this.els();
     if (!output) return;
-    const atBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 30;
+    this._lineSpan = null; this._line = ''; this._col = 0;
+    const atBottom = this._scrollState(output);
     const span = document.createElement('span');
     if (cls) span.className = cls;
     span.textContent = text;
     output.appendChild(span);
+    if (atBottom) output.scrollTop = output.scrollHeight;
+  },
+
+  // Shell output, interpreted the way a terminal would for a single line: \r returns to
+  // column 0 and what follows overwrites, \b steps back, \x01/\x02 erase (see clean()).
+  // Finished lines are batched into one span per call; only the open line is rewritten.
+  stream(text) {
+    const { output } = this.els();
+    if (!output) return;
+    if (this._lineSpan && !this._lineSpan.isConnected) {   // output was cleared under us
+      this._lineSpan = null; this._line = ''; this._col = 0;
+    }
+    const atBottom = this._scrollState(output);
+    let done = '';
+    for (const part of text.split(/([\n\r\b\x01\x02])/)) {
+      if (!part) continue;
+      if (part === '\n') {
+        if (this._lineSpan) { this._lineSpan.textContent = this._line + '\n'; this._lineSpan = null; }
+        else done += this._line + '\n';
+        this._line = ''; this._col = 0;
+      } else if (part === '\r') {
+        this._col = 0;
+      } else if (part === '\b') {
+        if (this._col > 0) this._col--;
+      } else if (part === '\x01') {
+        this._line = this._line.slice(0, this._col);
+      } else if (part === '\x02') {
+        this._line = ' '.repeat(this._col);
+      } else {
+        const head = this._line.slice(0, this._col).padEnd(this._col, ' ');
+        this._line = head + part + this._line.slice(this._col + part.length);
+        this._col += part.length;
+      }
+    }
+    if (done) {
+      const span = document.createElement('span');
+      span.textContent = done;
+      output.appendChild(span);
+    }
+    if (this._lineSpan) {
+      this._lineSpan.textContent = this._line;
+    } else if (this._line) {
+      this._lineSpan = document.createElement('span');
+      this._lineSpan.textContent = this._line;
+      output.appendChild(this._lineSpan);
+    }
     if (atBottom) output.scrollTop = output.scrollHeight;
   },
 
@@ -97,6 +163,8 @@ const terminal = {
   // and at startup. This is the "after" prompt the user sees; the next command (if any)
   // is echoed on its own line below.
   writePromptLine() {
+    // Output that ended mid-line (a progress bar's last \r update) gets its own line.
+    if (this._lineSpan && this._lineSpan.isConnected && this._line.trim()) this.stream('\n');
     this.write(this.promptString() + '\n', 'term-prompt-line');
   },
 
@@ -197,9 +265,12 @@ const terminal = {
     while ((nl = this._outBuf.indexOf('\n')) !== -1) {
       const line = this._outBuf.slice(0, nl);
       this._outBuf = this._outBuf.slice(nl + 1);
-      // Marker line: __GGPROMPT__|<cwd>|<branch>
-      const m = line.match(/^__GGPROMPT__\|(.*?)\|(.*)$/);
+      // Marker line: __GGPROMPT__|<cwd>|<branch>. cmd ends lines with \r\n, and output
+      // that ended on a bare \r (a progress bar) can sit in front of it on the same line.
+      const m = line.match(/__GGPROMPT__\|([^|\r]*)\|([^\r]*)\r?$/);
       if (m) {
+        const before = line.slice(0, m.index);
+        if (before) this.stream(before);
         // Update shell state THEN print a fresh prompt line. The marker arrives AFTER
         // the command's output, so this is the "after" prompt — reflecting the new
         // branch/path immediately, even when the user just ran `git checkout`.
@@ -208,13 +279,23 @@ const terminal = {
         this.writePromptLine();
         continue;   // don't write the marker itself to the visible output
       }
-      this.write(line + '\n');
+      this.stream(line + '\n');
     }
     // Buffer any partial trailing chunk until the next newline arrives. If it can't be
-    // a marker (which always has a trailing newline), flush so output doesn't stall.
-    if (this._outBuf.length && !this._outBuf.startsWith('__GGPROMPT__')) {
-      this.write(this._outBuf);
-      this._outBuf = '';
+    // a marker (which always has a trailing newline), flush so output doesn't stall —
+    // this is also what draws each \r progress update as it arrives.
+    // A marker can also arrive split across chunks, so a tail that could be its start
+    // ("__GGPRO") is held back too.
+    if (this._outBuf.length) {
+      const MARK = '__GGPROMPT__';
+      let at = this._outBuf.indexOf(MARK);
+      if (at === -1) {
+        at = this._outBuf.length;
+        for (let k = Math.min(MARK.length - 1, this._outBuf.length); k > 0; k--) {
+          if (MARK.startsWith(this._outBuf.slice(-k))) { at = this._outBuf.length - k; break; }
+        }
+      }
+      if (at > 0) { this.stream(this._outBuf.slice(0, at)); this._outBuf = this._outBuf.slice(at); }
     }
   },
 
