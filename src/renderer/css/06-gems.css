@@ -771,6 +771,10 @@ html.theme-kohinoor #graph-detail {
 html.theme-gem .graph-row:hover:not(.selected) {
   background-color: color-mix(in srgb, var(--bg-panel) 45%, transparent);
 }
+/* The lanes' sticky <svg> paints its own opaque --bg (02-views.css), which hid the light
+   across the whole lane column. It sits in its own grid track, so nothing scrolls under it
+   and transparent shows only the container's background — the light. */
+html.theme-gem .graph-svg { background: transparent; }
 
 /* ---- Operations shake the window (24-gem-juice.js adds the class; `translate` on
    #app-screen runs on the compositor). All under a second and under 5 px, so text stays
