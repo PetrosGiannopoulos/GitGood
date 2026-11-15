@@ -660,7 +660,9 @@ const modal = {
     }
 
     $('#modal-overlay').classList.remove('hidden');
-    const firstInput = bodyEl.querySelector('input, textarea');
+    // Focus the first field the user can type into. A radio or checkbox is skipped: focusing
+    // one only draws a focus ring on it (Smart Merge's first strategy card showed a square).
+    const firstInput = bodyEl.querySelector('input:not([type="radio"]):not([type="checkbox"]):not([disabled]), textarea:not([disabled])');
     if (firstInput) setTimeout(() => firstInput.focus(), 50);
   },
   hide() {
