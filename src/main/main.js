@@ -10,6 +10,7 @@ const { pathspecFits, forEachPathChunk, withPathspecFile } = require('./lib/path
 const { partialPickMessage, applyFailureHelp, rewritePlan } = require('./lib/partial-pick');
 const { parsePushPorcelain } = require('./lib/push-porcelain');
 const { parseWorktreeList } = require('./lib/worktree-list');
+const { templateList: gitignoreTemplateList, buildGitignore, findUnityProjects } = require('./lib/gitignore-templates');
 const { FORGE_PAGE_SIZE, forgePageInfo } = require('./lib/forge-paging');
 const { smartKind, parseLfsPointer, parseUnityYaml, referencedGuids, changedValueGuids, diffUnity } = require('./lib/smart-diff');
 const { parseTextureImport, diffTextureImport } = require('./lib/texture-import');
@@ -386,14 +387,89 @@ ipcMain.handle('repo:open', wrap(async (_, repoPath) => {
   return { path: repoPath, name: path.basename(repoPath) };
 }));
 
-ipcMain.handle('repo:init', wrap(async (_, folderPath) => {
+// What the Initialize dialog needs to know about a folder before anything is written:
+// whether it is already a repository (init would only re-initialize it), whether a
+// .gitignore is there to be extended, and where its Unity projects are, so the Unity
+// template anchors Library/ etc. to the right folder.
+ipcMain.handle('repo:initInspect', wrap(async (_, folderPath) => {
+  const exists = !!folderPath && fs.existsSync(folderPath);
+  return {
+    isRepo: exists && fs.existsSync(path.join(folderPath, '.git')),
+    hasGitignore: exists && fs.existsSync(path.join(folderPath, '.gitignore')),
+    unityRoots: exists ? findUnityProjects(folderPath) : [],
+    templates: gitignoreTemplateList()
+  };
+}));
+
+function readGitignoreIn(folderPath) {
+  try { return fs.readFileSync(path.join(folderPath, '.gitignore'), 'utf8'); } catch (e) { return ''; }
+}
+
+ipcMain.handle('repo:gitignorePreview', wrap(async (_, { folder, base, addons }) => {
+  const existing = folder ? readGitignoreIn(folder) : '';
+  const unityRoots = folder && fs.existsSync(folder) ? findUnityProjects(folder) : [];
+  return buildGitignore({ base, addons, unityRoots, existing });
+}));
+
+// opts (all optional; a bare string is the old call shape):
+//   branch        name for the first branch — HEAD is pointed at it before anything else
+//   initialCommit make a commit, so the branch actually exists (git has no branches until
+//                 the first commit). It holds the generated .gitignore, or nothing.
+//   gitignore     { base, addons } template ids, written (or appended) to .gitignore
+// A folder that is already a repository is opened as it is: re-running init there would
+// leave its branches alone anyway, and a new commit or .gitignore is not what was asked.
+ipcMain.handle('repo:init', wrap(async (_, arg) => {
+  const opts = typeof arg === 'string' ? { path: arg } : (arg || {});
+  const folderPath = opts.path;
+  if (!folderPath) throw new Error('Folder required');
   if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+  const alreadyRepo = fs.existsSync(path.join(folderPath, '.git'));
   const g = makeGit(folderPath);
-  await g.init();
+  const out = { path: folderPath, name: path.basename(folderPath), alreadyRepo };
+
+  if (!alreadyRepo) {
+    await g.init();
+    const branch = String(opts.branch || '').trim();
+    if (branch) {
+      // check-ref-format answers on stdout, so simple-git rejecting is a real refusal.
+      try { await g.raw(['check-ref-format', '--branch', branch]); }
+      catch (e) { throw new Error(`"${branch}" is not a valid branch name.`); }
+      // symbolic-ref rather than `init -b`, which needs git 2.28.
+      await g.raw(['symbolic-ref', 'HEAD', `refs/heads/${branch}`]);
+    }
+  }
   git = g;
   currentRepoPath = folderPath;
   addRecentRepo(folderPath);
-  return { path: folderPath, name: path.basename(folderPath) };
+  if (alreadyRepo) return out;
+
+  const gi = opts.gitignore;
+  if (gi && ((gi.base && gi.base !== 'none') || (gi.addons && gi.addons.length))) {
+    const built = buildGitignore({
+      base: gi.base, addons: gi.addons,
+      unityRoots: findUnityProjects(folderPath), existing: readGitignoreIn(folderPath)
+    });
+    if (built.added) {
+      fs.writeFileSync(path.join(folderPath, '.gitignore'), built.text);
+      out.gitignoreAdded = built.added;
+    }
+  }
+
+  if (opts.initialCommit) {
+    try {
+      if (fs.existsSync(path.join(folderPath, '.gitignore'))) await g.raw(['add', '--', '.gitignore']);
+      // Through gitWithEnv for its timeout: commit.gpgsign with a passphrase and no
+      // graphical pinentry would otherwise hang the dialog forever.
+      await gitWithEnv(['commit', '--allow-empty', '-m', 'Initial commit'], null, 60000);
+      out.committed = true;
+    } catch (e) {
+      const msg = String(e.message || e);
+      out.commitError = /Author identity unknown|Please tell me who you are|empty ident/i.test(msg)
+        ? 'git does not know who you are yet (user.name / user.email). Set them in Settings → Git Identity, then make the first commit.'
+        : msg;
+    }
+  }
+  return out;
 }));
 
 ipcMain.handle('repo:clone', wrap(async (_, { url, destination, sshKeyPath }) => {
@@ -4059,6 +4135,9 @@ ipcMain.handle('repo:deleteBranches', wrap(async (_, opts) => {
 const DEFAULT_APP_SETTINGS = {
   theme: 'crusader',                  // crusader|molecular|biohazard|sweet|monastery|racing
   defaultBranchName: 'main',          // default branch when initializing a new repo
+  initWithBranch: true,               // init makes an initial commit so that branch exists (else: unborn, no branches)
+  initGitignoreBase: 'none',          // .gitignore template last chosen in the Initialize dialog
+  initGitignoreAddons: [],            // …and its add-ons
   recentMergeTargets: 'main, devel',  // Recent Branches hides a branch once merged into one of these
   graphLimit: 300,                   // default commits to load in graph
   graphHideLocal: false,              // hide local-branch ref pills in the graph

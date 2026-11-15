@@ -127,26 +127,146 @@ async function openRepoByPath(p) {
   if (typeof startRepoWatch === 'function') startRepoWatch();
 }
 
+// Initialize: branch name, whether to start on a real branch (an initial commit — git has
+// no branches before one), and a .gitignore built from templates (lib/gitignore-templates.js
+// in main; the renderer only ever sees ids, labels and the preview text).
 async function showInitDialog() {
   const sel = await gs.selectFolder('Choose a folder for the new repository');
   if (!sel.ok) return;
-  const confirmed = await modal.confirm({
-    title: 'Initialize Repository',
-    message: `Create a new git repository at:\n${sel.data}`,
-    confirmText: 'Initialize'
-  });
-  if (!confirmed) return;
-  const result = await withLoading('Initializing repository', () => gs.initRepo(sel.data));
-  if (!result.ok) {
-    showToast(result.error, 'error', 5000);
+  const folder = sel.data;
+  const [inspR, prefR] = await Promise.all([gs.initInspect(folder), gs.getAppSettings()]);
+  const info = (inspR && inspR.ok) ? inspR.data : { isRepo: false, hasGitignore: false, unityRoots: [], templates: [] };
+  const prefs = (prefR && prefR.ok) ? prefR.data : {};
+
+  if (info.isRepo) {
+    const open = await modal.confirm({
+      title: 'Already a Repository',
+      message: `${folder}\nis already a git repository. Initializing would not change its branches. Open it instead?`,
+      confirmText: 'Open'
+    });
+    if (open) await openRepoByPath(folder);
     return;
   }
-  state.repo = result.data;
-  $('#welcome-screen').classList.add('hidden');
-  $('#app-screen').classList.remove('hidden');
-  updateRepoInfo();
-  await withRepoOpen('Forging repository', () => refreshAll());
-  showToast('Repository forged', 'success');
+
+  const bases = info.templates.filter(t => t.kind === 'base');
+  const addons = info.templates.filter(t => t.kind === 'addon');
+  const known = new Set(info.templates.map(t => t.id));
+  // A Unity project in the folder makes Unity the obvious template, unless one was chosen last time.
+  let base = known.has(prefs.initGitignoreBase) ? prefs.initGitignoreBase : 'none';
+  if (base === 'none' && info.unityRoots.length) base = 'unity';
+  const pickedAddons = new Set((prefs.initGitignoreAddons || []).filter(id => known.has(id)));
+
+  const body = document.createElement('div');
+  body.className = 'init-dialog';
+  body.innerHTML = `
+    <p class="modal-text">Create a new git repository at<br><strong class="text-mono">${escapeHtml(folder)}</strong></p>
+    <div class="modal-field">
+      <label>Branch name</label>
+      <input class="modal-input" id="init-branch" value="${escapeHtml(prefs.defaultBranchName || 'main')}" placeholder="main" spellcheck="false" />
+    </div>
+    <label class="merge-smart-toggle">
+      <input type="checkbox" id="init-commit" ${prefs.initWithBranch !== false ? 'checked' : ''} />
+      <div class="merge-strategy-body">
+        <div class="merge-strategy-title">Start on <span id="init-branch-echo"></span></div>
+        <div class="merge-strategy-desc">Git has no branches until the first commit. This makes an initial commit holding only the .gitignore (or nothing), so the branch exists right away. Your other files stay uncommitted. The default is in Settings → Defaults.</div>
+      </div>
+    </label>
+    <div class="modal-field">
+      <label>.gitignore template</label>
+      <select class="modal-input" id="init-gi-base">
+        <option value="none">None</option>
+        ${bases.map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.label)}</option>`).join('')}
+      </select>
+      <div class="init-gi-desc" id="init-gi-desc"></div>
+    </div>
+    <div class="modal-field">
+      <label>Also ignore</label>
+      <div class="init-gi-addons">
+        ${addons.map(t => `
+          <label class="init-gi-addon" title="${escapeHtml(t.description)}">
+            <input type="checkbox" value="${escapeHtml(t.id)}" ${pickedAddons.has(t.id) ? 'checked' : ''} />
+            <span>${escapeHtml(t.label)}</span>
+          </label>`).join('')}
+      </div>
+    </div>
+    <div class="init-gi-note" id="init-gi-note"></div>
+    <details class="init-gi-preview">
+      <summary>Preview .gitignore <span class="text-muted" id="init-gi-count"></span></summary>
+      <pre id="init-gi-text"></pre>
+    </details>
+  `;
+
+  const baseSel = body.querySelector('#init-gi-base');
+  baseSel.value = base;
+  const branchInput = body.querySelector('#init-branch');
+  const echo = body.querySelector('#init-branch-echo');
+  const syncEcho = () => { echo.textContent = branchInput.value.trim() || 'the default branch'; };
+  branchInput.oninput = syncEcho;
+  syncEcho();
+
+  const chosenAddons = () => [...body.querySelectorAll('.init-gi-addon input:checked')].map(i => i.value);
+  const describe = () => {
+    const t = bases.find(b => b.id === baseSel.value);
+    body.querySelector('#init-gi-desc').textContent = t ? t.description : '';
+    const notes = [];
+    if (baseSel.value === 'unity') {
+      const roots = info.unityRoots;
+      if (!roots.length) notes.push('No Unity project found here yet, so Library/, Temp/… are anchored at the repository root. Create the project directly in this folder.');
+      else if (roots.length === 1 && roots[0] === '') notes.push('Unity project found at the folder root.');
+      else notes.push(`Unity project${roots.length > 1 ? 's' : ''} found in ${roots.map(r => r + '/').join(', ')}. Library/, Temp/… are anchored there, not at the root.`);
+    }
+    if (info.hasGitignore) notes.push('This folder already has a .gitignore. It is kept, and only the patterns it lacks are appended.');
+    const noteEl = body.querySelector('#init-gi-note');
+    noteEl.textContent = notes.join(' ');
+    noteEl.style.display = notes.length ? '' : 'none';
+  };
+
+  // Preview: newest request wins, so fast clicking never shows an older answer.
+  let previewSeq = 0;
+  const refreshPreview = async () => {
+    const seq = ++previewSeq;
+    const r = await gs.gitignorePreview({ folder, base: baseSel.value, addons: chosenAddons() });
+    if (seq !== previewSeq) return;
+    const pre = body.querySelector('#init-gi-text');
+    const count = body.querySelector('#init-gi-count');
+    if (!r || !r.ok) { pre.textContent = (r && r.error) || 'Preview failed'; count.textContent = ''; return; }
+    pre.textContent = r.data.added ? r.data.text : (info.hasGitignore ? '(nothing to add: the existing .gitignore already has these patterns)' : '(no .gitignore will be written)');
+    count.textContent = r.data.added ? `· ${r.data.added} pattern${r.data.added === 1 ? '' : 's'}` : '';
+  };
+  const onChange = () => { describe(); refreshPreview(); };
+  baseSel.onchange = onChange;
+  body.querySelectorAll('.init-gi-addon input').forEach(i => { i.onchange = onChange; });
+  onChange();
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-medieval'; cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => modal.hide();
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn-medieval primary'; okBtn.innerHTML = '<span class="btn-icon">⚒</span> Initialize';
+  okBtn.onclick = async () => {
+    const branch = branchInput.value.trim();
+    const gitignore = { base: baseSel.value, addons: chosenAddons() };
+    const initialCommit = body.querySelector('#init-commit').checked;
+    modal.hide();
+    // Remember the template choice: a Unity developer picks Unity every time.
+    try { gs.setAppSettings({ initGitignoreBase: gitignore.base, initGitignoreAddons: gitignore.addons }); } catch (e) {}
+    const result = await withLoading('Initializing repository',
+      () => gs.initRepo({ path: folder, branch, initialCommit, gitignore }));
+    if (!result.ok) {
+      showToast(result.error, 'error', 6000);
+      return;
+    }
+    // Same path as opening any repository: tab, state reset, watcher.
+    await openRepoByPath(result.data.path);
+    const d = result.data;
+    const gi = d.gitignoreAdded ? ` with a .gitignore (${d.gitignoreAdded} patterns)` : '';
+    if (d.commitError) {
+      showToast(`Repository forged${gi}, but the initial commit failed: ${d.commitError}`, 'error', 10000);
+    } else {
+      showToast(d.committed ? `Repository forged on ${branch || 'the default branch'}${gi}` : `Repository forged${gi}`, 'success', 6000);
+    }
+  };
+  modal.show({ title: 'Initialize Repository', body, footer: [cancelBtn, okBtn] });
 }
 
 // ============================================

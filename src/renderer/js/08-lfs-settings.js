@@ -1233,8 +1233,18 @@ async function showSettingsDialog() {
             <input type="text" id="set-default-branch" value="${escapeHtml(appSettings.defaultBranchName || 'main')}" placeholder="main" />
           </div>
         </div>
+        <div class="settings-row">
+          <div class="label">Start on a branch<small>Git has no branches until the first commit. When on, Initialize makes an initial commit (the .gitignore, or an empty one) so the branch exists right away. Off starts empty.</small></div>
+          <div class="control">
+            <label class="medieval-toggle">
+              <input type="checkbox" id="set-init-with-branch" ${appSettings.initWithBranch !== false ? 'checked' : ''} />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
       </div>
     `;
+    panel.querySelector('#set-init-with-branch').onchange = (e) => { appChanges.initWithBranch = e.target.checked; };
     panel.querySelector('#set-graph-limit').onchange = (e) => {
       const v = parseInt(e.target.value, 10);
       if (!isNaN(v) && v >= 50) appChanges.graphLimit = v;
@@ -1547,6 +1557,9 @@ async function showSettingsDialog() {
 const DEFAULT_APP_SETTINGS_LOCAL = {
   theme: 'crusader',
   defaultBranchName: 'main',
+  initWithBranch: true,
+  initGitignoreBase: 'none',
+  initGitignoreAddons: [],
   recentMergeTargets: 'main, devel',
   graphLimit: 300,
   graphHideLocal: false,

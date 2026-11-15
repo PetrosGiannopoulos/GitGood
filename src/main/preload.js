@@ -15,6 +15,8 @@ const api = {
   // Repo lifecycle
   openRepo: (p) => ipcRenderer.invoke('repo:open', p),
   initRepo: (p) => ipcRenderer.invoke('repo:init', p),
+  initInspect: (folder) => ipcRenderer.invoke('repo:initInspect', folder),
+  gitignorePreview: (opts) => ipcRenderer.invoke('repo:gitignorePreview', opts),
   cloneRepo: (opts) => ipcRenderer.invoke('repo:clone', opts),
   currentRepo: () => ipcRenderer.invoke('repo:current'),
   closeRepo: () => ipcRenderer.invoke('repo:close'),

@@ -571,6 +571,29 @@
 }
 .merge-smart-toggle input[type="checkbox"] { margin-top: 3px; accent-color: var(--crusader-red); flex-shrink: 0; }
 
+/* Initialize Repository dialog (02-welcome.js showInitDialog) */
+.init-dialog { width: min(560px, 80vw); }
+.init-dialog select.modal-input { cursor: pointer; }
+.init-gi-desc { font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.4; }
+.init-gi-addons { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; }
+.init-gi-addon { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.init-dialog .modal-field .init-gi-addon {
+  /* .modal-field label is the uppercase field caption; these are option labels */
+  display: flex; font-family: inherit; font-size: 12px; letter-spacing: normal;
+  text-transform: none; color: var(--bone-white); margin-bottom: 0;
+}
+.init-gi-addon input { accent-color: var(--crusader-red); margin: 0; }
+.init-gi-note {
+  font-size: 11px; line-height: 1.45; color: var(--parchment-dim);
+  border-left: 2px solid var(--gold-accent); padding: 6px 10px; margin-bottom: 14px; background: var(--bg);
+}
+.init-gi-preview summary { cursor: pointer; font-size: 12px; color: var(--parchment-dim); }
+.init-gi-preview pre {
+  max-height: 240px; overflow: auto; margin: 8px 0 0; padding: 8px 10px;
+  background: var(--bg); border: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.4; white-space: pre;
+}
+
 /* ============================================
    GRAPH SVG NODES
    ============================================ */
