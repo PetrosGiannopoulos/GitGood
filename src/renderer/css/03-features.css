@@ -629,6 +629,12 @@
   border-radius: 2px;
   padding: 0 1px;
 }
+/* The branch the graph's Branch filter matched. An inset ring, not a border or padding: the
+   ref column measures pill widths in JS (refItemWidth), so the box must not grow, and the
+   column clips anything drawn outside it. */
+.ref-pill.filter-match {
+  box-shadow: inset 0 0 0 1.5px var(--gold-accent);
+}
 
 /* Ancestry highlight (#3): when a commit is selected, fade everything outside its
    lineage and let the related dots/edges/rows (marked .rel) stand out. */

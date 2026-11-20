@@ -209,6 +209,7 @@ const api = {
 
   // Graph
   graphLog: (opts) => ipcRenderer.invoke('repo:graphLog', opts),
+  refTipCommits: (opts) => ipcRenderer.invoke('repo:refTipCommits', opts),
 
   // Remotes
   addRemote: (opts) => ipcRenderer.invoke('repo:addRemote', opts),

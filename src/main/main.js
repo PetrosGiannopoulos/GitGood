@@ -893,33 +893,15 @@ ipcMain.handle('repo:localOnlyCommits', wrap(async () => {
 }));
 
 // Returns commits with parents and ref decorations — the data the visual graph needs
-ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
-  const g = ensureGit();
-  const limit = (opts && opts.limit) || 500;
-
-  // Use a unique field separator that's unlikely to appear in commit metadata.
-  // Format fields: hash | parents | refs | author name | author email | iso date | subject
-  const SEP = '\x1f';       // Unit separator
-  // --topo-order ensures parents always come AFTER children — required for our layout algorithm.
-  // --date-order keeps chronological-ish ordering within the topo constraint.
-  const raw = await g.raw([
-    'log',
-    '--all',
-    '--topo-order',
-    '--decorate=full',
-    // %b (the description) goes last: it is multi-line, which is safe only because records
-    // end in \x1e rather than a newline.
-    `--pretty=format:%H${SEP}%P${SEP}%D${SEP}%an${SEP}%ae${SEP}%aI${SEP}%s${SEP}%b%x1e`,
-    `-n`, String(limit)
-  ]);
-
-  // Get current HEAD so we can mark it
-  let head = '';
-  try { head = (await g.revparse(['HEAD'])).trim(); } catch (e) {}
-
-  const lines = raw.split(/\x1e\r?\n?/).map(s => s.trim()).filter(Boolean);
-  const commits = lines.map(line => {
-    const [hash, parents, refs, an, ae, date, subject, ...bodyParts] = line.split(SEP);
+// One graph record per commit. Fields: hash | parents | refs | author name | author email |
+// iso date | subject | body, separated by \x1f (unlikely in commit metadata). %b goes last:
+// it is multi-line, which is safe only because records end in \x1e rather than a newline.
+const GRAPH_SEP = '\x1f';
+const GRAPH_LOG_FORMAT = `--pretty=format:%H${GRAPH_SEP}%P${GRAPH_SEP}%D${GRAPH_SEP}%an${GRAPH_SEP}%ae${GRAPH_SEP}%aI${GRAPH_SEP}%s${GRAPH_SEP}%b%x1e`;
+function parseGraphLog(raw) {
+  const lines = String(raw || '').split(/\x1e\r?\n?/).map(s => s.trim()).filter(Boolean);
+  return lines.map(line => {
+    const [hash, parents, refs, an, ae, date, subject, ...bodyParts] = line.split(GRAPH_SEP);
     return {
       hash,
       parents: (parents || '').split(' ').filter(Boolean),
@@ -928,11 +910,49 @@ ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
       author_email: ae || '',
       date: date || '',
       message: subject || '',
-      body: bodyParts.join(SEP).trim()
+      body: bodyParts.join(GRAPH_SEP).trim()
     };
   });
+}
 
-  return { commits, head };
+ipcMain.handle('repo:graphLog', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const limit = (opts && opts.limit) || 500;
+
+  // --topo-order ensures parents always come AFTER children — required for our layout algorithm.
+  const raw = await g.raw(['log', '--all', '--topo-order', '--decorate=full', GRAPH_LOG_FORMAT, `-n`, String(limit)]);
+
+  // Get current HEAD so we can mark it
+  let head = '';
+  try { head = (await g.revparse(['HEAD'])).trim(); } catch (e) {}
+
+  return { commits: parseGraphLog(raw), head };
+}));
+
+// The tip commits of named branches, in graphLog's shape. The graph's Branch filter asks for
+// the tips that lie beyond the loaded window: an old branch is exactly the one somebody
+// searches for, and "no matches" would be a lie about a branch that exists. Only full
+// refs/heads/ and refs/remotes/ names are accepted, so nothing here can read as an option.
+// --no-walk shows just the named commits, never their history.
+ipcMain.handle('repo:refTipCommits', wrap(async (_, opts) => {
+  const g = ensureGit();
+  const refs = [...new Set(((opts && opts.refs) || [])
+    .map(String)
+    .filter(r => /^refs\/(heads|remotes)\/[^\s]+$/.test(r)))].slice(0, 2000);
+  if (!refs.length) return [];
+  const seen = new Set();
+  const commits = [];
+  let chunks = 0;
+  await forEachPathChunk(refs, async (chunk) => {
+    chunks++;
+    const raw = await g.raw(['log', '--no-walk', '--decorate=full', GRAPH_LOG_FORMAT, ...chunk, '--']);
+    for (const c of parseGraphLog(raw)) {
+      if (!seen.has(c.hash)) { seen.add(c.hash); commits.push(c); }
+    }
+  });
+  // Each chunk is newest-first on its own; merged, they need sorting again.
+  if (chunks > 1) commits.sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0));
+  return commits;
 }));
 
 function parseRefs(refStr) {

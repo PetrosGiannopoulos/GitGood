@@ -60,7 +60,7 @@ const state = {
   graphLineStyle: 'default', // 'default' | 'dragon' | 'gears' | 'constellations'
   collapsedCommits: null,  // Set<hash>: commits whose linear run below is folded by hand
   graphFilter: '',         // text filter for the graph tab
-  graphFilterMode: 'message', // 'message' | 'files' | 'all'
+  graphFilterMode: 'message', // 'message' | 'files' | 'all' | 'content' | 'branch'
   historyFilter: '',       // text filter for the history tab
   historyFilterMode: 'message',
   detachedFrom: null,      // branch name we were on before checking out a commit (detached HEAD)
@@ -249,9 +249,96 @@ async function ensureLocalOnlyCommits() {
 function localOnlyCommitSet() { return _localOnlyCommits; }
 function clearLocalOnlyCommits() { _localOnlyCommits = null; _localOnlyLoading = null; }
 
+// ---- Branch filter (graph search, mode 'branch') ----
+// Keeps the commits a matching branch currently points at: its tip. A branch matches when its
+// name (local, or remote as "origin/x") contains every term. "<remote>/HEAD" is only an alias
+// for the remote's default branch, so it never matches on its own — typing "head" would
+// otherwise turn up the default branch under a name nobody searched for.
+function filterTerms(query) {
+  return String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+}
+function branchNameMatches(name, terms) {
+  if (!name || /\/HEAD$/.test(name)) return false;
+  const n = name.toLowerCase();
+  return terms.every(t => n.includes(t));
+}
+function branchRefMatches(r, terms) {
+  return !!r && (r.type === 'local' || r.type === 'remote') && branchNameMatches(r.name, terms);
+}
+// The graph's terms while the Branch filter is active, else null — for the ref column, which
+// floats the matching pill to the front and marks it.
+function activeBranchFilterTerms() {
+  if (state.graphFilterMode !== 'branch') return null;
+  const terms = filterTerms(state.graphFilter);
+  return terms.length ? terms : null;
+}
+
+// A matching branch whose tip is older than the loaded window has no row to keep, so its tip
+// is fetched on its own (repo:refTipCommits) and shown alongside. Valid only for the commit
+// list and branch list it was computed against (by identity): refreshGraph/refreshBranches
+// replace those objects — and run in parallel, so either may land second — which retires the
+// cache without anyone having to remember to clear it.
+let _branchTipExtras = null;    // { key, base, branches, commits }
+let _branchTipLoading = null;   // { key, base, branches, promise }
+function branchTipKey(query) { return filterTerms(query).join(' '); }
+function branchTipCurrent(entry, key) {
+  return !!entry && entry.key === key && entry.base === state.graphAllCommits && entry.branches === state.branches;
+}
+function branchTipExtras(query) {
+  return branchTipCurrent(_branchTipExtras, branchTipKey(query)) ? _branchTipExtras.commits : null;
+}
+async function ensureBranchTipExtras(query) {
+  const key = branchTipKey(query);
+  const base = state.graphAllCommits;
+  const branches = state.branches;
+  const have = branchTipExtras(query);
+  if (have) return have;
+  if (branchTipCurrent(_branchTipLoading, key)) return _branchTipLoading.promise;
+  const terms = filterTerms(query);
+  // The entry exists before the async body starts: when nothing needs fetching the body runs
+  // to its end synchronously, so it must never refer to its own promise (that is still in its
+  // temporal dead zone then — "Cannot access 'promise' before initialization").
+  const entry = { key, base, branches, promise: null };
+  _branchTipLoading = entry;
+  entry.promise = (async () => {
+    let commits = [];
+    try {
+      // Branch names already decorating a loaded commit need nothing fetched.
+      const loaded = new Set();
+      for (const c of (base || [])) {
+        for (const r of (c.refs || [])) {
+          if (r.type === 'local') loaded.add('refs/heads/' + r.name);
+          else if (r.type === 'remote') loaded.add('refs/remotes/' + r.name);
+        }
+      }
+      const b = branches || {};
+      // simple-git lists "origin/HEAD -> origin/main" for a symbolic remote ref; skip it.
+      const clean = (n) => n && !/\s/.test(n);
+      const want = [
+        ...((b.local && b.local.all) || []).filter(clean).filter(n => branchNameMatches(n, terms)).map(n => 'refs/heads/' + n),
+        ...((b.remotes && b.remotes.all) || []).filter(clean).filter(n => branchNameMatches(n, terms)).map(n => 'refs/remotes/' + n),
+      ].filter(r => !loaded.has(r));
+      if (want.length && terms.length) {
+        const r = await gs.refTipCommits({ refs: want });
+        if (r && r.ok) {
+          const inWindow = new Set((base || []).map(c => c.hash));
+          commits = (r.data || []).filter(c => !inWindow.has(c.hash));
+        }
+      }
+    } catch (e) { /* leave empty — the loaded matches still show */ }
+    // A newer request (or a refreshed graph) may have started meanwhile; only the current one
+    // gets to install its answer.
+    if (_branchTipLoading === entry) _branchTipLoading = null;
+    if (state.graphAllCommits === base && state.branches === branches) _branchTipExtras = { key, base, branches, commits };
+    return commits;
+  })();
+  return entry.promise;
+}
+
 // mode: 'message' (default) matches message/author/email/hash; 'files' matches changed
 // file paths; 'all' matches either; 'content' matches commits whose diff content changed
-// the query (git pickaxe -G, resolved by ensureContentMatches into a hash set).
+// the query (git pickaxe -G, resolved by ensureContentMatches into a hash set); 'branch'
+// matches commits a matching branch points at (graph only — see branchRefMatches).
 function commitMatchesFilter(commit, query, mode) {
   if (!query) return true;
   mode = mode || 'message';
@@ -262,6 +349,7 @@ function commitMatchesFilter(commit, query, mode) {
   }
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
+  if (mode === 'branch') return (commit.refs || []).some(r => branchRefMatches(r, terms));
 
   const msgHay = [
     commit.message,

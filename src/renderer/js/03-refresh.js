@@ -210,6 +210,11 @@ async function refreshBranches() {
   if (typeof renderDetachedBanner === 'function') renderDetachedBanner();
   // Update the branches tab as well, if it's been rendered
   if (typeof renderBranchesTab === 'function') renderBranchesTab();
+  // The graph's Branch filter looks up out-of-window tips in this list; if the graph was laid
+  // out before it arrived, lay it out again so those tips get fetched (see branchTipExtras).
+  if (activeBranchFilterTerms() && state.graphAllCommits && !state.graphLoading) {
+    ensureBranchTipExtras(state.graphFilter).then(() => relayoutGraph());
+  }
 }
 
 async function refreshLog() {
@@ -257,6 +262,8 @@ async function refreshGraph() {
     await ensureCommitFilesMap();
   } else if (state.graphFilterMode === 'content' && (state.graphFilter || '').trim()) {
     await ensureContentMatches(state.graphFilter);
+  } else if (state.graphFilterMode === 'branch' && (state.graphFilter || '').trim()) {
+    await ensureBranchTipExtras(state.graphFilter);
   }
   // Preload the local-only set too (refreshAll cleared it) so hiding unpushed commits doesn't
   // flash the full graph before the set arrives.
@@ -279,6 +286,19 @@ function relayoutGraph() {
   const query = (state.graphFilter || '').trim();
   if (query) {
     commits = commits.filter(c => commitMatchesFilter(c, query, state.graphFilterMode));
+    // Branch filter: tips of matching branches older than the loaded window are fetched on
+    // their own and go last — topo order put every loaded commit before them, so none of them
+    // can be a child of an extra. Not loaded yet: show what is, then repaint when they arrive.
+    if (state.graphFilterMode === 'branch') {
+      const extras = branchTipExtras(query);
+      if (extras) {
+        if (extras.length) commits = commits.concat(extras);
+      } else {
+        ensureBranchTipExtras(query).then(() => {
+          if (state.graphFilterMode === 'branch' && (state.graphFilter || '').trim() === query) relayoutGraph();
+        });
+      }
+    }
   }
 
   // 0.5 Hide local-only (unpushed) commits when the option is on. These are only branch tips,

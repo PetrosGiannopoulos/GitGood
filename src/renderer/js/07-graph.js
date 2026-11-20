@@ -575,8 +575,16 @@ function rankedRefItems(refs) {
     }
     items.push({ ref: s.ref, label: s.label, synced: [] });
   }
+  // Branch filter: the branch searched for is the reason this row is on screen, so it goes
+  // first — otherwise a commit carrying several refs could pack it behind "+N".
+  const terms = activeBranchFilterTerms();
+  if (terms) {
+    for (const it of items) {
+      it.match = branchRefMatches(it.ref, terms) || it.synced.some(n => branchNameMatches(n, terms));
+    }
+  }
   // Array.prototype.sort is stable, so equal ranks keep git's own order.
-  return items.sort((a, b) => refRank(a) - refRank(b));
+  return items.sort((a, b) => ((b.match ? 1 : 0) - (a.match ? 1 : 0)) || (refRank(a) - refRank(b)));
 }
 function refItemWidth(item) {
   return Math.ceil(_refMeasureContext().measureText(item.label).width) + REF_PILL_CHROME +
@@ -608,14 +616,19 @@ function refPillHtml(r, label, hash, synced) {
     const tip = unpub ? ` title="Not pushed to ${escapeHtml(state.remoteTagsRemote || 'the remote')}"` : '';
     return `<span class="ref-pill tag${unpub ? ' unpublished' : ''}" data-ref-type="tag" data-ref-name="${escapeHtml(r.name)}"${tip}>${escapeHtml(label)}</span>`;
   }
+  // The branch the graph's Branch filter matched (a local pill also matches through its
+  // folded remote twin).
+  const terms = activeBranchFilterTerms();
+  const matchCls = terms && (branchRefMatches(r, terms) || (synced || []).some(n => branchNameMatches(n, terms)))
+    ? ' filter-match' : '';
   if (r.type === 'local') {
     const headCls = r.isHead ? ' head' : '';
     const sync = synced && synced.length
       ? `<span class="ref-sync" title="${escapeHtml(synced.join(', '))} ${synced.length === 1 ? 'is' : 'are'} at this commit too">⟁</span>`
       : '';
-    return `<span class="ref-pill local${headCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(hash)}">${escapeHtml(label)}${sync}</span>`;
+    return `<span class="ref-pill local${headCls}${matchCls}" draggable="true" data-ref-type="local" data-ref-name="${escapeHtml(r.name)}" data-ref-hash="${escapeHtml(hash)}">${escapeHtml(label)}${sync}</span>`;
   }
-  if (r.type === 'remote') return `<span class="ref-pill remote" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
+  if (r.type === 'remote') return `<span class="ref-pill remote${matchCls}" data-ref-type="remote" data-ref-name="${escapeHtml(r.name)}">${escapeHtml(label)}</span>`;
   if (r.type === 'head') return `<span class="ref-pill head-only" data-ref-type="head">HEAD</span>`;
   return `<span class="ref-pill" data-ref-type="other">${escapeHtml(label)}</span>`;
 }
@@ -3206,6 +3219,9 @@ function wireGraphTab() {
       } else {
         // No content filter active — stop any diff search still running.
         cancelContentSearch();
+        if (state.graphFilterMode === 'branch' && state.graphFilter.trim()) {
+          await ensureBranchTipExtras(state.graphFilter);
+        }
       }
       relayoutGraph();
       // Only on the way *out* of a filter: while one is active the selected commit is
@@ -3220,8 +3236,13 @@ function wireGraphTab() {
         if (hadFilter) scrollGraphToSelectedCommit();
       }
     };
+    const syncPlaceholder = () => {
+      graphSearch.placeholder = state.graphFilterMode === 'branch' ? 'Find branch…' : 'Filter commits…';
+    };
+    syncPlaceholder();
     if (graphMode) graphMode.onchange = () => {
       state.graphFilterMode = graphMode.value;
+      syncPlaceholder();
       applyGraph();
     };
   }
