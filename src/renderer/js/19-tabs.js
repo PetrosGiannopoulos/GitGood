@@ -117,7 +117,9 @@ function noteRepoOpened(repo) {
 }
 
 async function switchRepoTab(repoPath) {
-  if (!repoPath || repoPath === repoTabs.activePath) return;
+  // On the start screen activePath still names the last tab viewed (so a newly opened repo
+  // lands next to it), but nothing is open — returning to that same tab must still act.
+  if (!repoPath || (repoPath === repoTabs.activePath && state.repo)) return;
   if (repoTabs.switching) return;
   saveActiveTabUi();
   repoTabs.switching = true;
@@ -137,6 +139,15 @@ async function closeRepoTab(repoPath) {
   const wasActive = repoTabs.activePath === repoPath;
   repoTabs.tabs.splice(idx, 1);
 
+  // Closed from the start screen's tab list: nothing is open, so there is nothing to tear
+  // down or switch to — the tab just leaves the list.
+  if (!state.repo) {
+    if (wasActive) repoTabs.activePath = null;
+    renderRepoTabs();
+    persistRepoTabs();
+    return;
+  }
+
   if (!repoTabs.tabs.length) {
     repoTabs.activePath = null;
     renderRepoTabs();
@@ -155,8 +166,17 @@ async function closeRepoTab(repoPath) {
   }
 }
 
-// Tear down the current repository and go back to the welcome screen. Shared by the
-// toolbar's ✕ and by closing the last tab.
+// The toolbar's ✕: back to the start screen with every tab kept. The current tab's view is
+// parked first, so returning to it (from the start screen's Open Tabs list, or by opening
+// the same path) puts it back as it was. Opening another repository from there adds a tab
+// next to the one just left.
+async function returnToWelcome() {
+  saveActiveTabUi();
+  await closeCurrentRepo();
+}
+
+// Tear down the current repository and go back to the welcome screen. Used by the
+// toolbar's ✕ (via returnToWelcome, tabs kept) and by closing the last tab.
 async function closeCurrentRepo() {
   if (typeof stopRepoWatch === 'function') await stopRepoWatch();
   await gs.closeRepo();
@@ -186,6 +206,7 @@ async function closeCurrentRepo() {
 // RENDER
 // ============================================
 function renderRepoTabs() {
+  renderWelcomeTabs();
   const bar = document.getElementById('repo-tabs');
   if (!bar) return;
   // Shown whenever a repository is open, including the single-tab case. Hiding the strip
@@ -202,6 +223,26 @@ function renderRepoTabs() {
       <span class="repo-tab-close" data-close-tab="${escapeHtml(t.path)}" title="Close (Ctrl+W)">✕</span>
     </button>
   `).join('') + `<button class="repo-tab-add" id="repo-tab-add" title="Open another repository in a new tab (Ctrl+O)">+</button>`;
+}
+
+// The start screen's "Open Tabs" list — the way back to a tab after ✕, since the tab strip
+// itself lives inside the app screen. Same data-* hooks as the strip, so the delegated
+// click/middle-click handlers below serve both.
+function renderWelcomeTabs() {
+  const wrap = document.getElementById('welcome-open-tabs');
+  const list = document.getElementById('open-tabs-list');
+  if (!wrap || !list) return;
+  const tabs = repoTabs.tabs;
+  wrap.classList.toggle('hidden', !tabs.length);
+  list.innerHTML = tabs.map(t => `
+    <button class="recent-item open-tab-item${t.path === repoTabs.activePath ? ' last-active' : ''}"
+            data-repo-tab="${escapeHtml(t.path)}" title="${escapeHtml(t.path)}">
+      <span class="open-tab-close" data-close-tab="${escapeHtml(t.path)}" title="Close tab">✕</span>
+      <div class="recent-name">${escapeHtml(t.name)}</div>
+      <div class="recent-path">${escapeHtml(t.path)}</div>
+    </button>
+  `).join('');
+  if (typeof updateWelcomePanelEmpty === 'function') updateWelcomePanelEmpty();
 }
 
 document.addEventListener('click', (e) => {

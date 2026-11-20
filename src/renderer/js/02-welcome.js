@@ -6,16 +6,27 @@ async function showWelcome() {
   await loadRecentRepos();
 }
 
+// The left panel holds two lists — tabs still open (19-tabs.js) and recent repositories —
+// and is hidden only when both are empty.
+function updateWelcomePanelEmpty() {
+  const panel = $('#welcome-recent');
+  if (!panel) return;
+  const hasRecent = !!$('#recent-list .recent-item');
+  const hasTabs = !!$('#open-tabs-list .recent-item');
+  panel.classList.toggle('is-empty', !hasRecent && !hasTabs);
+  const recentTitle = $('#welcome-recent-title');
+  if (recentTitle) recentTitle.classList.toggle('hidden', !hasRecent);
+}
+
 async function loadRecentRepos() {
   const result = await gs.getRecentRepos();
   const list = $('#recent-list');
-  const panel = $('#welcome-recent');
   list.innerHTML = '';
+  if (typeof renderWelcomeTabs === 'function') renderWelcomeTabs();
   if (!result.ok || !result.data || !result.data.length) {
-    if (panel) panel.classList.add('is-empty');
+    updateWelcomePanelEmpty();
     return;
   }
-  if (panel) panel.classList.remove('is-empty');
   result.data.forEach(p => {
     const item = document.createElement('button');
     item.className = 'recent-item';
@@ -39,6 +50,7 @@ async function loadRecentRepos() {
     };
     list.appendChild(item);
   });
+  updateWelcomePanelEmpty();
 }
 
 // Remove a single repo from the recent list, then refresh the welcome list.
@@ -610,7 +622,10 @@ function showCloneDialog() {
       }
       return;
     }
+    if (typeof saveActiveTabUi === 'function' && state.repo) saveActiveTabUi();
     state.repo = result.data;
+    // A clone opens in its own tab, like any other repository opened from here.
+    if (typeof noteRepoOpened === 'function') noteRepoOpened(result.data);
     $('#welcome-screen').classList.add('hidden');
     $('#app-screen').classList.remove('hidden');
     updateRepoInfo();

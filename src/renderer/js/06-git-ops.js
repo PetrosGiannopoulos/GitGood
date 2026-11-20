@@ -1114,12 +1114,12 @@ $('#btn-open-folder').onclick = () => {
   if (state.repo) gs.openInExplorer(state.repo.path);
 };
 
-// Closing the repository closes its tab; with other tabs open that means switching to one
-// of them rather than dropping to the welcome screen. Both paths live in 19-tabs.js
-// (closeRepoTab → closeCurrentRepo), which owns the teardown.
+// The toolbar's ✕ goes back to the start screen and keeps every tab open — closing a tab
+// is the tab's own ✕, middle-click or Ctrl+W. Opening a repository from the start screen
+// then adds a tab. Both live in 19-tabs.js (returnToWelcome / closeRepoTab).
 $('#btn-close-repo').onclick = async () => {
-  if (typeof closeRepoTab === 'function' && state.repo) {
-    await closeRepoTab(state.repo.path);
+  if (typeof returnToWelcome === 'function') {
+    await returnToWelcome();
     return;
   }
   await closeCurrentRepo();

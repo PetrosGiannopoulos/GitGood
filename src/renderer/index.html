@@ -60,7 +60,12 @@
 
     <!-- Left: Recent Chronicles in its own panel -->
     <aside class="welcome-recent-panel" id="welcome-recent">
-      <h3 class="recent-title">— Recent Chronicles —</h3>
+      <!-- Tabs still open after the toolbar's ✕ (19-tabs.js renderWelcomeTabs) -->
+      <div class="welcome-open-tabs hidden" id="welcome-open-tabs">
+        <h3 class="recent-title">— Open Tabs —</h3>
+        <div class="recent-list open-tabs-list" id="open-tabs-list"></div>
+      </div>
+      <h3 class="recent-title" id="welcome-recent-title">— Recent Chronicles —</h3>
       <div class="recent-list" id="recent-list"></div>
     </aside>
 
@@ -184,7 +189,7 @@
         <button class="tool-btn ghost" id="btn-open-folder" title="Open in file explorer">
           <span class="tool-icon">⛬</span>
         </button>
-        <button class="tool-btn ghost" id="btn-close-repo" title="Close repository">
+        <button class="tool-btn ghost" id="btn-close-repo" title="Back to the start screen (open tabs are kept)">
           <span class="tool-icon">✕</span>
         </button>
       </div>

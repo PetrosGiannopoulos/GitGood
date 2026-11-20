@@ -125,6 +125,31 @@ body::before {
 .welcome-recent-panel:empty { display: none; }
 .welcome-recent-panel.is-empty { display: none; }
 
+/* Tabs still open after the toolbar's ✕ — above the recent list, which keeps the rest of
+   the height. Capped so a long tab list can't push Recent off the panel. */
+.welcome-open-tabs {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 45%;
+  margin-bottom: 22px;
+}
+.open-tab-item { position: relative; padding-right: 30px; }
+.open-tab-item.last-active { border-left-width: 6px; }
+.open-tab-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 0 4px;
+  color: var(--muted-text);
+  font-size: 12px;
+  line-height: 18px;
+  opacity: 0.6;
+}
+.open-tab-item:hover .open-tab-close { opacity: 1; }
+.open-tab-close:hover { color: var(--crusader-red); }
+
 .welcome-bg {
   position: absolute;
   inset: 0;
