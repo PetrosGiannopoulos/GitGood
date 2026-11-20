@@ -798,6 +798,16 @@ async function showSettingsDialog() {
           </div>
         </div>
         <div class="settings-row">
+          <div class="label">Diff search file size limit<small>The "Diff content" filter ignores matches in files larger than this (either version of the file). Leave empty or 0 to search every file.</small></div>
+          <div class="control">
+            <input type="number" class="modal-input mini-input" id="set-diff-search-max" min="0" step="1" style="width:90px" placeholder="No limit" />
+            <select class="modal-input" id="set-diff-search-unit" style="width:auto;margin-left:6px">
+              <option value="1024">KB</option>
+              <option value="1048576">MB</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-row">
           <div class="label">Reopen repositories on launch<small>Put back the tabs that were open when you last quit, instead of the welcome screen.</small></div>
           <div class="control">
             <label class="medieval-toggle">
@@ -826,6 +836,19 @@ async function showSettingsDialog() {
     const targetsInput = panel.querySelector('#set-recent-targets');
     targetsInput.value = 'recentMergeTargets' in appChanges ? appChanges.recentMergeTargets : (appSettings.recentMergeTargets || '');
     targetsInput.oninput = (e) => { appChanges.recentMergeTargets = e.target.value.trim(); };
+    // Stored in bytes; shown in MB when it is a whole number of MB, else KB.
+    const maxInput = panel.querySelector('#set-diff-search-max');
+    const unitSel = panel.querySelector('#set-diff-search-unit');
+    const maxBytes = Number('diffSearchMaxFileBytes' in appChanges ? appChanges.diffSearchMaxFileBytes : appSettings.diffSearchMaxFileBytes) || 0;
+    const MB = 1048576;
+    unitSel.value = (maxBytes && maxBytes % MB === 0) ? String(MB) : '1024';
+    maxInput.value = maxBytes ? String(Math.round(maxBytes / Number(unitSel.value))) : '';
+    const storeMax = () => {
+      const n = parseFloat(maxInput.value);
+      appChanges.diffSearchMaxFileBytes = (Number.isFinite(n) && n > 0) ? Math.round(n * Number(unitSel.value)) : 0;
+    };
+    maxInput.oninput = storeMax;
+    unitSel.onchange = storeMax;
     panel.querySelector('#set-restore-tabs').onchange = (e) => { appChanges.restoreTabsOnStart = e.target.checked; };
     panel.querySelector('#set-confirm-destructive').onchange = (e) => { appChanges.confirmDestructive = e.target.checked; };
   }
@@ -1516,9 +1539,12 @@ async function showSettingsDialog() {
         showToast('Failed to save app preferences: ' + (r && r.error), 'error', 6000);
       } else {
         const targetsChanged = 'recentMergeTargets' in appChanges;
+        const diffLimitChanged = 'diffSearchMaxFileBytes' in appChanges &&
+          (Number(appChanges.diffSearchMaxFileBytes) || 0) !== (Number(appSettings.diffSearchMaxFileBytes) || 0);
         Object.assign(appSettings, appChanges);
         Object.keys(appChanges).forEach(k => delete appChanges[k]);
         if (targetsChanged && state.repo) refreshBranches();
+        if (diffLimitChanged && state.repo) rerunContentSearch();
         // Re-apply in case Save changed anything
         applyTheme(appSettings.theme);
         applyFontScale(appSettings.fontScale);
@@ -1561,6 +1587,7 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   initGitignoreBase: 'none',
   initGitignoreAddons: [],
   recentMergeTargets: 'main, devel',
+  diffSearchMaxFileBytes: 0,
   graphLimit: 300,
   graphHideLocal: false,
   graphStripRemotePrefix: false,

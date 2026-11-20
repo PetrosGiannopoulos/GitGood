@@ -225,6 +225,23 @@ function clearContentMatchCache() {
   setContentSearchBusy(false);
 }
 
+// The diff search's file size limit changed (Settings): every cached answer was computed
+// under the old one, so drop them and re-run whichever "Diff content" filter is showing.
+async function rerunContentSearch() {
+  cancelContentSearch();
+  clearContentMatchCache();
+  const graphQ = state.graphFilterMode === 'content' ? (state.graphFilter || '').trim() : '';
+  const histQ = state.historyFilterMode === 'content' ? (state.historyFilter || '').trim() : '';
+  if (graphQ) {
+    await ensureContentMatches(graphQ);
+    if (typeof relayoutGraph === 'function') relayoutGraph();
+  }
+  if (histQ) {
+    await ensureContentMatches(histQ);
+    if (typeof renderHistory === 'function') renderHistory();
+  }
+}
+
 // Local-only (unpushed) commits — the set of hashes reachable from some ref but NOT from any
 // remote. Loaded lazily and cached; cleared on refreshAll() since fetch/commit/push change it.
 // Used by the graph's "hide local commits" option (see relayoutGraph).

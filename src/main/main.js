@@ -782,6 +782,15 @@ ipcMain.handle('repo:searchDiffContent', (_e, opts) => {
   const timeoutMs = (opts && opts.timeoutMs) || 15000;
   const { spawn } = require('child_process');
 
+  // Settings → General → "Diff search file size limit". A match counts only if it is in a
+  // file no bigger than this (either side of the change). Git cannot do this itself:
+  // core.bigFileThreshold makes -G skip big blobs but -S ignores it, and -S is literal
+  // where -G is a regex (above) — both verified. So the filtering happens here: with --raw,
+  // pickaxe lists only the file pairs that *matched* in each commit (not every file the
+  // commit touched — verified), and their blob sizes come from one cat-file pass per batch.
+  // Git still reads the big files; what this removes is the matches found only in them.
+  const maxBytes = Math.max(0, Number(getAppSettings().diffSearchMaxFileBytes) || 0);
+
   return new Promise((resolve) => {
     const record = { proc: null, cancelled: false, hashes: [] };
     _diffSearch = record;
@@ -791,7 +800,8 @@ ipcMain.handle('repo:searchDiffContent', (_e, opts) => {
       // `-S<string>` is glued into one argv element so no shell parses it and a leading '-'
       // in the query can't be mistaken for a flag. windowsHide avoids a console flash.
       proc = spawn('git', [
-        'log', '--all', `--max-count=${limit}`, '--format=%H', '-S' + query
+        'log', '--all', `--max-count=${limit}`, '--format=%x01%H', '-S' + query,
+        ...(maxBytes ? ['--raw', '--no-abbrev'] : [])
       ], {
         cwd: currentRepoPath,
         windowsHide: true,
@@ -804,20 +814,62 @@ ipcMain.handle('repo:searchDiffContent', (_e, opts) => {
     }
     record.proc = proc;
 
-    // Buffer stdout by line; flush new hashes to the renderer in throttled batches.
+    // Buffer stdout by line. Each commit is "\x01<hash>", followed (with a size limit) by its
+    // matching file pairs as --raw lines. A commit is complete when the next one starts, or
+    // at the end; complete commits are judged and sent to the renderer in throttled batches.
     let buf = '';
-    let pending = [];
+    let cur = null;         // { hash, pairs: [[oldOid|null, newOid|null], …] }
+    let ready = [];         // complete commits not yet judged
     let flushTimer = null;
+    let chain = Promise.resolve();
+    const sizes = new Map(); // blob oid -> bytes, for the life of this search
     const sendProgress = (payload) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         try { mainWindow.webContents.send('search:progress', payload); } catch (e) {}
       }
     };
+    const endCommit = () => { if (cur) ready.push(cur); cur = null; };
+    const takeLine = (line) => {
+      if (line.startsWith('\x01')) {
+        endCommit();
+        const hash = line.slice(1).trim();
+        if (hash) cur = { hash, pairs: [] };
+        if (!maxBytes) endCommit(); // no --raw lines will follow
+      } else if (cur && line.startsWith(':')) {
+        // ":100644 100644 <old> <new> M\tpath" — all-zero oid = that side doesn't exist.
+        const f = line.split('\t')[0].split(' ');
+        const side = (o) => (o && !/^0+$/.test(o) ? o : null);
+        cur.pairs.push([side(f[2]), side(f[3])]);
+      }
+    };
+    // Judge the complete commits and send the ones that match in a file within the limit.
+    const judgeReady = async () => {
+      const batch = ready; ready = [];
+      if (!batch.length || record.cancelled) return;
+      let kept = batch;
+      if (maxBytes) {
+        const unknown = [...new Set(batch.flatMap(c => c.pairs.flat()).filter(o => o && !sizes.has(o)))];
+        if (unknown.length) {
+          // Correlated by position. A missing object (a submodule's gitlink) reads as 0.
+          const r = await gitRun(['cat-file', '--batch-check=%(objectname) %(objectsize)'], null, 30000, unknown.join('\n') + '\n');
+          const lines = String(r.out || '').split('\n');
+          unknown.forEach((o, i) => {
+            const n = parseInt((lines[i] || '').split(' ')[1], 10);
+            sizes.set(o, Number.isFinite(n) ? n : 0);
+          });
+        }
+        const fits = (o) => !o || (sizes.get(o) || 0) <= maxBytes;
+        // No pairs at all can't be judged by size; keep it rather than hide a real match.
+        kept = batch.filter(c => !c.pairs.length || c.pairs.some(([a, b]) => fits(a) && fits(b)));
+      }
+      if (!kept.length || record.cancelled) return;
+      const delta = kept.map(c => c.hash);
+      record.hashes.push(...delta);
+      sendProgress({ query, hashesDelta: delta, done: false });
+    };
     const flush = () => {
       flushTimer = null;
-      if (!pending.length) return;
-      const delta = pending; pending = [];
-      sendProgress({ query, hashesDelta: delta, done: false });
+      chain = chain.then(judgeReady).catch(() => { /* a failed size lookup drops that batch */ });
     };
     const scheduleFlush = () => { if (!flushTimer) flushTimer = setTimeout(flush, 120); };
 
@@ -825,9 +877,9 @@ ipcMain.handle('repo:searchDiffContent', (_e, opts) => {
       buf += d.toString();
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).trim();
+        const line = buf.slice(0, idx).replace(/\r$/, '');
         buf = buf.slice(idx + 1);
-        if (line) { record.hashes.push(line); pending.push(line); }
+        if (line.trim()) takeLine(line);
       }
       scheduleFlush();
     });
@@ -844,15 +896,17 @@ ipcMain.handle('repo:searchDiffContent', (_e, opts) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (flushTimer) { clearTimeout(flushTimer); }
-      // Emit anything still buffered (last line may lack a trailing newline).
-      const tail = buf.trim();
-      if (tail) { record.hashes.push(tail); pending.push(tail); }
-      if (pending.length) sendProgress({ query, hashesDelta: pending, done: false });
-      pending = [];
-      if (_diffSearch === record) _diffSearch = null;
-      sendProgress({ query, hashesDelta: [], done: true, timedOut, cancelled: record.cancelled });
-      resolve({ ok: true, data: { hashes: record.hashes, timedOut, cancelled: record.cancelled } });
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      // Take anything still buffered (last line may lack a trailing newline), close the last
+      // commit, and judge what is left before reporting done.
+      if (buf.trim()) takeLine(buf.replace(/\r$/, ''));
+      buf = '';
+      endCommit();
+      chain.then(judgeReady).catch(() => {}).then(() => {
+        if (_diffSearch === record) _diffSearch = null;
+        sendProgress({ query, hashesDelta: [], done: true, timedOut, cancelled: record.cancelled });
+        resolve({ ok: true, data: { hashes: record.hashes, timedOut, cancelled: record.cancelled } });
+      });
     };
 
     proc.on('error', (err) => {
@@ -4167,7 +4221,8 @@ const DEFAULT_APP_SETTINGS = {
   autoFetchOnFocus: true,             // auto-refresh on window focus
   watchFileSystem: true,              // watch the working tree and refresh when it changes
   diffSyntax: true,                   // syntax-highlight diff content
-  autoFetchMinutes: 10,               // background fetch interval in minutes (0 = off)
+  diffSearchMaxFileBytes: 0,          // "Diff content" filter ignores matches in files bigger than this (0 = no limit)
+  autoFetchMinutes: 10,              // background fetch interval in minutes (0 = off)
   confirmDestructive: true,           // extra confirm on discard/force-push/etc.
   defaultSshKeyPath: '',              // pre-fill path for clone SSH key picker
   fontScale: 1.0,                     // UI font scale multiplier
