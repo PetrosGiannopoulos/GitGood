@@ -826,7 +826,25 @@ async function showSettingsDialog() {
           </div>
         </div>
       </div>
+      <div class="settings-group">
+        <div class="settings-group-title">External editor</div>
+        <div class="settings-row">
+          <div class="label">Open files with<small>Used by "Open in…" in the Changes list and the commit preview. Automatic prefers Visual Studio, then VS Code, then Notepad++, then Notepad.</small></div>
+          <div class="control">
+            <select class="modal-input" id="set-editor" style="width:240px" disabled><option>Detecting editors…</option></select>
+            <button type="button" class="mini-btn" id="set-editor-redetect" title="Look for installed editors again" style="margin-left:6px">↻</button>
+          </div>
+        </div>
+        <div class="settings-row" id="set-editor-custom-row" style="display:none">
+          <div class="label">Custom program<small>Each file is passed to it as an argument.</small></div>
+          <div class="control">
+            <input type="text" class="modal-input" id="set-editor-custom" style="width:240px" readonly placeholder="No program chosen" />
+            <button type="button" class="mini-btn" id="set-editor-browse" style="margin-left:6px">Browse…</button>
+          </div>
+        </div>
+      </div>
     `;
+    wireEditorSetting(panel);
     panel.querySelector('#set-auto-focus').onchange = (e) => { appChanges.autoFetchOnFocus = e.target.checked; };
     panel.querySelector('#set-watch-fs').onchange = (e) => { appChanges.watchFileSystem = e.target.checked; };
     panel.querySelector('#set-auto-fetch-min').oninput = (e) => {
@@ -851,6 +869,68 @@ async function showSettingsDialog() {
     unitSel.onchange = storeMax;
     panel.querySelector('#set-restore-tabs').onchange = (e) => { appChanges.restoreTabsOnStart = e.target.checked; };
     panel.querySelector('#set-confirm-destructive').onchange = (e) => { appChanges.confirmDestructive = e.target.checked; };
+  }
+
+  // The editor dropdown is filled from main's detection (editor:list), which may take a
+  // moment the first time (vswhere), so the row draws first and fills in. Choices go into
+  // appChanges like every other setting and only apply on Save.
+  function wireEditorSetting(root) {
+    const sel = root.querySelector('#set-editor');
+    const customRow = root.querySelector('#set-editor-custom-row');
+    const customInput = root.querySelector('#set-editor-custom');
+    const cur = (k) => (k in appChanges ? appChanges[k] : appSettings[k]);
+    const showCustom = () => {
+      customRow.style.display = sel.value === 'custom' ? '' : 'none';
+      customInput.value = cur('editorCustomPath') || '';
+    };
+    const browse = async () => {
+      const r = await gs.editorPickCustom();
+      if (!r || !r.ok) { showToast((r && r.error) || 'Could not choose a program', 'error', 5000); return false; }
+      if (r.data.canceled) return false;
+      appChanges.editorCustomPath = r.data.path;
+      customInput.value = r.data.path;
+      return true;
+    };
+
+    const fill = async (force) => {
+      sel.disabled = true;
+      const r = await gs.editorList({ force });
+      if (!sel.isConnected) return;               // another settings tab was opened meanwhile
+      if (!r || !r.ok) {
+        sel.innerHTML = '<option value="auto">Automatic</option>';
+        showToast('Could not detect editors: ' + ((r && r.error) || ''), 'error', 5000);
+      } else {
+        const d = r.data;
+        const chosen = cur('editor') || 'auto';
+        const opts = [`<option value="auto">Automatic — ${escapeHtml(d.auto ? d.auto.name : 'system default app')}</option>`];
+        for (const e of d.editors) {
+          opts.push(`<option value="${escapeHtml(e.id)}" title="${escapeHtml(e.exe).replace(/"/g, '&quot;')}">${escapeHtml(e.name)}</option>`);
+        }
+        // A choice that is no longer installed stays visible, saying what happens instead.
+        const known = ['auto', 'system', 'custom', ...d.editors.map(e => e.id)];
+        if (!known.includes(chosen)) {
+          opts.push(`<option value="${escapeHtml(chosen)}">Previous choice — not found, Automatic is used</option>`);
+        }
+        opts.push('<option value="system">System default app for the file type</option>');
+        opts.push('<option value="custom">Custom program…</option>');
+        sel.innerHTML = opts.join('');
+        sel.value = chosen;
+      }
+      sel.disabled = false;
+      showCustom();
+    };
+
+    sel.onchange = async () => {
+      if (sel.value === 'custom' && !cur('editorCustomPath')) {
+        // Custom with no program is meaningless; ask now, and back out if they cancel.
+        if (!(await browse())) { sel.value = cur('editor') || 'auto'; showCustom(); return; }
+      }
+      appChanges.editor = sel.value;
+      showCustom();
+    };
+    root.querySelector('#set-editor-browse').onclick = browse;
+    root.querySelector('#set-editor-redetect').onclick = () => fill(true);
+    fill(false);
   }
 
   function renderAppearance() {
@@ -1539,6 +1619,7 @@ async function showSettingsDialog() {
         showToast('Failed to save app preferences: ' + (r && r.error), 'error', 6000);
       } else {
         const targetsChanged = 'recentMergeTargets' in appChanges;
+        if (('editor' in appChanges || 'editorCustomPath' in appChanges) && typeof refreshEditorName === 'function') refreshEditorName();
         const diffLimitChanged = 'diffSearchMaxFileBytes' in appChanges &&
           (Number(appChanges.diffSearchMaxFileBytes) || 0) !== (Number(appSettings.diffSearchMaxFileBytes) || 0);
         Object.assign(appSettings, appChanges);
@@ -1598,6 +1679,8 @@ const DEFAULT_APP_SETTINGS_LOCAL = {
   autoFetchMinutes: 10,
   diffSyntax: true,
   confirmDestructive: true,
+  editor: 'auto',
+  editorCustomPath: '',
   defaultSshKeyPath: '',
   fontScale: 1.0,
   heroBackdrop: 75,

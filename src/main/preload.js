@@ -298,6 +298,12 @@ const api = {
   openInExplorer: (p) => ipcRenderer.invoke('repo:openInExplorer', p),
   // Opens the containing folder with the file selected (openInExplorer takes a folder).
   revealPath: (p) => ipcRenderer.invoke('repo:revealPath', p),
+  // External editor: detected list + the current choice; open working-tree files, or one
+  // file as a commit has it (read-only temp copy); pick a custom program.
+  editorList: (opts) => ipcRenderer.invoke('editor:list', opts || {}),
+  openInEditor: (paths) => ipcRenderer.invoke('editor:open', { paths }),
+  openInEditorAtCommit: (hash, path) => ipcRenderer.invoke('editor:openAtCommit', { hash, path }),
+  editorPickCustom: () => ipcRenderer.invoke('editor:pickCustom'),
   // Zips the commit's version of `paths` into the repo root and reveals the zip.
   zipCommitFiles: (hash, paths) => ipcRenderer.invoke('repo:zipCommitFiles', { hash, paths }),
   showCommit: (opts) => ipcRenderer.invoke('repo:showCommit', opts),

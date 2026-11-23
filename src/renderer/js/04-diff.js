@@ -1698,6 +1698,48 @@ function renderCommitFileBrowser(panelEl, diffText, opts) {
   if (diffEl) diffEl.addEventListener('scroll', () => { store.scroll = diffEl.scrollTop; });
 }
 
+// ---- Open in editor ------------------------------------------------------------------
+// Main decides which editor (Settings → General, lib/editors.js); the renderer only keeps
+// its name for the menu label. Fetched a few seconds after load — detection runs
+// Visual Studio's vswhere, which has no business on the startup path — and again after
+// Settings is saved. Until it answers, the label just says "editor".
+let _editorName = null;
+async function refreshEditorName(force) {
+  try {
+    const r = await gs.editorList({ force: !!force });
+    _editorName = (r && r.ok && r.data.resolvedName) || '';
+  } catch (e) { _editorName = ''; }
+}
+function editorMenuLabel(prefix) {
+  if (_editorName === null) { _editorName = ''; refreshEditorName(); }
+  return `${prefix} ${_editorName || 'editor'}`;
+}
+if (typeof window !== 'undefined' && typeof gs !== 'undefined') {
+  setTimeout(() => { if (_editorName === null) refreshEditorName(); }, 4000);
+}
+
+function reportEditorOpen(r, what) {
+  if (!r || !r.ok) { showToast((r && r.error) || 'Could not open the editor', 'error', 6000); return; }
+  const d = r.data || {};
+  if (d.fellBack) {
+    showToast(`The editor chosen in Settings was not found — opened in ${d.name} instead`, 'info', 6000);
+  } else if (d.missing && d.missing.length) {
+    showToast(`Opened ${d.opened} in ${d.name}; ${d.missing.length} not on disk`, 'info', 5000);
+  } else {
+    showToast(`Opening ${what} in ${d.name}…`, 'info', 2500);
+  }
+}
+
+async function openPathsInEditor(paths) {
+  const r = await gs.openInEditor(paths);
+  reportEditorOpen(r, paths.length === 1 ? shortenPath(paths[0]) : `${paths.length} files`);
+}
+
+async function openCommitVersionInEditor(hash, p) {
+  const r = await gs.openInEditorAtCommit(hash, p);
+  reportEditorOpen(r, `${shortenPath(p)} @ ${hash.slice(0, 7)}`);
+}
+
 // Context menu for a file (or selected files) within a commit preview.
 // `opts.beforeDialog` runs before any item that opens a modal or overlay. The pop-out diff
 // viewer passes its own close here: it sits above every modal layer, so a dialog opened
@@ -1720,6 +1762,13 @@ function showCommitFileContextMenu(hash, targetPaths, rightClickedPath, x, y, op
     // The third lens on the same file: history shows where it has been, blame who put it
     // there, and this what it looked like in the commits that are no longer in history.
     { label: 'Peek at its soul…', icon: '☠', action: dialog(() => openSoulOfFile(focus)) },
+    'sep',
+    // The file as it is on disk now (editable), and — one file at a time — as this commit
+    // has it (a read-only copy in a temp folder).
+    { label: editorMenuLabel('Open in') + (many ? ` (${targetPaths.length})` : ''), icon: '✎',
+      action: () => openPathsInEditor(targetPaths) },
+    ...(many ? [] : [{ label: editorMenuLabel(`Open ${hash.slice(0, 7)}'s version in`), icon: '✎',
+      action: () => openCommitVersionInEditor(hash, focus) }]),
     'sep',
     { label: 'Copy path' + (many ? 's' : ''), icon: '⎘',
       action: () => copyText(targetPaths.join('\n'), 'Path' + (many ? 's' : '') + ' copied') },

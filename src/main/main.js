@@ -2679,6 +2679,189 @@ ipcMain.handle('repo:revealPath', wrap(async (_, relPath) => {
   return { revealed: false, path: dir };
 }));
 
+// ---- External editor ("Open in …" in the file context menus) --------------------------
+// Which editors exist is decided by lib/editors.js from what is on disk; this section does
+// the I/O around it. Detection runs Visual Studio's own vswhere (the only reliable way to
+// find an install — it can live on any drive) and reads Notepad++'s registry key, so it is
+// cached for the session; Settings' Re-detect, or a launch that finds the editor gone,
+// forgets it.
+const edlib = require('./lib/editors');
+const EDITOR_MAX_FILES = 20;
+let editorCache = null;
+
+const editorFs = {
+  exists: p => { try { return fs.existsSync(p); } catch (e) { return false; } },
+  readdir: p => { try { return fs.readdirSync(p); } catch (e) { return []; } }
+};
+
+function execText(file, args, timeoutMs) {
+  return new Promise(resolve => {
+    require('child_process').execFile(file, args, { windowsHide: true, timeout: timeoutMs || 10000, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout) => resolve(err ? '' : String(stdout || '')));
+  });
+}
+
+async function vswhereInstances() {
+  const exe = path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+    'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+  if (!fs.existsSync(exe)) return [];
+  const out = await execText(exe, ['-all', '-prerelease', '-products', '*', '-format', 'json', '-utf8']);
+  try { return JSON.parse(out) || []; } catch (e) { return []; }
+}
+
+async function notepadPlusPlusDir() {
+  for (const key of ['HKLM\\SOFTWARE\\Notepad++', 'HKLM\\SOFTWARE\\WOW6432Node\\Notepad++']) {
+    const out = await execText('reg', ['query', key, '/ve'], 5000);
+    const m = /REG_SZ\s+(.+?)\s*$/m.exec(out);
+    if (m) return m[1];
+  }
+  return '';
+}
+
+async function detectEditors(force) {
+  if (editorCache && !force) return editorCache;
+  const win = process.platform === 'win32';
+  const [vsInstances, notepadppDir] = win ? await Promise.all([vswhereInstances(), notepadPlusPlusDir()]) : [[], ''];
+  editorCache = edlib.detectEditors({ platform: process.platform, env: process.env, fsx: editorFs, vsInstances, notepadppDir });
+  return editorCache;
+}
+
+async function resolveEditorChoice() {
+  const s = getAppSettings();
+  const list = await detectEditors();
+  const custom = s.editorCustomPath || '';
+  return edlib.resolveEditor(s.editor, custom, list, !!custom && fs.existsSync(custom));
+}
+
+// Detached and unref'd: the editor outlives GitGood. Resolves on the child's `spawn` event,
+// so a missing or unlaunchable program is an error here and not a silent nothing.
+function launchDetached(exe, args) {
+  return new Promise((resolve, reject) => {
+    const env = Object.assign({}, process.env);
+    // Several editors are Electron apps too; this would start them as bare Node.
+    delete env.ELECTRON_RUN_AS_NODE;
+    let child;
+    try {
+      child = require('child_process').spawn(exe, args, {
+        cwd: currentRepoPath || undefined, detached: true, stdio: 'ignore', windowsHide: false, env
+      });
+    } catch (e) { reject(e); return; }
+    child.once('error', reject);
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
+}
+
+async function openFilesInEditor(files) {
+  const choice = await resolveEditorChoice();
+  if (choice.kind === 'system') {
+    for (const f of files) {
+      const err = await shell.openPath(f);
+      if (err) throw new Error(err);
+    }
+    return { name: 'the default app', fellBack: !!choice.fellBack };
+  }
+  const ed = choice.editor;
+  // Node will not start a .cmd/.bat without a shell, and building a shell line out of file
+  // paths is how quoting bugs become command injection. A custom pick must be the program.
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(ed.exe)) {
+    throw new Error(`${ed.exe} is a batch script. Choose the editor's .exe in Settings → General instead.`);
+  }
+  try {
+    for (const step of edlib.launchPlan(ed, files)) await launchDetached(step.exe, step.args);
+  } catch (e) {
+    editorCache = null;   // it may have been uninstalled since detection
+    throw new Error(`${ed.name} could not be started (${e.code || e.message}). Choose another editor in Settings → General.`);
+  }
+  return { name: ed.name, fellBack: !!choice.fellBack };
+}
+
+ipcMain.handle('editor:list', wrap(async (_, opts) => {
+  const list = await detectEditors(!!(opts && opts.force));
+  const s = getAppSettings();
+  const auto = edlib.pickAuto(list);
+  const choice = await resolveEditorChoice();
+  return {
+    editors: list.map(e => ({ id: e.id, name: e.name, exe: e.exe })),
+    auto: auto ? { id: auto.id, name: auto.name } : null,
+    setting: s.editor || 'auto',
+    customPath: s.editorCustomPath || '',
+    resolvedName: choice.kind === 'system' ? '' : choice.editor.name,
+    fellBack: !!choice.fellBack
+  };
+}));
+
+// Working-tree files, repo-relative. Files not on disk (deleted, or a commit's file since
+// removed) are reported back rather than failing the ones that are there.
+ipcMain.handle('editor:open', wrap(async (_, opts) => {
+  if (!currentRepoPath) throw new Error('No repository open');
+  const rels = Array.from(new Set((opts && opts.paths) || [])).filter(Boolean);
+  if (!rels.length) throw new Error('No file to open');
+  if (rels.length > EDITOR_MAX_FILES) {
+    throw new Error(`That is ${rels.length} files — GitGood opens at most ${EDITOR_MAX_FILES} in an editor at once.`);
+  }
+  const root = path.resolve(currentRepoPath);
+  const files = [];
+  const missing = [];
+  for (const rel of rels) {
+    const full = path.resolve(root, rel);
+    if (full !== root && !full.startsWith(root + path.sep)) throw new Error('Path is outside the repository');
+    let isFile = false;
+    try { isFile = fs.statSync(full).isFile(); } catch (e) { /* missing */ }
+    (isFile ? files : missing).push(isFile ? full : rel);
+  }
+  if (!files.length) {
+    throw new Error(missing.length === 1 ? `${missing[0]} is not on disk.` : 'None of those files are on disk.');
+  }
+  return Object.assign(await openFilesInEditor(files), { opened: files.length, missing });
+}));
+
+// A file as one commit has it: written to a temp folder (named by commit, keeping the
+// file's own name so the editor highlights it) and marked read-only — it is a look at the
+// past, and an edit there would go nowhere. `cat-file --filters` applies the same smudge
+// and line-ending conversion as a checkout, so an LFS file opens as its content, not its
+// pointer.
+ipcMain.handle('editor:openAtCommit', wrap(async (_, opts) => {
+  ensureGit();
+  const hash = String((opts && opts.hash) || '');
+  const rel = String((opts && opts.path) || '');
+  if (!/^[0-9a-f]{4,64}$/i.test(hash)) throw new Error('Invalid commit');
+  if (!rel) throw new Error('Path required');
+  const dir = path.join(os.tmpdir(), 'gitgood-view', hash.slice(0, 10));
+  const out = path.resolve(dir, rel);
+  if (!out.startsWith(path.resolve(dir) + path.sep)) throw new Error('Invalid path');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  try { fs.chmodSync(out, 0o644); } catch (e) { /* first time */ }
+  try {
+    await gitPatchToFile(['cat-file', '--filters', `${hash}:${rel}`], out);
+  } catch (e) {
+    try { fs.unlinkSync(out); } catch (_) {}
+    if (/does not exist|not in '|invalid object name|not a valid object/i.test(e.message)) {
+      throw new Error(`${rel} is not in commit ${hash.slice(0, 7)} — the commit deletes it.`);
+    }
+    throw e;
+  }
+  try { fs.chmodSync(out, 0o444); } catch (e) { /* best effort */ }
+  return Object.assign(await openFilesInEditor([out]), { path: out });
+}));
+
+ipcMain.handle('editor:pickCustom', wrap(async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose the editor program',
+    properties: ['openFile'],
+    filters: process.platform === 'win32' ? [{ name: 'Programs (*.exe)', extensions: ['exe'] }] : []
+  });
+  if (r.canceled || !r.filePaths[0]) return { canceled: true };
+  let p = r.filePaths[0];
+  // A macOS .app bundle is a folder; `open -a` would be right but the custom path is spawned
+  // directly, so take the binary inside it.
+  if (/\.app$/i.test(p)) {
+    const macos = path.join(p, 'Contents', 'MacOS');
+    const bin = editorFs.readdir(macos)[0];
+    if (bin) p = path.join(macos, bin);
+  }
+  return { path: p };
+}));
+
 // Zip the chosen files *as they are in the commit* into the repository's root folder, then
 // reveal the zip. `git archive` does the zipping, but it has no --pathspec-from-file, so a
 // selection past the command-line cap could not be passed to it directly. Instead the
@@ -4224,7 +4407,9 @@ const DEFAULT_APP_SETTINGS = {
   diffSearchMaxFileBytes: 0,          // "Diff content" filter ignores matches in files bigger than this (0 = no limit)
   autoFetchMinutes: 10,              // background fetch interval in minutes (0 = off)
   confirmDestructive: true,           // extra confirm on discard/force-push/etc.
-  defaultSshKeyPath: '',              // pre-fill path for clone SSH key picker
+  editor: 'auto',                     // "Open in …": auto | system | custom | a detected editor id (lib/editors.js)
+  editorCustomPath: '',               // the program when editor === 'custom'
+  defaultSshKeyPath: '',             // pre-fill path for clone SSH key picker
   fontScale: 1.0,                     // UI font scale multiplier
   heroBackdrop: 75,                   // Marvel themes: strength of the backdrop art, 0–100 (%)
   heroBackdropStyle: 'art',           // Marvel themes: 'art' (suit art) | 'comic' (comic page) | 'print' (comic page as newsprint)

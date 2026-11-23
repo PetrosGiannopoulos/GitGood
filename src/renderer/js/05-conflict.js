@@ -1146,6 +1146,11 @@ function renderFileList(container, files, staged) {
         items.push({ label: 'File history…', icon: '⌛', action: () => openFileHistory(f.path) });
       }
       if (items.length) items.push('sep');
+      // A deleted file has nothing on disk to open; main reports any it had to skip.
+      if (!(selectedPaths.length === 1 && f.status === 'deleted')) {
+        items.push({ label: editorMenuLabel('Open in') + (selectedPaths.length > 1 ? ` (${selectedPaths.length})` : ''),
+          icon: '✎', action: () => openPathsInEditor(selectedPaths) });
+      }
       items.push({ label: 'Copy path' + (selectedPaths.length > 1 ? 's' : ''), icon: '⎘', action: () => {
         copyText(selectedPaths.join('\n'), `Copied ${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'}`);
       }});
