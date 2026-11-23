@@ -1225,22 +1225,61 @@ ipcMain.handle('repo:push', wrap(async (_, opts) => {
   ensureGit();
   const pg = makeProgressGit(currentRepoPath);
   const args = [];
-  // --force-with-lease is the SAFE force: it refuses to overwrite the remote if the
-  // remote branch moved since we last fetched (i.e. a coworker pushed in the meantime),
-  // unlike a bare --force. Needed after a squash that rewrote already-pushed commits.
-  if (opts && opts.force) args.push('--force-with-lease');
+  // A pinned lease: overwrite the remote ref only if it is still exactly `expect` (empty =
+  // must not exist). Plain --force-with-lease compares against the remote-tracking ref,
+  // which the background fetch keeps moving — so a teammate's commit fetched a minute ago
+  // would count as "expected" and be deleted. The amend-and-push flow checks the branch is
+  // not behind and pins the lease to the sha it checked.
+  const lease = opts && opts.lease;
+  if (lease) {
+    if (!/^refs\/heads\/[^\s:]+$/.test(String(lease.ref || ''))) throw new Error('Invalid lease ref');
+    if (lease.expect && !/^[0-9a-f]{40,64}$/i.test(lease.expect)) throw new Error('Invalid lease value');
+    args.push(`--force-with-lease=${lease.ref}:${lease.expect || ''}`);
+  } else if (opts && opts.force) {
+    // --force-with-lease is the SAFE force: it refuses to overwrite the remote if the
+    // remote branch moved since we last fetched (i.e. a coworker pushed in the meantime),
+    // unlike a bare --force. Needed after a squash that rewrote already-pushed commits.
+    args.push('--force-with-lease');
+  }
   if (opts && opts.setUpstream) args.push('-u');
   // --follow-tags carries annotated tags reachable from what we're pushing. It ignores
   // lightweight tags by design, so repo:pushTag still exists for those.
   if (opts && opts.followTags) args.push('--follow-tags');
-  if (opts && opts.remote) args.push(opts.remote);
-  if (opts && opts.branch) args.push(opts.branch);
+  if (opts && opts.remote) {
+    if (String(opts.remote).startsWith('-')) throw new Error('Invalid remote name');
+    args.push(opts.remote);
+  }
+  if (opts && opts.refspec) {
+    if (!/^HEAD:refs\/heads\/[^\s:]+$/.test(String(opts.refspec))) throw new Error('Invalid refspec');
+    args.push(opts.refspec);
+  } else if (opts && opts.branch) args.push(opts.branch);
   try {
     const result = await pg.push(args.length ? args : undefined);
     return result;
   } finally {
     emitOpProgress({ active: false, done: true });
   }
+}));
+
+// Where the current branch pushes to, and whether forcing there is safe — read once,
+// before an amend, so the push after it can be pinned to what was checked. Everything
+// answers on stdout (for-each-ref, rev-parse --verify --quiet, rev-list --count), so none
+// of it hits simple-git's exit-code-only trap.
+//   { branch, remote, remoteRef, upstream, upstreamSha|null, behind }   or  { branch, none: true }
+ipcMain.handle('repo:upstreamInfo', wrap(async () => {
+  const g = ensureGit();
+  let branch = '';
+  try { branch = (await g.raw(['symbolic-ref', '-q', '--short', 'HEAD'])).trim(); } catch (e) { branch = ''; }
+  if (!branch) return { branch: '', detached: true };
+  const out = (await g.raw(['for-each-ref', '--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:short)',
+    'refs/heads/' + branch])).trim();
+  const [remote, remoteRef, upstream] = out.split('\0');
+  if (!remote || !remoteRef) return { branch, none: true };
+  let upstreamSha = null;
+  try { upstreamSha = (await g.raw(['rev-parse', '--verify', '--quiet', upstream + '^{commit}'])).trim() || null; } catch (e) { upstreamSha = null; }
+  let behind = 0;
+  if (upstreamSha) behind = parseInt((await g.raw(['rev-list', '--count', 'HEAD..' + upstreamSha])).trim(), 10) || 0;
+  return { branch, remote, remoteRef, upstream, upstreamSha, behind };
 }));
 
 ipcMain.handle('repo:pull', wrap(async () => {

@@ -516,7 +516,12 @@ const opProgress = {
     if (!this._box || !op) return;
     clearTimeout(this._hideTimer);
     this._box.classList.remove('hidden');
-    if (this._label) this._label.textContent = op.label;
+    if (this._label) {
+      this._label.textContent = op.label;
+      // A git command is shown as typed (monospace, its own case), and in full on hover.
+      this._label.classList.toggle('is-command', !!op.command);
+      this._label.title = op.command ? op.label : '';
+    }
     if (op.pct == null) {
       if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
       if (this._pct) this._pct.textContent = '…';
@@ -547,20 +552,37 @@ const opProgress = {
     if (!this._ops.length || op === this.current()) this._render(op);
   },
 
+  // An operation made of several git commands (see withLoading's `step`) names the one
+  // running; streamed transfer stages are appended to it rather than replacing it.
+  _streamLabel(op, label, stage) {
+    if (op.command) op.label = stage ? `${op.command} · ${stage}` : op.command;
+    else if (label) op.label = label;
+  },
+
   // Indeterminate update from a streamed event; never downgrades a real %.
-  indeterminate(label) {
+  indeterminate(label, stage) {
     const op = this._streamTarget();
     if (op.pct != null) return;
-    if (label) op.label = label;
+    this._streamLabel(op, label, stage);
     this._streamed(op);
   },
 
   // Update with a real percentage (0-100) and optional label.
-  setPercent(v, label) {
+  setPercent(v, label, stage) {
     const op = this._streamTarget();
     op.pct = Math.max(0, Math.min(100, Math.round(v)));
-    if (label) op.label = label;
+    this._streamLabel(op, label, stage);
     this._streamed(op);
+  },
+
+  // Switch an operation to its next git command: the label becomes the command and the
+  // bar goes back to indeterminate until that command reports progress of its own.
+  step(op, command) {
+    if (!op) return;
+    op.command = command;
+    op.label = command;
+    op.pct = null;
+    if (op === this.current()) this._render(op);
   },
 
   // Finish one operation. While others are still running the bar returns to the
@@ -606,8 +628,15 @@ async function withLoading(message, fn) {
     try { document.dispatchEvent(new CustomEvent('gitgood:op', { detail: { message, phase, ok } })); } catch (e) { /* never fail an op over a listener */ }
   };
   announce('start');
+  // fn(step): an operation that runs several git commands calls step('git push …') before
+  // each, so the bar and the status line name the command actually running. Callers that
+  // take no argument are unaffected.
+  const step = (command) => {
+    opProgress.step(op, command);
+    setStatus(command + '...');
+  };
   try {
-    const result = await fn();
+    const result = await fn(step);
     settle('Ready', false);
     announce('end', result && result.canceled ? null : !(result && result.ok === false));
     return result;

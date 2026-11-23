@@ -67,6 +67,8 @@ const api = {
   push: (opts) => ipcRenderer.invoke('repo:push', opts),
   pull: () => ipcRenderer.invoke('repo:pull'),
   fetch: () => ipcRenderer.invoke('repo:fetch'),
+  // Current branch's push target and how far behind it is, for a pinned force-with-lease.
+  upstreamInfo: () => ipcRenderer.invoke('repo:upstreamInfo'),
 
   // Submodules. A gitlink is one commit hash in the index, so the useful information
   // (which way it moved, over which commits) has to be read from inside the submodule.
