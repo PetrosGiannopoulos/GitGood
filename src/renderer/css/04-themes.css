@@ -734,6 +734,14 @@ html.theme-hero.hero-comic .screen {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* A git command as the label (amend → push → fetch): readable as typed, not as a title. */
+.op-progress-label.is-command {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  max-width: 460px;
+}
 
 .op-progress-bar {
   width: 90px;

@@ -86,25 +86,7 @@ async function commitChanges() {
   }
 
   if (amend) {
-    const head = _amendState.head;
-    if (head && head.pushed) {
-      const ok = await modal.confirm({
-        title: 'Amend a Published Commit',
-        message:
-          `Commit ${head.hash.slice(0, 7)} has already been pushed to a remote. Amending rewrites it, ` +
-          `so the remote will have diverged and the next push must be a force-push ` +
-          `(GitGood uses the safe --force-with-lease).\n\n` +
-          `Anyone who already pulled this commit will need to reconcile their history.\n\nAmend anyway?`,
-        danger: true,
-        confirmText: 'Amend Anyway'
-      });
-      if (!ok) return;
-    }
-    const label = stagedCount === 0 ? 'Rewording last commit' : 'Amending last commit';
-    const r = await withLoading(label, () => gs.commit({ message: summary, description, amend: true, sign }));
-    if (!handleResult(r, stagedCount === 0 ? 'Message rewritten' : 'Last deed amended')) return;
-    setAmendMode(false, { clearFields: true });
-    await refreshAll();
+    await amendAndPublish({ summary, description, sign, stagedCount });
     return;
   }
 
@@ -113,6 +95,116 @@ async function commitChanges() {
     $('#commit-summary').value = '';
     $('#commit-description').value = '';
     await refreshAll();
+  }
+}
+
+// ============================================
+// AMEND → FORCE-PUSH → FETCH
+// ============================================
+// The Amend button rewrites HEAD, publishes it over the old one, and fetches, as one
+// operation on the progress bar — which names each git command as it runs and stays up
+// until the fetch is done.
+//
+// The force is a lease pinned to the remote tip checked *before* amending, never a bare
+// --force or an unpinned --force-with-lease: the background fetch keeps moving the
+// remote-tracking ref, so either of those would happily delete a teammate's commit that
+// arrived a minute ago. A branch that is behind its upstream is not force-pushed at all —
+// that is exactly the case where forcing deletes someone's work — and the user is asked
+// first. A branch with no upstream is published with -u (nothing there to force over).
+
+// What the push after the amend will be, decided before anything is rewritten.
+async function amendPushPlan() {
+  if (!(state.remotes || []).length) return { push: false, why: 'this repository has no remote' };
+  const r = await gs.upstreamInfo();
+  if (!r.ok) return { push: false, why: r.error || 'the upstream could not be read' };
+  const u = r.data;
+  if (u.detached) return { push: false, why: 'HEAD is detached, so there is no branch to push' };
+  if (u.none) {
+    const remote = preferredRemote();
+    if (!remote) return { push: false, why: 'there is no remote to push to' };
+    return { push: true, setUpstream: true, remote, branch: u.branch, command: `git push -u ${remote} ${u.branch}` };
+  }
+  const name = u.remoteRef.replace(/^refs\/heads\//, '');
+  if (u.behind > 0) return { push: false, behind: u.behind, upstream: u.upstream };
+  return {
+    push: true, remote: u.remote, upstream: u.upstream,
+    lease: { ref: u.remoteRef, expect: u.upstreamSha || '' },
+    refspec: 'HEAD:' + u.remoteRef,
+    command: `git push --force-with-lease=${name}:${(u.upstreamSha || '').slice(0, 7)} ${u.remote} HEAD:${name}`
+  };
+}
+
+async function amendAndPublish({ summary, description, sign, stagedCount }) {
+  const head = _amendState.head;
+  const plan = await amendPushPlan();
+
+  if (plan.behind) {
+    // Forcing now would delete the commits only the remote has. Offer the amend alone.
+    const ok = await modal.confirm({
+      title: 'Remote Has Newer Commits',
+      message:
+        `${plan.upstream} has ${plan.behind} commit${plan.behind === 1 ? '' : 's'} this branch does not. ` +
+        `Force-pushing the amended commit would delete ${plan.behind === 1 ? 'it' : 'them'} from the remote.\n\n` +
+        `Amend locally without pushing? (Pull first if you want to publish the amend.)`,
+      confirmText: 'Amend Only'
+    });
+    if (!ok) return;
+  } else if (plan.push && plan.lease && head && head.pushed) {
+    const ok = await modal.confirm({
+      title: 'Amend and Force-Push',
+      message:
+        `Commit ${head.hash.slice(0, 7)} is already on ${plan.upstream}. Amending rewrites it, and GitGood will then ` +
+        `force-push the new commit over it and fetch.\n\n` +
+        `The push is refused if anyone pushed to ${plan.upstream} since GitGood checked it, so nobody's work is ` +
+        `overwritten — but anyone who already pulled ${head.hash.slice(0, 7)} will need to reconcile their history.\n\nContinue?`,
+      danger: true,
+      confirmText: 'Amend & Force-Push'
+    });
+    if (!ok) return;
+  }
+
+  const commitCmd = 'git commit --amend' + (sign === true ? ' -S' : sign === false ? ' --no-gpg-sign' : '');
+  const fetchCmd = 'git fetch --all --prune --tags';
+  let failedAt = null;
+  const label = stagedCount === 0 ? 'Rewording last commit' : 'Amending last commit';
+  const r = await withLoading(label, async (step) => {
+    step(commitCmd);
+    const c = await gs.commit({ message: summary, description, amend: true, sign });
+    if (!c.ok) { failedAt = 'commit'; return c; }
+    if (!plan.push) return c;
+
+    step(plan.command);
+    const p = await gs.push(plan.setUpstream
+      ? { setUpstream: true, remote: plan.remote, branch: plan.branch }
+      : { remote: plan.remote, refspec: plan.refspec, lease: plan.lease });
+    if (!p.ok) { failedAt = 'push'; return p; }
+
+    step(fetchCmd);
+    const f = await gs.fetch();
+    if (!f.ok) { failedAt = 'fetch'; return f; }
+    return f;
+  });
+
+  if (failedAt === 'commit') { handleResult(r); return; }
+
+  // The amend itself happened from here on, whatever the push and fetch did.
+  setAmendMode(false, { clearFields: true });
+  await refreshAll();
+  const what = stagedCount === 0 ? 'Message rewritten' : 'Last deed amended';
+  if (failedAt === 'push') {
+    const err = r.error || '';
+    const stale = /stale info|fetch first|non-fast-forward|\[rejected\]/i.test(err);
+    showToast(stale
+      ? `${what}, but the push was refused: ${plan.upstream || 'the remote branch'} moved since GitGood checked it, ` +
+        `so someone else pushed. Nothing on the remote was overwritten — pull, then push again.`
+      : `${what}, but the push failed: ${err}`, 'error', 10000);
+  } else if (failedAt === 'fetch') {
+    showToast(`${what} and pushed, but the fetch failed: ${r.error || ''}`, 'error', 8000);
+  } else if (!plan.push) {
+    showToast(plan.behind ? `${what} — not pushed, the remote has newer commits` : `${what} — not pushed: ${plan.why}`, 'info', 6000);
+  } else {
+    showToast(`${what}, ${plan.setUpstream ? 'pushed' : 'force-pushed'} and fetched`, 'success');
+    refreshRemoteTags();
   }
 }
 
@@ -158,12 +250,12 @@ async function setAmendMode(on, opts) {
     descEl.value = head.body || '';
     if (note) {
       note.innerHTML = head.pushed
-        ? `⚠ <strong>${escapeHtml(head.hash.slice(0, 7))}</strong> is already on a remote — amending will require a force-push.`
-        : `Rewriting <strong>${escapeHtml(head.hash.slice(0, 7))}</strong>. Anything staged is folded into it.`;
+        ? `⚠ <strong>${escapeHtml(head.hash.slice(0, 7))}</strong> is already on a remote — Amend will force-push over it, then fetch.`
+        : `Rewriting <strong>${escapeHtml(head.hash.slice(0, 7))}</strong>. Anything staged is folded into it; then it is pushed and fetched.`;
       note.classList.add('visible');
       note.classList.toggle('warn', !!head.pushed);
     }
-    if (btn) btn.innerHTML = '<span class="btn-icon">✎</span> Amend';
+    if (btn) btn.innerHTML = '<span class="btn-icon">✎</span> Amend &amp; Push';
   } else {
     _amendState.head = null;
     if (opts.clearFields) {
