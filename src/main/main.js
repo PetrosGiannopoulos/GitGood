@@ -7107,6 +7107,64 @@ const FORGE_MAX_REDIRECTS = 5;
 // comparing against ctx.host would drop the Authorization header on every GitHub request
 // and every one of them would come back 401.
 async function forgeRequest(ctx, method, urlPath, body) {
+  urlPath = glMovedRewrite(ctx, urlPath);
+  const res = await forgeRequestRaw(ctx, method, urlPath, body);
+  if (ctx.provider === 'gitlab' && method !== 'GET' && res.status === 405
+      && /moved objects/i.test(res.text || '') && glOwnProjectPath(ctx, urlPath) !== null) {
+    // The 405 means nothing was performed, so retrying under the project's id is safe.
+    const id = await glResolveMoved(ctx);
+    if (id) return forgeRequestRaw(ctx, method, glMovedRewrite(ctx, urlPath), body);
+  }
+  return res;
+}
+
+// A renamed or transferred GitLab project keeps its old path alive for reads only: a GET
+// under the old path is a 301 to the new one (followed below), but every write is refused
+// with "405 Non GET methods are not allowed for moved objects" — so with a remote URL that
+// still names the old path, the lists load and every comment, edit or close fails. The
+// numeric project id survives a move, and every API route accepts it in place of the path,
+// so once a move is detected the old path is swapped for the id. Keyed by host + the path
+// the remote names; seeded by forge:info's project read, or on the first 405.
+const glMovedProjects = new Map();
+
+function glMovedKey(ctx) { return ctx.host + '\n' + ctx.projectPath; }
+
+// The rest of urlPath after "/projects/<this repository's encoded path>", or null when
+// urlPath addresses something else (another project, /user, an absolute paging link).
+function glOwnProjectPath(ctx, urlPath) {
+  if (!ctx.projectPath || urlPath.startsWith('http')) return null;
+  const prefix = '/projects/' + encodeURIComponent(ctx.projectPath);
+  if (!urlPath.startsWith(prefix)) return null;
+  const rest = urlPath.slice(prefix.length);
+  return rest === '' || rest[0] === '/' || rest[0] === '?' ? rest : null;
+}
+
+function glMovedRewrite(ctx, urlPath) {
+  if (ctx.provider !== 'gitlab') return urlPath;
+  const id = glMovedProjects.get(glMovedKey(ctx));
+  if (!id) return urlPath;
+  const rest = glOwnProjectPath(ctx, urlPath);
+  return rest === null ? urlPath : `/projects/${id}${rest}`;
+}
+
+// Read the project through its old path (the GET follows GitLab's redirect) and remember
+// its id if it has really moved.
+async function glResolveMoved(ctx) {
+  try {
+    const r = await forgeRequestRaw(ctx, 'GET', '/projects/' + encodeURIComponent(ctx.projectPath));
+    if (r.status >= 200 && r.status < 300 && r.json) glNoteProject(ctx, r.json);
+  } catch (e) { /* fall through: the caller reports the original 405 */ }
+  return glMovedProjects.get(glMovedKey(ctx)) || null;
+}
+
+function glNoteProject(ctx, p) {
+  if (!p || typeof p.id !== 'number' || !p.path_with_namespace) return;
+  if (String(p.path_with_namespace).toLowerCase() !== String(ctx.projectPath).toLowerCase()) {
+    glMovedProjects.set(glMovedKey(ctx), p.id);
+  }
+}
+
+async function forgeRequestRaw(ctx, method, urlPath, body) {
   const token = readForgeToken(ctx.host);
   const payload = body ? Buffer.from(JSON.stringify(body)) : null;
   let url = urlPath.startsWith('http') ? urlPath : ctx.apiBase + urlPath;
@@ -7578,6 +7636,10 @@ ipcMain.handle('forge:info', wrap(async (_, opts) => {
       : `/projects/${encodeURIComponent(ctx.projectPath)}`;
     const r = await forgeRequest(ctx, 'GET', path);
     if (r.json) out.defaultBranch = r.json.default_branch || '';
+    if (ctx.provider === 'gitlab' && r.status >= 200 && r.status < 300) {
+      glNoteProject(ctx, r.json);
+      if (glMovedProjects.has(glMovedKey(ctx))) out.movedTo = r.json.path_with_namespace;
+    }
   } catch (e) { /* non-fatal: the dialog falls back to the local HEAD */ }
 
   return out;

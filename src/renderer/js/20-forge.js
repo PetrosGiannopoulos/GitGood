@@ -133,6 +133,14 @@ async function refreshForgeInner() {
   updateForgeLabel();
   updateForgeToolbar();
 
+  // GitLab still serves a moved project under its old path; main now addresses it by id so
+  // writes work, but the remote URL is out of date and worth fixing. Said once per path.
+  const moved = forgeState.info.movedTo;
+  if (moved && forgeState.movedNoted !== forgeState.info.projectPath) {
+    forgeState.movedNoted = forgeState.info.projectPath;
+    showToast(`This project moved to ${moved} on ${forgeState.info.host}. GitGood follows it, but consider updating the "${forgeState.info.remote}" remote URL.`, 'info', 9000);
+  }
+
   if (!forgeState.info.supported) { forgeState.loading = false; renderForgeUnknownHost(); return; }
   if (!forgeState.info.hasToken || forgeState.info.tokenInvalid) { forgeState.loading = false; renderForgeTokenPrompt(); return; }
 
