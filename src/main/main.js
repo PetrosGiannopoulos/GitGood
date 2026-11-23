@@ -2638,13 +2638,30 @@ ipcMain.handle('repo:revParse', wrap(async (_, ref) => {
   return (await g.revparse([ref || 'HEAD'])).trim();
 }));
 
-ipcMain.handle('repo:fileContent', wrap(async (_, filePath) => {
-  const fullPath = path.join(currentRepoPath, filePath);
+// An untracked file's text, for the Changes pane (git has no diff for it). Reads at most
+// `maxBytes` (default 2 MB) from the start, cut back to the last whole line, and says how
+// big the file really is — the renderer offers "Load more" from there rather than a file
+// past the budget showing nothing at all. Binary is git's rule: a NUL in the first 8000 bytes.
+ipcMain.handle('repo:fileContent', wrap(async (_, filePath, opts) => {
+  if (!currentRepoPath) throw new Error('No repository open');
+  const root = path.resolve(currentRepoPath);
+  const fullPath = path.resolve(root, filePath);
+  if (!fullPath.startsWith(root + path.sep)) throw new Error('Path is outside the repository');
   if (!fs.existsSync(fullPath)) return null;
   const stats = fs.statSync(fullPath);
   if (stats.isDirectory()) return null;
-  if (stats.size > 2 * 1024 * 1024) return '[File too large to display]';
-  return fs.readFileSync(fullPath, 'utf8');
+  const cap = Math.min(Math.max(Number(opts && opts.maxBytes) || 2 * 1024 * 1024, 64 * 1024), 64 * 1024 * 1024);
+  const len = Math.min(stats.size, cap);
+  const buf = Buffer.alloc(len);
+  const fd = fs.openSync(fullPath, 'r');
+  try { fs.readSync(fd, buf, 0, len, 0); } finally { fs.closeSync(fd); }
+  if (buf.subarray(0, 8000).includes(0)) return { text: '', binary: true, truncated: false, bytes: stats.size };
+  let end = len;
+  if (len < stats.size) {
+    const nl = buf.lastIndexOf(0x0a);
+    if (nl > 0) end = nl + 1;
+  }
+  return { text: buf.subarray(0, end).toString('utf8'), binary: false, truncated: len < stats.size, bytes: stats.size };
 }));
 
 ipcMain.handle('repo:openInExplorer', (_, p) => {

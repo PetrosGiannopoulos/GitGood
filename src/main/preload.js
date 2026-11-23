@@ -294,7 +294,8 @@ const api = {
   setGitConfigBatch: (updates) => ipcRenderer.invoke('settings:setGitConfigBatch', updates),
 
   // Misc
-  fileContent: (p) => ipcRenderer.invoke('repo:fileContent', p),
+  // { text, binary, truncated, bytes } — the first opts.maxBytes (default 2 MB) of the file.
+  fileContent: (p, opts) => ipcRenderer.invoke('repo:fileContent', p, opts || {}),
   openInExplorer: (p) => ipcRenderer.invoke('repo:openInExplorer', p),
   // Opens the containing folder with the file selected (openInExplorer takes a folder).
   revealPath: (p) => ipcRenderer.invoke('repo:revealPath', p),

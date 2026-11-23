@@ -1563,12 +1563,8 @@ function buildPopoutModel() {
         if (!result.ok) { into.innerHTML = `<div class="empty-state"><p class="text-red">${escapeHtml(result.error)}</p></div>`; return; }
         if (!result.data || !result.data.trim()) {
           if (!file.staged) {
-            const fc = await gs.fileContent(file.path);
-            if (fc.ok && fc.data !== null) {
-              const lines = (fc.data || '').split('\n');
-              into.innerHTML = lines.map((l, i) => `<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${i+1}</div><div class="diff-text">+${escapeHtml(l)}</div></div>`).join('') || '<div class="empty-state"><p>Empty file.</p></div>';
-              return;
-            }
+            const html = await untrackedFileHtml(file.path);
+            if (html !== null) { into.innerHTML = html; return; }
           }
           into.innerHTML = '<div class="empty-state"><p>No textual differences (binary or empty).</p></div>';
           return;

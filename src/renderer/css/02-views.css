@@ -584,6 +584,19 @@
   line-height: 1.5;
 }
 
+/* The tail of a cut diff: what is shown, and buttons to show more (04-diff.js). */
+.diff-notice.diff-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.diff-more-buttons {
+  display: inline-flex;
+  gap: 8px;
+  font-style: normal;
+}
+
 .diff-line .diff-gutter {
   color: var(--muted-text);
   text-align: right;

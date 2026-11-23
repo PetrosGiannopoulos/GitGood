@@ -1,8 +1,112 @@
 // DIFF RENDERING
 // ============================================
-// Maximum diff lines to render at once. Beyond this we truncate with a notice;
-// the user can still see the rest by switching to git CLI or by viewing per-file.
+// Maximum diff lines to render at once. Beyond this the diff ends with "Load more" buttons
+// (see diffTruncationTail) that raise the cap for that diff.
 const DIFF_LINE_CAP = 20000;
+
+// ---- Load more on a cut diff ----------------------------------------------------------
+// A diff can be cut twice: by DIFF_LINE_CAP here (what is drawn), and by a byte budget in
+// main (what was fetched — the commit preview's 2 MB per file, an untracked file's first
+// 2 MB). Either way the tail offers to go further instead of ending in a dead notice.
+//
+// The output of a cut render is wrapped in a `display: contents` element carrying an id;
+// the registry maps that id to the text and options that drew it, so the click handler
+// can redraw *that* diff with a higher cap wherever it lives (Changes, commit preview,
+// pop-out, file history, forge) without each caller wiring a callback. An uncut diff is
+// not wrapped and not registered — the normal path is unchanged.
+//
+// A raised cap is remembered per file (path + side, or commit), so the redraws that
+// happen anyway — the watcher after every save, the unified/split toggle — keep it.
+const DIFF_SHOW_ALL_MAX = 100000;        // "Show all" past this many lines would risk the renderer
+const DIFF_MORE_MAX_BYTES = 64 * 1024 * 1024;
+const _diffMoreRegistry = new Map();
+let _diffMoreSeq = 0;
+const _diffCapMemory = new Map();
+
+function diffCapKey(diffText, opts) {
+  if (opts.filePath || opts.hash) return `${opts.hash || ''}\u0000${opts.staged ? 1 : 0}\u0000${opts.filePath || ''}`;
+  return 'len:' + diffText.length;
+}
+
+function diffLineCapFor(diffText, opts) {
+  return opts.lineCap || _diffCapMemory.get(diffCapKey(diffText, opts)) || DIFF_LINE_CAP;
+}
+
+// The footer of a cut diff, and the wrapper that lets its buttons redraw it.
+function diffTruncationTail(html, diffText, opts, cap, totalLines, truncatedByCap) {
+  const id = String(++_diffMoreSeq);
+  _diffMoreRegistry.set(id, { text: diffText, opts });
+  while (_diffMoreRegistry.size > 24) _diffMoreRegistry.delete(_diffMoreRegistry.keys().next().value);
+
+  let note;
+  const buttons = [];
+  if (truncatedByCap) {
+    const rest = totalLines - cap;
+    const step = Math.min(DIFF_LINE_CAP, rest);
+    note = `Showing the first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`;
+    buttons.push(`<button type="button" class="mini-btn" data-diff-more="${id}" data-diff-cap="${cap + step}">Show ${step.toLocaleString()} more lines</button>`);
+    if (rest > step && totalLines <= DIFF_SHOW_ALL_MAX) {
+      buttons.push(`<button type="button" class="mini-btn" data-diff-more="${id}" data-diff-cap="${totalLines}">Show all ${totalLines.toLocaleString()} lines</button>`);
+    }
+  } else {
+    // diffBytes is the whole diff's size (main measures it before cutting); what was loaded
+    // is the text in hand. Characters ≈ bytes is close enough for a figure in MB.
+    const mb = (n) => (Math.round(n / 1024 / 1024 * 10) / 10).toLocaleString();
+    const loaded = diffText.length;
+    note = opts.diffBytes
+      ? `Showing the first ${mb(loaded)} MB of this ${mb(opts.diffBytes)} MB diff.`
+      : `Only the first ${mb(loaded)} MB of this diff was loaded.`;
+    if (opts.loadMoreBytes && loaded < DIFF_MORE_MAX_BYTES) {
+      buttons.push(`<button type="button" class="mini-btn" data-diff-more="${id}" data-diff-bytes="1">Load more of the diff</button>`);
+    } else if (opts.loadMoreBytes) {
+      note += ` That is as much as GitGood will load into one view.`;
+    }
+  }
+  return `<div class="diff-render" data-diff-render="${id}" style="display:contents">${html}` +
+    `<div class="diff-notice diff-more">⚔ ${escapeHtml(note)}` +
+    (buttons.length ? `<span class="diff-more-buttons">${buttons.join('')}</span>` : '') +
+    `</div></div>`;
+}
+
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest && e.target.closest('[data-diff-more]');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const entry = _diffMoreRegistry.get(btn.dataset.diffMore);
+    const wrap = btn.closest('[data-diff-render]');
+    if (!entry || !wrap) return;
+    let text = entry.text;
+    let opts = Object.assign({}, entry.opts);
+    delete opts.lineCap;
+    if (btn.dataset.diffBytes) {
+      // Fetch further. The caller's loader knows where the text came from (a commit's file,
+      // an untracked file on disk) and returns the longer version.
+      btn.disabled = true;
+      btn.textContent = 'Loading…';
+      try {
+        const d = await opts.loadMoreBytes();
+        text = d.diff;
+        opts.diffTruncated = !!d.truncated;
+        opts.diffBytes = d.bytes || 0;
+      } catch (err) {
+        showToast(err.message || String(err), 'error', 6000);
+        btn.disabled = false;
+        btn.textContent = 'Load more of the diff';
+        return;
+      }
+    } else {
+      _diffCapMemory.set(diffCapKey(text, opts), parseInt(btn.dataset.diffCap, 10) || DIFF_LINE_CAP);
+      while (_diffCapMemory.size > 50) _diffCapMemory.delete(_diffCapMemory.keys().next().value);
+    }
+    if (!wrap.isConnected) return;               // the pane moved on while loading
+    const host = wrap.parentElement;
+    wrap.outerHTML = renderDiff(text, opts);
+    hydrateImageDiffs(host);
+    if (opts.stageable && typeof updatePartialBar === 'function') updatePartialBar();
+  });
+}
 
 function renderDiff(diffText, opts) {
   opts = opts || {};
@@ -705,7 +809,7 @@ function renderDiffUnified(diffText, opts) {
     return '<div class="empty-state"><p>No differences.</p></div>';
   }
   const parsed = parseUnifiedDiff(diffText);
-  const cap = opts.lineCap || DIFF_LINE_CAP;
+  const cap = diffLineCapFor(diffText, opts);
   const totalLines = parsedDiffLineCount(parsed);
   const truncatedByCap = totalLines > cap;
 
@@ -819,7 +923,12 @@ function renderDiffUnified(diffText, opts) {
           ? computeWordDiffs(delRun.map(d => d.line), addRun.map(a => a.line))
           : [];
 
-        delRun.forEach((d, k) => {
+        // The cap is checked per line here, not only per run: a new file is one run of
+        // additions, and checking only between runs drew all of it (45,000 rows for a
+        // 45,000-line file) — the very stall the cap exists to prevent.
+        for (let k = 0; k < delRun.length; k++) {
+          if (emitted >= cap) { stop = true; return; }
+          const d = delRun[k];
           const key = hi + ':' + d.idx;
           const sel = stageable && partialStaging.selected.has(key);
           const html = renderCodeLine(d.line.text, pairs[k] ? pairs[k].oldRanges : null, lang);
@@ -830,10 +939,12 @@ function renderDiffUnified(diffText, opts) {
               `<div class="diff-text">-${html}</div>` +
             `</div>`);
           emitted++;
-        });
+        }
         oldLine += delRun.length;
 
-        addRun.forEach((a, k) => {
+        for (let k = 0; k < addRun.length; k++) {
+          if (emitted >= cap) { stop = true; return; }
+          const a = addRun[k];
           const key = hi + ':' + a.idx;
           const sel = stageable && partialStaging.selected.has(key);
           const html = renderCodeLine(a.line.text, pairs[k] ? pairs[k].newRanges : null, lang);
@@ -844,7 +955,7 @@ function renderDiffUnified(diffText, opts) {
               `<div class="diff-text">+${html}</div>` +
             `</div>`);
           emitted++;
-        });
+        }
         newLine += addRun.length;
 
         // Neither a context line nor a +/- run: guard against an infinite loop.
@@ -856,14 +967,8 @@ function renderDiffUnified(diffText, opts) {
     if (smart) out.push(SMART_DIFF_CLOSE);
   }
 
-  let html = out.join('');
-  const truncated = truncatedByCap || opts.diffTruncated;
-  if (truncated) {
-    const reason = truncatedByCap
-      ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
-      : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
-    html += `<div class="diff-notice">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div>`;
-  }
+  const html = out.join('');
+  if (truncatedByCap || opts.diffTruncated) return diffTruncationTail(html, diffText, opts, cap, totalLines, truncatedByCap);
   return html;
 }
 
@@ -878,7 +983,7 @@ function renderDiffSplit(diffText, opts) {
     return '<div class="empty-state"><p>No differences.</p></div>';
   }
   const parsed = parseUnifiedDiff(diffText);
-  const cap = opts.lineCap || DIFF_LINE_CAP;
+  const cap = diffLineCapFor(diffText, opts);
   const totalLines = parsedDiffLineCount(parsed);
   const truncatedByCap = totalLines > cap;
 
@@ -1024,14 +1129,8 @@ function renderDiffSplit(diffText, opts) {
     if (smart) parts.push(SMART_DIFF_CLOSE);
   }
 
-  let html = (stageable ? partialBarHtml(!!opts.staged) : '') + `<div class="dsplit">${parts.join('')}</div>`;
-  const truncated = truncatedByCap || opts.diffTruncated;
-  if (truncated) {
-    const reason = truncatedByCap
-      ? `Showing first ${cap.toLocaleString()} of ${totalLines.toLocaleString()} lines.`
-      : `Diff was truncated to ${Math.round((opts.diffBytes || 0) / 1024 / 1024 * 10) / 10} MB.`;
-    html += `<div class="diff-notice">⚔ ${escapeHtml(reason)} The diff is too large to render fully.</div>`;
-  }
+  const html = (stageable ? partialBarHtml(!!opts.staged) : '') + `<div class="dsplit">${parts.join('')}</div>`;
+  if (truncatedByCap || opts.diffTruncated) return diffTruncationTail(html, diffText, opts, cap, totalLines, truncatedByCap);
   return html;
 }
 
@@ -1400,10 +1499,73 @@ async function ensureCommitFileDiff(f, hash) {
   return f._loading;
 }
 
+// ---- Untracked files ----------------------------------------------------------------
+// Git has no diff for a file it does not track, so its text is drawn as one all-added
+// hunk. Going through renderDiff (rather than hand-built rows, as before) gives it the line
+// cap and its Load more, syntax highlighting and the split view. The file is read only up
+// to a byte budget; Load more raises the budget, remembered per path so the watcher's
+// redraw after every save does not drop back to the first 2 MB.
+const UNTRACKED_FIRST_BYTES = 2 * 1024 * 1024;
+const _untrackedBytes = new Map();
+
+function untrackedAsDiff(path, text) {
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text;
+  const lines = body === '' ? [] : body.split('\n');
+  return `new file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n` +
+    lines.map(l => '+' + l).join('\n') + '\n';
+}
+
+// HTML for an untracked file's pane, or null when it is not on disk (or is a folder).
+async function untrackedFileHtml(path) {
+  const read = async (maxBytes) => {
+    const r = await gs.fileContent(path, { maxBytes });
+    if (!r.ok) throw new Error(r.error || 'Could not read the file');
+    return r.data;
+  };
+  let d;
+  try { d = await read(_untrackedBytes.get(path) || UNTRACKED_FIRST_BYTES); }
+  catch (e) { return `<div class="empty-state"><p class="text-red">${escapeHtml(e.message)}</p></div>`; }
+  if (!d) return null;
+  // Non-image binaries would render as pages of replacement characters.
+  if (d.binary) return '<div class="diff-notice">⚔ This is a new binary file — there is nothing textual to show.</div>';
+  if (!d.text) return '<div class="empty-state"><p>Empty file.</p></div>';
+  const loadMoreBytes = async () => {
+    const next = Math.min(DIFF_MORE_MAX_BYTES, (_untrackedBytes.get(path) || UNTRACKED_FIRST_BYTES) * 4);
+    _untrackedBytes.set(path, next);
+    while (_untrackedBytes.size > 50) _untrackedBytes.delete(_untrackedBytes.keys().next().value);
+    const more = await read(next);
+    if (!more) throw new Error('The file is no longer on disk');
+    return { diff: untrackedAsDiff(path, more.text), truncated: more.truncated, bytes: more.bytes };
+  };
+  return renderDiff(untrackedAsDiff(path, d.text), {
+    filePath: path, noSmart: true,
+    diffTruncated: d.truncated, diffBytes: d.bytes,
+    loadMoreBytes: d.truncated ? loadMoreBytes : undefined
+  });
+}
+
+// "Load more of the diff" on a commit file cut at its byte budget: fetch it again with four
+// times the budget. Mutates `f` like ensureCommitFileDiff, so the browser, the pop-out and
+// later redraws of the same commit all see the longer text.
+async function growCommitFileDiff(f, hash) {
+  const ws = !!(typeof state !== 'undefined' && state.diffIgnoreWhitespace);
+  const maxBytes = Math.min(DIFF_MORE_MAX_BYTES, Math.max(COMMIT_FILE_DIFF_MAX_BYTES, (f.diff || '').length) * 4);
+  const r = await gs.showCommitFileDiff({ hash, path: f.path, oldPath: f.oldPath, ignoreWhitespace: ws, maxBytes });
+  if (!r.ok) throw new Error(r.error || 'Could not load more of this diff');
+  const c = splitDiffByFile(r.data.diff)[0];
+  f.diff = c ? c.diff : '';
+  f.diffTruncated = !!r.data.truncated;
+  f.diffBytes = r.data.bytes || 0;          // the whole diff's size, as main reports it
+  const key = `${hash}\u0000${ws ? 1 : 0}\u0000${f.oldPath || ''}\u0000${f.path}`;
+  _lazyCommitDiffCache.set(key, r.data);
+  return { diff: f.diff, truncated: f.diffTruncated, bytes: f.diffBytes };
+}
+
 // renderDiff options for one commit-browser file. The truncation notice is per file: in a
 // cut commit, a file that arrived whole must not say "the diff was truncated".
 function commitFileRenderOpts(opts, f) {
   return Object.assign({}, opts, {
+    loadMoreBytes: (f.diffTruncated && opts.hash) ? () => growCommitFileDiff(f, opts.hash) : undefined,
     // A commit's image is compared against its first parent.
     imageRevs: opts.hash ? { oldRev: opts.hash + '^', newRev: opts.hash } : undefined,
     // The chunk has lost its "diff --git" line, and a binary has no +++/--- lines to
@@ -3160,5 +3322,6 @@ function unityWireImagePreviews(root) {
 // this a no-op: the functions stay plain globals like every other renderer script.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { parseUnifiedDiff, buildPartialPatch, hunkLineKeys, decodeTga, decodePsd, unityImportedSize,
-                     splitDiffByFile, unquoteGitPath, commitBrowserFiles };
+                     splitDiffByFile, unquoteGitPath, commitBrowserFiles, renderDiff, untrackedAsDiff,
+                     DIFF_LINE_CAP };
 }

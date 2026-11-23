@@ -1362,22 +1362,12 @@ async function selectFile(path, staged) {
         hydrateImageDiffs($('#diff-content'));
         return;
       }
-      const fileResult = await gs.fileContent(path);
-      if (fileResult.ok && fileResult.data !== null) {
-        const content = fileResult.data || '';
-        // Non-image binaries would render as pages of replacement characters. A NUL byte
-        // is the same heuristic git itself uses to call a file binary.
-        if (content.indexOf('\u0000') !== -1) {
-          $('#diff-content').innerHTML =
-            '<div class="diff-notice">⚔ This is a new binary file — there is nothing textual to show.</div>';
-          return;
-        }
-        const lines = content.split('\n');
-        const html = lines.map((l, i) =>
-          `<div class="diff-line add"><div class="diff-gutter"></div><div class="diff-gutter">${i + 1}</div><div class="diff-text">+${escapeHtml(l)}</div></div>`
-        ).join('');
-        $('#diff-content').innerHTML =
-          (html ? untrackedHintHtml(path) + html : '<div class="empty-state"><p>Empty file.</p></div>');
+      // Drawn as an all-added diff, capped, with Load more past the cap (04-diff.js).
+      const html = await untrackedFileHtml(path);
+      if (html !== null) {
+        if (state.selectedFile !== path) return;   // another file was picked while reading
+        const isText = html.includes('diff-line') || html.includes('dsplit');
+        $('#diff-content').innerHTML = (isText ? untrackedHintHtml(path) : '') + html;
         return;
       }
     }
