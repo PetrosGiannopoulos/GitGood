@@ -734,13 +734,15 @@ html.theme-hero.hero-comic .screen {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* A git command as the label (amend → push → fetch): readable as typed, not as a title. */
-.op-progress-label.is-command {
+/* The status line showing the git command an operation is running (withLoading's step):
+   monospace as typed, cut with an ellipsis, full text on hover. */
+#status-message.is-command {
   font-family: var(--font-mono);
   font-size: 11px;
-  letter-spacing: 0;
-  text-transform: none;
+  white-space: nowrap;
   max-width: 460px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .op-progress-bar {

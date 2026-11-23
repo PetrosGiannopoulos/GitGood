@@ -518,9 +518,8 @@ const opProgress = {
     this._box.classList.remove('hidden');
     if (this._label) {
       this._label.textContent = op.label;
-      // A git command is shown as typed (monospace, its own case), and in full on hover.
-      this._label.classList.toggle('is-command', !!op.command);
-      this._label.title = op.command ? op.label : '';
+      // The git command behind a stepped label, on hover (it is also in the status line).
+      this._label.title = op.command || '';
     }
     if (op.pct == null) {
       if (this._fill) { this._fill.classList.add('indeterminate'); this._fill.style.width = ''; }
@@ -552,35 +551,36 @@ const opProgress = {
     if (!this._ops.length || op === this.current()) this._render(op);
   },
 
-  // An operation made of several git commands (see withLoading's `step`) names the one
-  // running; streamed transfer stages are appended to it rather than replacing it.
-  _streamLabel(op, label, stage) {
-    if (op.command) op.label = stage ? `${op.command} · ${stage}` : op.command;
-    else if (label) op.label = label;
+  // A stepped operation (withLoading's `step`) keeps its own short label ("Fetching...");
+  // streamed transfer stages only move its percentage.
+  _streamLabel(op, label) {
+    if (!op.stepped && label) op.label = label;
   },
 
   // Indeterminate update from a streamed event; never downgrades a real %.
-  indeterminate(label, stage) {
+  indeterminate(label) {
     const op = this._streamTarget();
     if (op.pct != null) return;
-    this._streamLabel(op, label, stage);
+    this._streamLabel(op, label);
     this._streamed(op);
   },
 
   // Update with a real percentage (0-100) and optional label.
-  setPercent(v, label, stage) {
+  setPercent(v, label) {
     const op = this._streamTarget();
     op.pct = Math.max(0, Math.min(100, Math.round(v)));
-    this._streamLabel(op, label, stage);
+    this._streamLabel(op, label);
     this._streamed(op);
   },
 
-  // Switch an operation to its next git command: the label becomes the command and the
-  // bar goes back to indeterminate until that command reports progress of its own.
-  step(op, command) {
+  // Switch an operation to its next step: a short label beside the bar, the git command
+  // behind it kept for the status line, and the bar back to indeterminate until that
+  // command reports progress of its own.
+  step(op, label, command) {
     if (!op) return;
-    op.command = command;
-    op.label = command;
+    op.stepped = true;
+    op.label = label;
+    op.command = command || '';
     op.pct = null;
     if (op === this.current()) this._render(op);
   },
@@ -606,20 +606,33 @@ const opProgress = {
   }
 };
 
-function setStatus(message) {
+// The status line right of the progress bar. `command` styles it as a git command line.
+function setStatus(message, command) {
   const el = document.getElementById('status-message');
-  if (el) el.textContent = message;
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle('is-command', !!command);
+  el.title = command ? message : '';
+}
+
+// While an operation runs, the bar's label already names it, so the status line does not
+// repeat it: it shows the git command the operation is running, if it named one (a stepped
+// operation), else nothing — and "Ready"/"Failed" once everything has finished.
+function statusForOp(op) {
+  if (op && op.command) setStatus(op.command, true);
+  else setStatus('');
 }
 
 async function withLoading(message, fn) {
-  setStatus(message + '...');
   const op = opProgress.begin(message);
+  statusForOp(op);
   // An operation still running underneath (a push, while a discard finishes)
-  // gets its message back rather than "Ready".
+  // gets its status back rather than "Ready".
   const settle = (fallback, failed) => {
     opProgress.end(op, failed);
     const still = opProgress.current();
-    setStatus(still ? still.message + '...' : fallback);
+    if (still) statusForOp(still);
+    else setStatus(fallback);
   };
   // Announced for anything that wants to react to operations (the gem themes' juice,
   // 24-gem-juice.js, turns a pull into a seismic wave and a push into a take-off) — so no
@@ -628,12 +641,12 @@ async function withLoading(message, fn) {
     try { document.dispatchEvent(new CustomEvent('gitgood:op', { detail: { message, phase, ok } })); } catch (e) { /* never fail an op over a listener */ }
   };
   announce('start');
-  // fn(step): an operation that runs several git commands calls step('git push …') before
-  // each, so the bar and the status line name the command actually running. Callers that
-  // take no argument are unaffected.
-  const step = (command) => {
-    opProgress.step(op, command);
-    setStatus(command + '...');
+  // fn(step): an operation that runs several git commands calls
+  // step('Fetching...', 'git fetch …') before each — the short label goes beside the bar,
+  // the command to the status line. Callers that take no argument are unaffected.
+  const step = (label, command) => {
+    opProgress.step(op, label, command);
+    if (op === opProgress.current()) statusForOp(op);
   };
   try {
     const result = await fn(step);

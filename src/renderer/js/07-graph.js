@@ -3363,14 +3363,12 @@ wireGraphTab();
     const label = [method, stage].filter(Boolean).join(' · ') || 'Working';
 
     const hasPct = typeof p.progress === 'number' && !isNaN(p.progress) && p.progress > 0;
-    // The stage alone is passed too: an operation that names its git command (withLoading's
-    // step) shows "git push … · Writing" instead of losing the command to "Push · Writing".
     if (hasPct) {
-      opProgress.setPercent(p.progress, label, stage);
+      opProgress.setPercent(p.progress, label);
     } else {
       // No percentage yet — keep an indeterminate bar with the label (without
       // touching the active-operation counter that begin()/end() manage).
-      opProgress.indeterminate(label, stage);
+      opProgress.indeterminate(label);
     }
   });
 })();

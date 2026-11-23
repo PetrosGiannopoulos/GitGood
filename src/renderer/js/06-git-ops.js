@@ -168,18 +168,18 @@ async function amendAndPublish({ summary, description, sign, stagedCount }) {
   let failedAt = null;
   const label = stagedCount === 0 ? 'Rewording last commit' : 'Amending last commit';
   const r = await withLoading(label, async (step) => {
-    step(commitCmd);
+    step('Amending...', commitCmd);
     const c = await gs.commit({ message: summary, description, amend: true, sign });
     if (!c.ok) { failedAt = 'commit'; return c; }
     if (!plan.push) return c;
 
-    step(plan.command);
+    step(plan.setUpstream ? 'Pushing...' : 'Safe Force-Pushing...', plan.command);
     const p = await gs.push(plan.setUpstream
       ? { setUpstream: true, remote: plan.remote, branch: plan.branch }
       : { remote: plan.remote, refspec: plan.refspec, lease: plan.lease });
     if (!p.ok) { failedAt = 'push'; return p; }
 
-    step(fetchCmd);
+    step('Fetching...', fetchCmd);
     const f = await gs.fetch();
     if (!f.ok) { failedAt = 'fetch'; return f; }
     return f;
