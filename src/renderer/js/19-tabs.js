@@ -84,7 +84,7 @@ async function restoreTabUi(repoPath) {
   // the filter empty.
   if (ui.graphFilter && typeof relayoutGraph === 'function') relayoutGraph();
   if (ui.historyFilter && typeof renderHistory === 'function') renderHistory();
-  if (ui.searchQuery && typeof renderFileList === 'function') renderFileList();
+  if (ui.searchQuery && typeof renderChanges === 'function') renderChanges();
 
   // Re-select the file only if this repository still has it — the same path in a different
   // repository is a different file, and selecting a stale one shows a confusing empty diff.

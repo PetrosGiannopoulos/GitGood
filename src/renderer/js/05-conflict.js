@@ -974,6 +974,21 @@ function classifyByCode(code) {
 // whole, so the filter, Ctrl+A select-all, and every Stage/Discard/Stash action still see
 // and act on the entire list.
 const FILE_LIST_MAX_ROWS = 500;
+// "Show all" is offered only up to this many files; past it the list grows by
+// FILE_LIST_MAX_ROWS per click, since every drawn row is redrawn on every refresh.
+const FILE_LIST_SHOW_ALL_MAX = 5000;
+
+// How many rows each list draws, raised by its "Load more" button. Kept per repository so
+// a refresh (the watcher fires constantly during a reimport) does not collapse a list the
+// user just expanded, and a different repository starts from the default again.
+const _fileListLimit = { repo: null, staged: FILE_LIST_MAX_ROWS, unstaged: FILE_LIST_MAX_ROWS };
+function fileListLimit(staged) {
+  if (_fileListLimit.repo !== state.repo) {
+    _fileListLimit.repo = state.repo;
+    _fileListLimit.staged = _fileListLimit.unstaged = FILE_LIST_MAX_ROWS;
+  }
+  return _fileListLimit[staged ? 'staged' : 'unstaged'];
+}
 
 function renderFileList(container, files, staged) {
   container.innerHTML = '';
@@ -984,7 +999,8 @@ function renderFileList(container, files, staged) {
     container.innerHTML = `<li class="file-empty">${msg}</li>`;
     return;
   }
-  const shown = files.length > FILE_LIST_MAX_ROWS ? files.slice(0, FILE_LIST_MAX_ROWS) : files;
+  const limit = fileListLimit(staged);
+  const shown = files.length > limit ? files.slice(0, limit) : files;
   shown.forEach(f => {
     const key = (staged ? 'staged:' : 'unstaged:') + f.path;
     const isMulti = state.multiSelected.has(key);
@@ -1181,10 +1197,34 @@ function renderFileList(container, files, staged) {
   // Say plainly that the list is truncated and that the actions are not — a silently short
   // list would read as "those files are gone", which is the worst thing this panel could imply.
   if (shown.length < files.length) {
+    const rest = files.length - shown.length;
     const more = document.createElement('li');
-    more.className = 'file-empty';
-    more.textContent = `…and ${files.length - shown.length} more not shown. `
-      + `Filtering narrows the list; staging, discarding and Ctrl+A still apply to all ${files.length}.`;
+    more.className = 'file-empty file-list-more';
+    const note = document.createElement('div');
+    note.textContent = `Showing ${shown.length} of ${files.length}. `
+      + `Staging, discarding and Ctrl+A still apply to all ${files.length}.`;
+    const buttons = document.createElement('div');
+    buttons.className = 'file-list-more-buttons';
+    const grow = (to) => {
+      _fileListLimit[staged ? 'staged' : 'unstaged'] = to;
+      // Redrawing empties the list, which would throw the scroll position back up.
+      const scroller = container.closest('.changes-files') || container;
+      const top = scroller.scrollTop;
+      renderFileList(container, files, staged);
+      scroller.scrollTop = top;
+    };
+    const addBtn = (label, to) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mini-btn';
+      b.textContent = label;
+      b.onclick = (e) => { e.stopPropagation(); grow(to); };
+      buttons.appendChild(b);
+    };
+    const step = Math.min(FILE_LIST_MAX_ROWS, rest);
+    addBtn(`Load ${step} more`, shown.length + step);
+    if (rest > step && files.length <= FILE_LIST_SHOW_ALL_MAX) addBtn(`Show all ${files.length}`, files.length);
+    more.append(note, buttons);
     container.appendChild(more);
   }
 }

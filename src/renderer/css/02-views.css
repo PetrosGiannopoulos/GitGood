@@ -419,6 +419,15 @@
   text-align: center;
 }
 
+/* "Load more" under a Changes list longer than FILE_LIST_MAX_ROWS (05-conflict.js). */
+.file-list-more-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-style: normal;
+}
+
 /* Diff viewer */
 .changes-diff {
   display: flex;
